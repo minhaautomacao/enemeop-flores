@@ -1,24 +1,31 @@
 import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
 import { NextResponse, type NextRequest } from 'next/server';
 
 export async function POST(request: NextRequest) {
-  const formData  = await request.formData();
-  const email     = formData.get('email') as string;
-  const password  = formData.get('password') as string;
-  const cookieStore = await cookies();
+  const formData = await request.formData();
+  const email    = formData.get('email') as string;
+  const password = formData.get('password') as string;
+
+  const successResponse = NextResponse.redirect(new URL('/dashboard', request.url));
+  const errorResponse   = NextResponse.redirect(
+    new URL(`/login?error=${encodeURIComponent('E-mail ou senha incorretos')}`, request.url)
+  );
+
+  if (!email || !password) return errorResponse;
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() { return cookieStore.getAll(); },
+        getAll() {
+          return request.cookies.getAll();
+        },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         setAll(cookiesToSet: { name: string; value: string; options?: any }[]) {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options)
-          );
+          cookiesToSet.forEach(({ name, value, options }) => {
+            successResponse.cookies.set(name, value, options);
+          });
         },
       },
     }
@@ -26,11 +33,7 @@ export async function POST(request: NextRequest) {
 
   const { error } = await supabase.auth.signInWithPassword({ email, password });
 
-  if (error) {
-    return NextResponse.redirect(
-      new URL(`/login?error=${encodeURIComponent('E-mail ou senha incorretos')}`, request.url)
-    );
-  }
+  if (error) return errorResponse;
 
-  return NextResponse.redirect(new URL('/dashboard', request.url));
+  return successResponse;
 }

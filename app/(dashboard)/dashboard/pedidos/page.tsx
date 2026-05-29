@@ -42,15 +42,16 @@ const STATUS_FILTROS: { label: string; value: string }[] = [
 
 export default function PedidosPage() {
   return (
-    <div className="p-8 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div>
+      <header className="page-header">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Pedidos</h1>
-          <p className="mt-1 text-text-muted">Gerencie todos os pedidos de hoje e anteriores</p>
+          <h1 className="page-title">Pedidos</h1>
+          <p className="text-xs text-text-faint">Gerencie os pedidos de hoje e anteriores</p>
         </div>
         <button className="btn-gold">+ Novo pedido</button>
-      </div>
+      </header>
+
+    <div className="p-6 space-y-5">
 
       {/* Filtros rápidos */}
       <div className="flex gap-2 flex-wrap">
@@ -120,6 +121,7 @@ export default function PedidosPage() {
           </tbody>
         </table>
       </div>
+    </div>
     </div>
   );
 }

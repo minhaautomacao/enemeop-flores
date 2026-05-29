@@ -73,24 +73,22 @@ export default async function DashboardPage() {
   };
 
   return (
-    <div className="p-8 space-y-8">
-      {/* Header */}
-      <div className="flex items-start justify-between">
+    <div>
+      {/* Page header — estilo Bling */}
+      <header className="page-header">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">
-            {saudacao}, {primeiroNome}
-          </h1>
-          <p className="mt-1 text-text-muted">
+          <h1 className="page-title">{saudacao}, {primeiroNome}</h1>
+          <p className="text-xs text-text-faint capitalize">
             {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-status-success/30 bg-status-success/10 px-3 py-1 text-xs font-medium text-status-success">
-            <span className="h-1.5 w-1.5 rounded-full bg-status-success animate-pulse" />
-            Agente ativo
-          </span>
-        </div>
-      </div>
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-status-success/30 bg-status-success/10 px-3 py-1 text-xs font-medium text-status-success">
+          <span className="h-1.5 w-1.5 rounded-full bg-status-success animate-pulse" />
+          Agente ativo
+        </span>
+      </header>
+
+    <div className="p-6 space-y-6">
 
       {/* Stats */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -179,6 +177,7 @@ export default async function DashboardPage() {
           })}
         </div>
       </div>
+    </div>
     </div>
   );
 }

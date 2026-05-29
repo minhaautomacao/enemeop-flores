@@ -1,32 +1,33 @@
 import type { Metadata } from 'next';
+import { MessageCircle, CreditCard, Package, Mail, ChevronRight } from 'lucide-react';
 
 export const metadata: Metadata = { title: 'Configurações' };
 
 const INTEGRACOES = [
   {
     nome:    'WhatsApp (Evolution API)',
-    icon:    '💬',
+    Icon:    MessageCircle,
     desc:    'Envio e recebimento de mensagens automatizado',
     status:  'pendente',
     link:    '/dashboard/configuracoes/whatsapp',
   },
   {
     nome:    'Mercado Pago',
-    icon:    '💳',
+    Icon:    CreditCard,
     desc:    'Pagamentos via Pix, cartão e boleto',
     status:  'pendente',
     link:    '/dashboard/configuracoes/pagamentos',
   },
   {
     nome:    'Melhor Envio',
-    icon:    '📦',
+    Icon:    Package,
     desc:    'Cálculo de frete e geração de etiquetas',
     status:  'pendente',
     link:    '/dashboard/configuracoes/frete',
   },
   {
     nome:    'Resend (E-mail)',
-    icon:    '📧',
+    Icon:    Mail,
     desc:    'E-mails transacionais e notificações',
     status:  'pendente',
     link:    '/dashboard/configuracoes/email',
@@ -41,19 +42,27 @@ const HORARIOS = [
 
 export default function ConfiguracoesPage() {
   return (
-    <div className="p-8 space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-text-primary">Configurações</h1>
-        <p className="mt-1 text-text-muted">Integrações, horários e comportamento do agente IA</p>
-      </div>
+    <div>
+      <header className="page-header">
+        <div>
+          <h1 className="page-title">Configurações</h1>
+          <p className="text-xs text-text-faint">Integrações, horários e comportamento do agente IA</p>
+        </div>
+      </header>
+
+    <div className="p-6 space-y-7">
 
       {/* Integrações */}
       <section className="space-y-4">
         <h2 className="text-base font-semibold text-text-primary">Integrações</h2>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {INTEGRACOES.map((intg) => (
-            <a key={intg.nome} href={intg.link} className="card-hover flex items-start gap-4 cursor-pointer">
-              <span className="text-2xl">{intg.icon}</span>
+          {INTEGRACOES.map((intg) => {
+            const Icon = intg.Icon;
+            return (
+            <a key={intg.nome} href={intg.link} className="card-hover flex items-center gap-4 cursor-pointer">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gold/10 border border-gold/20">
+                <Icon className="w-5 h-5 text-gold" />
+              </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <p className="text-sm font-semibold text-text-primary">{intg.nome}</p>
@@ -63,9 +72,10 @@ export default function ConfiguracoesPage() {
                 </div>
                 <p className="mt-0.5 text-xs text-text-muted">{intg.desc}</p>
               </div>
-              <span className="text-text-faint text-sm">→</span>
+              <ChevronRight className="w-4 h-4 text-text-faint shrink-0" />
             </a>
-          ))}
+            );
+          })}
         </div>
       </section>
 
@@ -150,6 +160,7 @@ export default function ConfiguracoesPage() {
           ))}
         </div>
       </section>
+    </div>
     </div>
   );
 }

@@ -64,7 +64,7 @@ export function BrandPattern({ className = '' }: { className?: string }) {
           </g>
         </pattern>
       </defs>
-      <rect width="100%" height="100%" fill="url(#ef-pattern)" opacity="0.065"/>
+      <rect width="100%" height="100%" fill="url(#ef-pattern)" opacity="0.12"/>
     </svg>
   );
 }

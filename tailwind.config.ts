@@ -9,40 +9,44 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Identidade visual Enemeop Flores — fundo escuro + dourado
+        // Identidade visual Enemeop Flores — fundo escuro quente + dourado
         bg: {
-          base:    '#0F0A02',
-          surface: '#1A1208',
-          raised:  '#231A0C',
+          base:    '#0D0900',   // fundo mais profundo, próximo ao cartão físico
+          surface: '#181005',   // superfície de cards
+          raised:  '#211608',   // hover / inputs
         },
         gold: {
           DEFAULT: '#C9A84C',
-          light:   '#E8C97A',
-          subtle:  '#F5EDD6',
-          dim:     '#7A6530',
+          light:   '#E2C06E',   // hover states
+          subtle:  '#F5EDD6',   // texto sobre fundo escuro
+          dim:     '#7A6530',   // desabilitado
         },
         border: {
-          DEFAULT: '#3D3020',
-          strong:  '#5A4828',
+          DEFAULT: '#332614',   // borda base (um pouco mais visível)
+          strong:  '#50391A',   // borda em hover/foco
         },
         text: {
-          primary: '#F5EDD6',
-          muted:   '#A89070',
-          faint:   '#6B5A3E',
+          primary: '#F0E6C8',   // texto principal — creme quente
+          muted:   '#9C8160',   // texto secundário
+          faint:   '#5E4A2C',   // texto muito sutil / rótulos
         },
         status: {
-          success: '#4CAF7D',
+          success: '#52C97C',
           warning: '#E8A84C',
           error:   '#E85C4C',
-          info:    '#4C8CE8',
+          info:    '#6EB0FF',   // azul mais claro para destacar no fundo escuro
         },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
       },
       boxShadow: {
-        gold: '0 0 0 1px rgba(201,168,76,0.3)',
-        'gold-md': '0 4px 24px rgba(201,168,76,0.12)',
+        gold:    '0 0 0 1px rgba(201,168,76,0.25)',
+        'gold-md': '0 4px 32px rgba(201,168,76,0.10), 0 1px 4px rgba(0,0,0,0.4)',
+        'gold-lg': '0 8px 48px rgba(201,168,76,0.15), 0 2px 8px rgba(0,0,0,0.5)',
+      },
+      backgroundImage: {
+        'radial-[ellipse_at_center]': 'radial-gradient(ellipse at center, var(--tw-gradient-stops))',
       },
     },
   },

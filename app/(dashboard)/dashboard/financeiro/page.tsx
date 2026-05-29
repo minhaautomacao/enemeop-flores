@@ -22,12 +22,15 @@ const pctMeta    = Math.round((receitaMes / metaMensal) * 100);
 
 export default function FinanceiroPage() {
   return (
-    <div className="p-8 space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-text-primary">Financeiro</h1>
-        <p className="mt-1 text-text-muted">Receitas, despesas e fluxo de caixa</p>
-      </div>
+    <div>
+      <header className="page-header">
+        <div>
+          <h1 className="page-title">Financeiro</h1>
+          <p className="text-xs text-text-faint">Receitas, despesas e fluxo de caixa</p>
+        </div>
+      </header>
+
+    <div className="p-6 space-y-5">
 
       {/* Stats principais */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -120,6 +123,7 @@ export default function FinanceiroPage() {
           </tbody>
         </table>
       </div>
+    </div>
     </div>
   );
 }

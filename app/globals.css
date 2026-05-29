@@ -14,11 +14,12 @@
   body {
     @apply bg-bg-base text-text-primary antialiased;
     background-color: #0F0A02;
+    font-feature-settings: "cv11", "salt";
   }
 
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 5px;
+    height: 5px;
   }
   ::-webkit-scrollbar-track { background: #1A1208; }
   ::-webkit-scrollbar-thumb { background: #3D3020; border-radius: 3px; }
@@ -26,67 +27,78 @@
 }
 
 @layer components {
+  /* ── Botões ── */
   .btn-gold {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-gold px-4 py-2.5 text-sm font-semibold text-bg-base shadow-gold-md transition-all hover:bg-gold-light active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-gold px-4 py-2.5 text-sm font-semibold text-bg-base shadow-gold transition-all hover:bg-gold-light active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed;
   }
 
   .btn-outline {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-border-strong px-4 py-2.5 text-sm font-semibold text-text-primary transition-all hover:border-gold hover:text-gold active:scale-95;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-border-strong px-4 py-2.5 text-sm font-semibold text-text-primary transition-all hover:border-gold hover:text-gold active:scale-[0.97];
   }
 
   .btn-ghost {
     @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-text-muted transition-all hover:bg-bg-raised hover:text-text-primary;
   }
 
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-status-error/30 bg-status-error/10 px-4 py-2.5 text-sm font-semibold text-status-error transition-all hover:bg-status-error/20 active:scale-[0.97];
+  }
+
+  /* ── Cards ── */
   .card {
-    @apply rounded-xl border border-border bg-bg-surface p-6;
+    @apply rounded-xl border border-border bg-bg-surface p-5;
   }
 
   .card-hover {
-    @apply card transition-all hover:border-border-strong hover:shadow-gold-md;
+    @apply card transition-all hover:border-border-strong hover:shadow-gold-md cursor-pointer;
   }
 
+  /* ── Inputs ── */
   .input {
-    @apply block w-full rounded-lg border border-border bg-bg-raised px-3 py-2.5 text-sm text-text-primary placeholder:text-text-faint focus:border-gold focus:outline-none focus:ring-1 focus:ring-gold;
+    @apply block w-full rounded-lg border border-border bg-bg-raised px-3 py-2.5 text-sm text-text-primary placeholder:text-text-faint focus:border-gold focus:outline-none focus:ring-1 focus:ring-gold/40 transition-colors;
   }
 
+  /* ── Badges ── */
   .badge {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold;
   }
 
-  .badge-gold {
-    @apply badge bg-gold/20 text-gold-light;
-  }
+  .badge-gold    { @apply badge bg-gold/15 text-gold-light border border-gold/20; }
+  .badge-success { @apply badge bg-status-success/15 text-status-success border border-status-success/20; }
+  .badge-warning { @apply badge bg-status-warning/15 text-status-warning border border-status-warning/20; }
+  .badge-error   { @apply badge bg-status-error/15 text-status-error border border-status-error/20; }
+  .badge-info    { @apply badge bg-status-info/15 text-status-info border border-status-info/20; }
 
-  .badge-success {
-    @apply badge bg-status-success/20 text-status-success;
-  }
-
-  .badge-warning {
-    @apply badge bg-status-warning/20 text-status-warning;
-  }
-
-  .badge-error {
-    @apply badge bg-status-error/20 text-status-error;
-  }
-
-  .badge-info {
-    @apply badge bg-status-info/20 text-status-info;
-  }
-
+  /* ── Stat cards ── */
   .stat-card {
-    @apply card flex flex-col gap-1;
+    @apply card flex flex-col gap-1.5;
   }
 
+  /* ── Navegação sidebar ── */
   .nav-link {
     @apply flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-text-muted transition-all hover:bg-bg-raised hover:text-text-primary;
   }
 
   .nav-link-active {
-    @apply nav-link bg-gold/10 text-gold border border-gold/20;
+    @apply nav-link bg-gold/10 text-gold border border-gold/25;
   }
 
+  /* ── Tabela ── */
   .table-row-hover {
     @apply transition-colors hover:bg-bg-raised;
+  }
+
+  /* ── Page header (estilo Bling — barra superior por página) ── */
+  .page-header {
+    @apply sticky top-0 z-20 flex h-14 items-center justify-between border-b border-border bg-bg-base/80 backdrop-blur-md px-6;
+  }
+
+  .page-title {
+    @apply text-base font-semibold text-text-primary;
+  }
+
+  /* ── Divider ── */
+  .divider {
+    @apply border-t border-border;
   }
 }

@@ -34,15 +34,16 @@ export default function EntregasPage() {
   const total      = ENTREGAS.length;
 
   return (
-    <div className="p-8 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+    <div>
+      <header className="page-header">
         <div>
-          <h1 className="text-2xl font-bold text-text-primary">Entregas</h1>
-          <p className="mt-1 text-text-muted">Acompanhe as entregas do dia em tempo real</p>
+          <h1 className="page-title">Entregas</h1>
+          <p className="text-xs text-text-faint">Acompanhe as entregas do dia em tempo real</p>
         </div>
         <button className="btn-gold">Notificar todos</button>
-      </div>
+      </header>
+
+    <div className="p-6 space-y-5">
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -131,6 +132,7 @@ export default function EntregasPage() {
           </tbody>
         </table>
       </div>
+    </div>
     </div>
   );
 }

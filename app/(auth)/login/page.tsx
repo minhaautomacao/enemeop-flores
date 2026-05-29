@@ -1,9 +1,9 @@
 import type { Metadata } from 'next';
+import LoginForm from './login-form';
 
 export const metadata: Metadata = { title: 'Entrar' };
 
-export default function LoginPage({ searchParams }: { searchParams: { error?: string } }) {
-  const erro = searchParams?.error;
+export default function LoginPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg-base px-4">
       <div className="w-full max-w-sm space-y-8">
@@ -16,25 +16,7 @@ export default function LoginPage({ searchParams }: { searchParams: { error?: st
           <p className="mt-1 text-sm text-text-muted">Acesse o painel de gestão</p>
         </div>
 
-        {/* Form */}
-        <form className="space-y-4" action="/api/auth/login" method="POST">
-          <div>
-            <label className="block text-xs font-medium text-text-muted mb-1.5">E-mail</label>
-            <input type="email" name="email" required className="input" placeholder="seu@email.com" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-text-muted mb-1.5">Senha</label>
-            <input type="password" name="password" required className="input" placeholder="••••••••" />
-          </div>
-          {erro && (
-            <p className="rounded-lg border border-status-error/30 bg-status-error/10 px-3 py-2 text-xs text-status-error">
-              {erro}
-            </p>
-          )}
-          <button type="submit" className="btn-gold w-full mt-2">
-            Entrar
-          </button>
-        </form>
+        <LoginForm />
 
         <p className="text-center text-xs text-text-faint">
           Sistema exclusivo Enemeop Flores · Desde 1997

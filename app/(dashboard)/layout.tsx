@@ -62,13 +62,13 @@ export default async function DashboardLayout({ children }: { children: React.Re
             </p>
             <ul className="space-y-0.5">
               <li>
-                <Link href="/dashboard/configuracoes/agente" className="nav-link">
+                <Link href="/dashboard/configuracoes" className="nav-link">
                   <span className="text-base">🤖</span>
                   Agente IA
                 </Link>
               </li>
               <li>
-                <Link href="/dashboard/configuracoes/whatsapp" className="nav-link">
+                <Link href="/dashboard/configuracoes" className="nav-link">
                   <span className="text-base">💬</span>
                   WhatsApp
                 </Link>

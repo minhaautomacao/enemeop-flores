@@ -13,6 +13,7 @@
 
   body {
     @apply bg-bg-base text-text-primary antialiased;
+    background-color: #0F0A02;
   }
 
   ::-webkit-scrollbar {

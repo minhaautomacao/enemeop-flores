@@ -11,9 +11,9 @@ const config: Config = {
       colors: {
         // Identidade visual Enemeop Flores — fundo escuro + dourado
         bg: {
-          base:    '#1A1208',
-          surface: '#231A0C',
-          raised:  '#2D2210',
+          base:    '#0F0A02',
+          surface: '#1A1208',
+          raised:  '#231A0C',
         },
         gold: {
           DEFAULT: '#C9A84C',

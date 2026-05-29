@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-bg-base text-text-primary antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track { background: #1A1208; }
+  ::-webkit-scrollbar-thumb { background: #3D3020; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #5A4828; }
+}
+
+@layer components {
+  .btn-gold {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-gold px-4 py-2.5 text-sm font-semibold text-bg-base shadow-gold-md transition-all hover:bg-gold-light active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-outline {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-border-strong px-4 py-2.5 text-sm font-semibold text-text-primary transition-all hover:border-gold hover:text-gold active:scale-95;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-text-muted transition-all hover:bg-bg-raised hover:text-text-primary;
+  }
+
+  .card {
+    @apply rounded-xl border border-border bg-bg-surface p-6;
+  }
+
+  .card-hover {
+    @apply card transition-all hover:border-border-strong hover:shadow-gold-md;
+  }
+
+  .input {
+    @apply block w-full rounded-lg border border-border bg-bg-raised px-3 py-2.5 text-sm text-text-primary placeholder:text-text-faint focus:border-gold focus:outline-none focus:ring-1 focus:ring-gold;
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+
+  .badge-gold {
+    @apply badge bg-gold/20 text-gold-light;
+  }
+
+  .badge-success {
+    @apply badge bg-status-success/20 text-status-success;
+  }
+
+  .badge-warning {
+    @apply badge bg-status-warning/20 text-status-warning;
+  }
+
+  .badge-error {
+    @apply badge bg-status-error/20 text-status-error;
+  }
+
+  .badge-info {
+    @apply badge bg-status-info/20 text-status-info;
+  }
+
+  .stat-card {
+    @apply card flex flex-col gap-1;
+  }
+
+  .nav-link {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-text-muted transition-all hover:bg-bg-raised hover:text-text-primary;
+  }
+
+  .nav-link-active {
+    @apply nav-link bg-gold/10 text-gold border border-gold/20;
+  }
+
+  .table-row-hover {
+    @apply transition-colors hover:bg-bg-raised;
+  }
+}

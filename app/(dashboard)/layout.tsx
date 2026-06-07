@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, Bot, MessageCircle, LogOut } from 'lucide-react';
+import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, Bot, MessageCircle, LogOut, MessagesSquare } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
 import { iniciais } from '@/lib/utils';
 import { BrandPattern } from '@/components/brand-pattern';
@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: '/dashboard',               label: 'Visão Geral',    icon: LayoutDashboard },
   { href: '/dashboard/pedidos',       label: 'Pedidos',        icon: ClipboardList   },
   { href: '/dashboard/leads',         label: 'Clientes / CRM', icon: Users           },
+  { href: '/dashboard/conversas',     label: 'Conversas ao Vivo', icon: MessagesSquare },
   { href: '/dashboard/entregas',      label: 'Entregas',       icon: Truck           },
   { href: '/dashboard/financeiro',    label: 'Financeiro',     icon: BarChart3       },
   { href: '/dashboard/configuracoes', label: 'Configurações',  icon: Settings        },

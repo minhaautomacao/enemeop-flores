@@ -141,7 +141,7 @@ export default async function ConversasPage() {
                       <p className="text-xs text-text-muted truncate">{ultimaMensagem(c.historico)}</p>
                       {c.pedido_info && (
                         <p className="text-xs text-gold mt-1">
-                          🛒 {String(c.pedido_info['produto'] ?? '')} — R$ {c.pedido_info['valor']}
+                          🛒 {String(c.pedido_info['produto'] ?? '')} — R$ {String(c.pedido_info['valor'] ?? '')}
                         </p>
                       )}
                     </div>

@@ -63,53 +63,29 @@ export default async function DashboardPage() {
           ))}
         </div>
 
-        {/* Pedidos recentes + Acesso rápido */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-
-          <div className="card">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-base font-semibold text-text-primary">Pedidos recentes</h2>
-              <a href="/dashboard/pedidos" className="text-xs text-gold hover:text-gold-light transition-colors">Ver todos →</a>
-            </div>
-            {!pedidosRecentes || pedidosRecentes.length === 0 ? (
-              <div className="py-10 text-center">
-                <p className="text-text-muted text-sm">Nenhum pedido registrado ainda.</p>
-                <p className="text-text-faint text-xs mt-1">Os pedidos fechados pelo agente aparecerão aqui.</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {pedidosRecentes.map((p: Record<string, unknown>) => (
-                  <div key={String(p.id)} className="flex items-center justify-between rounded-lg border border-border p-3">
-                    <div>
-                      <p className="text-sm font-medium text-text-primary">{String(p.produto ?? '—')}</p>
-                      <p className="text-xs text-text-muted">{String(p.cliente_nome ?? '—')}</p>
-                    </div>
-                    <p className="text-sm font-semibold text-gold">R$ {Number(p.valor ?? 0).toFixed(2)}</p>
-                  </div>
-                ))}
-              </div>
-            )}
+        {/* Pedidos recentes */}
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base font-semibold text-text-primary">Pedidos recentes</h2>
           </div>
-
-          <div className="card">
-            <h2 className="text-base font-semibold text-text-primary mb-4">Acesso rápido</h2>
-            <div className="space-y-2">
-              {[
-                { label: 'Conversas ao Vivo', href: '/dashboard/conversas', desc: 'Acompanhe o agente Flor em tempo real' },
-                { label: 'Clientes / CRM',    href: '/dashboard/leads',     desc: 'Leads capturados pelo Instagram' },
-                { label: 'Pedidos',           href: '/dashboard/pedidos',   desc: 'Gestão de pedidos e status' },
-                { label: 'Configurações',     href: '/dashboard/configuracoes', desc: 'Integrações e agente IA' },
-              ].map((item) => (
-                <a key={item.href} href={item.href} className="flex items-center justify-between rounded-lg border border-border p-3 hover:border-gold/40 hover:bg-surface-hover transition-colors">
+          {!pedidosRecentes || pedidosRecentes.length === 0 ? (
+            <div className="py-10 text-center">
+              <p className="text-text-muted text-sm">Nenhum pedido registrado ainda.</p>
+              <p className="text-text-faint text-xs mt-1">Os pedidos fechados pelo agente aparecerão aqui.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {pedidosRecentes.map((p: Record<string, unknown>) => (
+                <div key={String(p.id)} className="flex items-center justify-between rounded-lg border border-border p-3">
                   <div>
-                    <p className="text-sm font-medium text-text-primary">{item.label}</p>
-                    <p className="text-xs text-text-faint">{item.desc}</p>
+                    <p className="text-sm font-medium text-text-primary">{String(p.produto ?? '—')}</p>
+                    <p className="text-xs text-text-muted">{String(p.cliente_nome ?? '—')}</p>
                   </div>
-                  <span className="text-gold text-xs">→</span>
-                </a>
+                  <p className="text-sm font-semibold text-gold">R$ {Number(p.valor ?? 0).toFixed(2)}</p>
+                </div>
               ))}
             </div>
-          </div>
+          )}
         </div>
 
         {/* Gráfico zerado — sem dados ainda */}

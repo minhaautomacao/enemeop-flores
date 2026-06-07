@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, Bot, MessageCircle, LogOut, MessagesSquare } from 'lucide-react';
+import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, LogOut, MessagesSquare } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
 import { iniciais } from '@/lib/utils';
 import { BrandPattern } from '@/components/brand-pattern';
@@ -82,23 +82,6 @@ export default async function DashboardLayout({ children }: { children: React.Re
             })}
           </ul>
 
-          <div className="mt-5 border-t border-border pt-3">
-            <p className="px-3 mb-1.5 text-[10px] font-semibold text-text-faint uppercase tracking-widest">Automação</p>
-            <ul className="space-y-0.5">
-              <li>
-                <Link href="/dashboard/configuracoes" className="nav-link">
-                  <Bot className="w-4 h-4 shrink-0" />
-                  Agente IA
-                </Link>
-              </li>
-              <li>
-                <Link href="/dashboard/configuracoes" className="nav-link">
-                  <MessageCircle className="w-4 h-4 shrink-0" />
-                  WhatsApp
-                </Link>
-              </li>
-            </ul>
-          </div>
         </nav>
 
         {/* Usuário + logout */}

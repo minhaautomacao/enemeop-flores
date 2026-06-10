@@ -9,44 +9,42 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Identidade visual Enemeop Flores — fundo escuro quente + dourado
+        // Identidade visual Enemeop Flores — fundo claro creme + dourado
         bg: {
-          base:    '#0D0900',   // fundo mais profundo, próximo ao cartão físico
-          surface: '#181005',   // superfície de cards
-          raised:  '#211608',   // hover / inputs
+          base:    '#FDFCF9',   // fundo principal — branco creme quente
+          surface: '#F7F4EE',   // cards e painéis
+          raised:  '#EEE9DF',   // hover / inputs
         },
         gold: {
-          DEFAULT: '#C9A84C',
-          light:   '#E2C06E',   // hover states
-          subtle:  '#F5EDD6',   // texto sobre fundo escuro
-          dim:     '#7A6530',   // desabilitado
+          DEFAULT: '#9E7A1E',   // dourado rico sobre fundo claro
+          light:   '#B8912A',   // hover
+          subtle:  '#F5EDD6',   // fundo sutil dourado
+          dim:     '#C9A84C',   // texto dourado decorativo
         },
         border: {
-          DEFAULT: '#332614',   // borda base (um pouco mais visível)
-          strong:  '#50391A',   // borda em hover/foco
+          DEFAULT: '#DDD6C8',   // borda base — quente
+          strong:  '#C4BAA8',   // borda em hover/foco
         },
         text: {
-          primary: '#F0E6C8',   // texto principal — creme quente
-          muted:   '#9C8160',   // texto secundário
-          faint:   '#5E4A2C',   // texto muito sutil / rótulos
+          primary: '#1C1208',   // quase preto — marrom muito escuro
+          muted:   '#6B5B45',   // texto secundário
+          faint:   '#A8967E',   // rótulos e placeholders
         },
         status: {
-          success: '#52C97C',
-          warning: '#E8A84C',
-          error:   '#E85C4C',
-          info:    '#6EB0FF',   // azul mais claro para destacar no fundo escuro
+          success: '#1E7A44',   // verde escuro natural
+          warning: '#A85E10',   // âmbar escuro
+          error:   '#9B2020',   // vermelho escuro
+          info:    '#1A5FA3',   // azul escuro
         },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
       },
       boxShadow: {
-        gold:    '0 0 0 1px rgba(201,168,76,0.25)',
-        'gold-md': '0 4px 32px rgba(201,168,76,0.10), 0 1px 4px rgba(0,0,0,0.4)',
-        'gold-lg': '0 8px 48px rgba(201,168,76,0.15), 0 2px 8px rgba(0,0,0,0.5)',
-      },
-      backgroundImage: {
-        'radial-[ellipse_at_center]': 'radial-gradient(ellipse at center, var(--tw-gradient-stops))',
+        gold:       '0 0 0 1px rgba(158,122,30,0.2)',
+        'gold-md':  '0 4px 24px rgba(158,122,30,0.08), 0 1px 4px rgba(0,0,0,0.06)',
+        'gold-lg':  '0 8px 40px rgba(158,122,30,0.12), 0 2px 8px rgba(0,0,0,0.08)',
+        card:       '0 1px 4px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04)',
       },
     },
   },

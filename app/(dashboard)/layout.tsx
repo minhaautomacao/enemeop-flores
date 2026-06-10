@@ -18,8 +18,8 @@ const NAV_ITEMS = [
 function EnumeopLogoMark({ size = 36 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="36" height="36" rx="9" fill="rgba(201,168,76,0.12)" stroke="rgba(201,168,76,0.35)" strokeWidth="0.75"/>
-      <g fill="#C9A84C">
+      <rect width="36" height="36" rx="9" fill="rgba(158,122,30,0.10)" stroke="rgba(158,122,30,0.30)" strokeWidth="0.75"/>
+      <g fill="#9E7A1E">
         <path d="M17,17 Q17,9 10,9 Q9,9 9,10 Q9,17 17,17 Z" opacity="0.95"/>
         <path d="M19,17 Q19,9 26,9 Q27,9 27,10 Q27,17 19,17 Z" opacity="0.85"/>
         <path d="M17,19 Q17,27 10,27 Q9,27 9,26 Q9,19 17,19 Z" opacity="0.85"/>
@@ -55,7 +55,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
           <EnumeopLogoMark size={36} />
           <div className="leading-tight">
             <p className="text-xs font-bold text-gold tracking-[0.18em]">ENEMEOP</p>
-            <p className="text-[9px] text-gold/40 tracking-[0.35em] font-semibold">FLORES</p>
+            <p className="text-[9px] text-text-faint tracking-[0.35em] font-semibold">FLORES</p>
           </div>
         </div>
 
@@ -79,7 +79,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
         <div className="relative border-t border-border p-3">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gold/20 border border-gold/30 text-xs font-bold text-gold">
+            <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gold-subtle border border-gold/25 text-xs font-bold text-gold">
               {iniciais(nomeUsuario)}
             </div>
             <div className="min-w-0 flex-1">

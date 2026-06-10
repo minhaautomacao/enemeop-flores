@@ -43,7 +43,7 @@ export default async function DashboardPage() {
             {new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' })}
           </p>
         </div>
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-status-success/30 bg-status-success/10 px-3 py-1 text-xs font-medium text-status-success">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-status-success/25 bg-status-success/8 px-3 py-1 text-xs font-medium text-status-success">
           <span className="h-1.5 w-1.5 rounded-full bg-status-success animate-pulse" />
           Agente ativo
         </span>

@@ -82,8 +82,8 @@ export default function ProducaoPage() {
             <p className="text-2xl font-bold text-text-primary tabular-nums">{ativos}</p>
             <p className="text-[10px] text-text-faint">em aberto</p>
           </div>
-          <Link href="/producao/status" className="btn-outline text-xs py-1.5 px-3">
-            Tela de Status
+          <Link href="/producao/status" target="_blank" rel="noopener noreferrer" className="btn-outline text-xs py-1.5 px-3">
+            Tela de Status ↗
           </Link>
         </div>
       </header>

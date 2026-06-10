@@ -50,7 +50,13 @@ export default function StatusPage() {
     return () => clearInterval(t)
   }, [])
 
-  const ativos   = MOCK.filter(p => !['entregue'].includes(p.status))
+  const ativos   = MOCK
+    .filter(p => !['entregue'].includes(p.status))
+    .sort((a, b) => {
+      if (a.prioridade && !b.prioridade) return -1
+      if (!a.prioridade && b.prioridade) return 1
+      return a.horario.localeCompare(b.horario)
+    })
   const prontos  = MOCK.filter(p => p.status === 'pronto').length
   const prep     = MOCK.filter(p => p.status === 'preparando').length
 

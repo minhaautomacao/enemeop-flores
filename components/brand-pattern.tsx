@@ -9,7 +9,7 @@ export function BrandPattern({ className = '' }: { className?: string }) {
     >
       <defs>
         <pattern id="ef-pattern" x="0" y="0" width="160" height="160" patternUnits="userSpaceOnUse">
-          <g fill="none" stroke="#9E7A1E" strokeWidth="0.9" strokeLinecap="round" strokeLinejoin="round">
+          <g fill="none" stroke="#C9A84C" strokeWidth="0.9" strokeLinecap="round" strokeLinejoin="round">
 
             {/* ── Row 1 ── */}
             {/* (20,20) Pétala teardrop */}
@@ -64,7 +64,7 @@ export function BrandPattern({ className = '' }: { className?: string }) {
           </g>
         </pattern>
       </defs>
-      <rect width="100%" height="100%" fill="url(#ef-pattern)" opacity="0.07"/>
+      <rect width="100%" height="100%" fill="url(#ef-pattern)" opacity="0.06"/>
     </svg>
   );
 }

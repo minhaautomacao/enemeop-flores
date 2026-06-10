@@ -3,6 +3,10 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { cleanEnv } from '@/lib/env';
 
 export async function middleware(request: NextRequest) {
+  if (request.nextUrl.pathname.startsWith('/producao')) {
+    return NextResponse.next()
+  }
+
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(

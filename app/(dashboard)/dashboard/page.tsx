@@ -19,7 +19,6 @@ export default async function DashboardPage() {
   const hora = new Date().getHours();
   const saudacao = hora < 12 ? 'Bom dia' : hora < 18 ? 'Boa tarde' : 'Boa noite';
 
-  // Dados reais do banco
   const hoje = new Date().toISOString().split('T')[0];
 
   const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }] = await Promise.all([
@@ -52,7 +51,6 @@ export default async function DashboardPage() {
 
       <div className="p-6 space-y-6">
 
-        {/* Stats reais */}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {stats.map((stat) => (
             <div key={stat.label} className="stat-card">
@@ -63,7 +61,6 @@ export default async function DashboardPage() {
           ))}
         </div>
 
-        {/* Pedidos recentes */}
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-base font-semibold text-text-primary">Pedidos recentes</h2>
@@ -88,7 +85,6 @@ export default async function DashboardPage() {
           )}
         </div>
 
-        {/* Gráfico zerado — sem dados ainda */}
         <div className="card">
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-base font-semibold text-text-primary">Vendas — últimos 7 dias</h2>

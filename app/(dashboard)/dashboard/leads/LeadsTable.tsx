@@ -1,20 +1,25 @@
 'use client';
 
 import { useState } from 'react';
+import { formatTempo } from '@/lib/utils';
 
-type Intencao = 'urgente' | 'alta' | 'media' | 'baixa' | 'desconhecida';
-
-const INTENCAO_LABEL: Record<Intencao, string> = {
+const INTENCAO_LABEL: Record<string, string> = {
   urgente:      'Urgente',
   alta:         'Alta',
+  pesquisando:  'Pesquisando',
+  recorrente:   'Recorrente',
+  corporativo:  'Corporativo',
   media:        'Média',
   baixa:        'Baixa',
   desconhecida: 'Desconhecida',
 };
 
-const INTENCAO_BADGE: Record<Intencao, string> = {
+const INTENCAO_BADGE: Record<string, string> = {
   urgente:      'badge-error',
   alta:         'badge-gold',
+  pesquisando:  'badge-info',
+  recorrente:   'badge-info',
+  corporativo:  'badge-info',
   media:        'badge-info',
   baixa:        'badge-info',
   desconhecida: 'badge-info',
@@ -49,7 +54,7 @@ export interface Lead {
   canal_id: string | null;
   telefone: string | null;
   email: string | null;
-  intencao: Intencao;
+  intencao: string;
   status: string;
   notas: string | null;
   mensagem_inicial: string | null;
@@ -59,21 +64,11 @@ export interface Lead {
   atualizado_em: string | null;
 }
 
-function formatTempo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return 'agora';
-  if (min < 60) return `${min} min`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.floor(h / 24)} dias`;
-}
-
 function formatHora(iso: string): string {
   return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
 
-function ExpandirConversa({ leadId, canalId }: { leadId: string; canalId: string | null }) {
+function ExpandirConversa({ canalId }: { canalId: string | null }) {
   const [aberto, setAberto] = useState(false);
   const [historico, setHistorico] = useState<Mensagem[]>([]);
   const [carregando, setCarregando] = useState(false);
@@ -84,9 +79,8 @@ function ExpandirConversa({ leadId, canalId }: { leadId: string; canalId: string
 
     setCarregando(true);
     try {
-      const res = await fetch(
-        `https://ebeapnydeiwuewxatuuw.supabase.co/functions/v1/conversas-enemeop?canal_id=${canalId}`,
-      );
+      const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const res = await fetch(`${base}/functions/v1/conversas-enemeop?canal_id=${canalId}`);
       if (res.ok) {
         const data = await res.json();
         const conv = (data.conversas ?? []).find(
@@ -94,7 +88,9 @@ function ExpandirConversa({ leadId, canalId }: { leadId: string; canalId: string
         );
         setHistorico(conv?.historico ?? []);
       }
-    } catch { /* ignora */ }
+    } catch {
+      // fetch falhou silenciosamente — sem conversa
+    }
     setCarregando(false);
     setAberto(true);
   }
@@ -126,14 +122,14 @@ function ExpandirConversa({ leadId, canalId }: { leadId: string; canalId: string
               {historico.map((msg, i) => (
                 <div
                   key={i}
-                  className={`px-3 py-2.5 ${msg.role === 'assistant' ? 'bg-surface-hover' : ''}`}
+                  className={`px-3 py-2.5 ${msg.role === 'assistant' ? 'bg-bg-surface' : ''}`}
                 >
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-[10px] font-semibold uppercase tracking-wide">
                       {msg.role === 'user' ? (
-                        <span className="text-status-info">👤 Cliente</span>
+                        <span className="text-status-info">Cliente</span>
                       ) : (
-                        <span className="text-gold">🤖 Flor (IA)</span>
+                        <span className="text-gold">Flora (IA)</span>
                       )}
                     </span>
                     <span className="text-[10px] text-text-faint">{formatHora(msg.ts)}</span>
@@ -181,7 +177,7 @@ export function LeadsTable({ leads }: { leads: Lead[] }) {
                 {l.fase_conversa && (
                   <p className="text-[10px] text-gold mt-0.5">{FASE_LABEL[l.fase_conversa] ?? l.fase_conversa}</p>
                 )}
-                <ExpandirConversa leadId={l.id} canalId={l.canal_id} />
+                <ExpandirConversa canalId={l.canal_id} />
               </td>
 
               <td className="px-4 py-3">

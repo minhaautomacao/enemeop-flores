@@ -1,7 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-
-const cleanEnv = (v: string | undefined) => v?.replace(/^﻿/, '').trim() ?? '';
+import { cleanEnv } from '@/lib/env';
 
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });

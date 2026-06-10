@@ -19,15 +19,10 @@ function EnumeopLogoMark({ size = 36 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect width="36" height="36" rx="9" fill="rgba(201,168,76,0.12)" stroke="rgba(201,168,76,0.35)" strokeWidth="0.75"/>
-      {/* 4-petal logo mark */}
       <g fill="#C9A84C">
-        {/* top-left petal */}
         <path d="M17,17 Q17,9 10,9 Q9,9 9,10 Q9,17 17,17 Z" opacity="0.95"/>
-        {/* top-right petal */}
         <path d="M19,17 Q19,9 26,9 Q27,9 27,10 Q27,17 19,17 Z" opacity="0.85"/>
-        {/* bottom-left petal */}
         <path d="M17,19 Q17,27 10,27 Q9,27 9,26 Q9,19 17,19 Z" opacity="0.85"/>
-        {/* bottom-right petal */}
         <path d="M19,19 Q19,27 26,27 Q27,27 27,26 Q27,19 19,19 Z" opacity="0.95"/>
       </g>
     </svg>
@@ -56,7 +51,6 @@ export default async function DashboardLayout({ children }: { children: React.Re
       <aside className="fixed inset-y-0 left-0 z-10 flex w-60 flex-col border-r border-border bg-bg-surface overflow-hidden">
         <BrandPattern className="absolute inset-0 h-full w-full" />
 
-        {/* Logo */}
         <div className="relative flex h-16 items-center gap-3 border-b border-border px-4">
           <EnumeopLogoMark size={36} />
           <div className="leading-tight">
@@ -65,7 +59,6 @@ export default async function DashboardLayout({ children }: { children: React.Re
           </div>
         </div>
 
-        {/* Navegação principal */}
         <nav className="relative flex-1 overflow-y-auto px-2 py-3">
           <p className="px-3 mb-1.5 text-[10px] font-semibold text-text-faint uppercase tracking-widest">Gestão</p>
           <ul className="space-y-0.5">
@@ -84,7 +77,6 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
         </nav>
 
-        {/* Usuário + logout */}
         <div className="relative border-t border-border p-3">
           <div className="flex items-center gap-2.5">
             <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gold/20 border border-gold/30 text-xs font-bold text-gold">
@@ -103,7 +95,6 @@ export default async function DashboardLayout({ children }: { children: React.Re
         </div>
       </aside>
 
-      {/* Conteúdo principal com padrão de fundo */}
       <main className="ml-60 flex-1 min-w-0 relative">
         <BrandPattern className="fixed left-60 top-0 right-0 bottom-0" />
         <div className="relative z-10">

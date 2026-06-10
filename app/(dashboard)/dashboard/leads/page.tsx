@@ -1,10 +1,12 @@
 import type { Metadata } from 'next';
 import { LeadsTable, type Lead } from './LeadsTable';
+import { formatTempo } from '@/lib/utils';
 
 export const metadata: Metadata = { title: 'Clientes / CRM' };
 
 async function getLeads(): Promise<Lead[]> {
-  const url = 'https://ebeapnydeiwuewxatuuw.supabase.co/functions/v1/leads-enemeop?limit=100';
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const url = `${base}/functions/v1/leads-enemeop?limit=100`;
   try {
     const res = await fetch(url, { next: { revalidate: 15 } });
     if (!res.ok) return [];
@@ -15,22 +17,11 @@ async function getLeads(): Promise<Lead[]> {
   }
 }
 
-function formatTempo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return 'agora';
-  if (min < 60) return `${min} min`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.floor(h / 24)} dias`;
-}
-
 export default async function LeadsPage() {
   const leads = await getLeads();
 
-  const urgentes  = leads.filter(l => l.intencao === 'urgente').length;
-  const altas     = leads.filter(l => l.intencao === 'alta').length;
-  const comNome   = leads.filter(l => !!(l.nome_exibido ?? l.nome)).length;
+  const urgentes = leads.filter(l => l.intencao === 'urgente').length;
+  const comNome  = leads.filter(l => !!(l.nome_exibido ?? l.nome)).length;
 
   return (
     <div>
@@ -48,8 +39,8 @@ export default async function LeadsPage() {
           {[
             { label: 'Total leads',   valor: leads.length, cor: 'text-text-primary' },
             { label: 'Urgentes',      valor: urgentes,     cor: 'text-status-error' },
-            { label: 'Alta intenção', valor: altas,        cor: 'text-gold' },
             { label: 'Com nome',      valor: comNome,      cor: 'text-status-success' },
+            { label: 'Último',        valor: leads[0] ? formatTempo(leads[0].criado_em) : '—', cor: 'text-gold' },
           ].map((s) => (
             <div key={s.label} className="stat-card">
               <p className="text-xs text-text-muted uppercase tracking-wide">{s.label}</p>

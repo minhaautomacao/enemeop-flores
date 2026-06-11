@@ -5,6 +5,7 @@
       "name": "enemeop-flores",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
+      "cwd": "C:\\Users\\carlo\\Projetos Minha Automacao\\enemeop-flores",
       "port": 3000
     }
   ]

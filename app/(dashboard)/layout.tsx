@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, LogOut, MessagesSquare } from 'lucide-react';
+import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, LogOut, MessagesSquare, MonitorPlay, CalendarPlus } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
 import { iniciais } from '@/lib/utils';
 import { BrandPattern } from '@/components/brand-pattern';
@@ -59,6 +59,19 @@ export default async function DashboardLayout({ children }: { children: React.Re
             })}
           </ul>
         </nav>
+
+        {/* Botões de ação rápida */}
+        <div className="relative px-2 pb-3 space-y-2">
+          <p className="px-3 mb-1.5 text-[10px] font-semibold text-text-faint uppercase tracking-widest">Ações Rápidas</p>
+          <Link href="/producao/producao" className="flex flex-col items-center justify-center gap-1.5 w-full rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 transition-all py-4 text-gold group">
+            <MonitorPlay className="w-6 h-6" />
+            <span className="text-xs font-semibold text-center leading-tight">Tela de<br/>Produção</span>
+          </Link>
+          <Link href="/dashboard/encomendas" className="flex flex-col items-center justify-center gap-1.5 w-full rounded-lg border border-border bg-bg-raised hover:border-gold/40 hover:bg-gold/10 hover:text-gold transition-all py-4 text-text-muted group">
+            <CalendarPlus className="w-6 h-6" />
+            <span className="text-xs font-semibold text-center leading-tight">Nova<br/>Encomenda</span>
+          </Link>
+        </div>
 
         {/* Usuário */}
         <div className="relative border-t border-border p-3">

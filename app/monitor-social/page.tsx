@@ -73,24 +73,29 @@ export default function MonitorSocialPage() {
   const [pulso, setPulso]         = useState(false);
 
   const fetchDados = useCallback(async () => {
+    let algumSucesso = false;
     try {
-      const [rLeads, rConv] = await Promise.all([
-        fetch(`${FABRICA_URL}/functions/v1/leads-enemeop?limit=300`),
-        fetch(`${FABRICA_URL}/functions/v1/conversas-enemeop?limit=30`),
-      ]);
+      const rLeads = await fetch(`${FABRICA_URL}/functions/v1/leads-enemeop?limit=300`);
       if (rLeads.ok) {
         const j = await rLeads.json();
         setLeads(j.leads ?? []);
+        algumSucesso = true;
       }
+    } catch { /* leads offline */ }
+
+    try {
+      const rConv = await fetch(`${FABRICA_URL}/functions/v1/conversas-enemeop?limit=30`);
       if (rConv.ok) {
         const j = await rConv.json();
         setConversas((j.conversas ?? j.leads ?? []).slice(0, 30));
+        algumSucesso = true;
       }
-      setOnline(true);
+    } catch { /* conversas offline */ }
+
+    setOnline(algumSucesso);
+    if (algumSucesso) {
       setLastUpdate(new Date());
       setPulso(p => !p);
-    } catch {
-      setOnline(false);
     }
   }, []);
 

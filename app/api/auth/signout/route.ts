@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     {
       cookies: {
         getAll() { return cookieStore.getAll(); },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: { name: string; value: string; options?: Record<string, unknown> }[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
             try { cookieStore.set(name, value, options); } catch { /* ignorado */ }
           });

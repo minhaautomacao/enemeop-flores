@@ -4,9 +4,10 @@ import { formatTempo } from '@/lib/utils';
 
 export const metadata: Metadata = { title: 'Clientes / CRM' };
 
+const FABRICA_URL = process.env.NEXT_PUBLIC_FABRICA_URL ?? 'https://ebeapnydeiwuewxatuuw.supabase.co';
+
 async function getLeads(): Promise<Lead[]> {
-  const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const url = `${base}/functions/v1/leads-enemeop?limit=100`;
+  const url = `${FABRICA_URL}/functions/v1/leads-enemeop?limit=100`;
   try {
     const res = await fetch(url, { next: { revalidate: 15 } });
     if (!res.ok) return [];

@@ -68,6 +68,8 @@ function formatHora(iso: string): string {
   return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
 
+const FABRICA_URL = process.env.NEXT_PUBLIC_FABRICA_URL ?? 'https://ebeapnydeiwuewxatuuw.supabase.co';
+
 function ExpandirConversa({ canalId }: { canalId: string | null }) {
   const [aberto, setAberto] = useState(false);
   const [historico, setHistorico] = useState<Mensagem[]>([]);
@@ -79,8 +81,7 @@ function ExpandirConversa({ canalId }: { canalId: string | null }) {
 
     setCarregando(true);
     try {
-      const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const res = await fetch(`${base}/functions/v1/conversas-enemeop?canal_id=${canalId}`);
+      const res = await fetch(`${FABRICA_URL}/functions/v1/conversas-enemeop?canal_id=${canalId}`);
       if (res.ok) {
         const data = await res.json();
         const conv = (data.conversas ?? []).find(

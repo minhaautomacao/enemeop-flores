@@ -9,42 +9,42 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Identidade visual Enemeop Flores — navy escuro + dourado
+        // Identidade visual Enemeop Flores — fundo claro creme + dourado
         bg: {
-          base:    '#0F1826',   // navy profundo — fundo principal
-          surface: '#162035',   // navy médio — cards e painéis
-          raised:  '#1E2D47',   // navy claro — hover / inputs
+          base:    '#FDFCF9',   // fundo principal — branco creme quente
+          surface: '#F7F4EE',   // cards e painéis
+          raised:  '#EEE9DF',   // hover / inputs
         },
         gold: {
-          DEFAULT: '#C9A84C',   // dourado exato do logo
-          light:   '#DFC06E',   // hover
-          subtle:  '#2A2210',   // fundo sutil dourado sobre navy
-          dim:     '#7A6530',   // desabilitado
+          DEFAULT: '#9E7A1E',   // dourado rico sobre fundo claro
+          light:   '#B8912A',   // hover
+          subtle:  '#F5EDD6',   // fundo sutil dourado
+          dim:     '#C9A84C',   // texto dourado decorativo
         },
         border: {
-          DEFAULT: '#1E2D47',   // borda base navy
-          strong:  '#2D4166',   // borda em hover/foco
+          DEFAULT: '#DDD6C8',   // borda base — quente
+          strong:  '#C4BAA8',   // borda em hover/foco
         },
         text: {
-          primary: '#EDE8DA',   // creme quente — leitura sobre navy
-          muted:   '#8A9BB8',   // texto secundário azul-acinzentado
-          faint:   '#4A5E7A',   // rótulos muito sutis
+          primary: '#1C1208',   // quase preto — marrom muito escuro
+          muted:   '#6B5B45',   // texto secundário
+          faint:   '#A8967E',   // rótulos e placeholders
         },
         status: {
-          success: '#4DC98A',
-          warning: '#E8A84C',
-          error:   '#E85C4C',
-          info:    '#6EB0FF',
+          success: '#1E7A44',
+          warning: '#A85E10',
+          error:   '#9B2020',
+          info:    '#1A5FA3',
         },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
       },
       boxShadow: {
-        gold:       '0 0 0 1px rgba(201,168,76,0.25)',
-        'gold-md':  '0 4px 32px rgba(201,168,76,0.10), 0 1px 4px rgba(0,0,0,0.4)',
-        'gold-lg':  '0 8px 48px rgba(201,168,76,0.15), 0 2px 8px rgba(0,0,0,0.5)',
-        card:       '0 1px 4px rgba(0,0,0,0.3)',
+        gold:       '0 0 0 1px rgba(158,122,30,0.2)',
+        'gold-md':  '0 4px 24px rgba(158,122,30,0.08), 0 1px 4px rgba(0,0,0,0.06)',
+        'gold-lg':  '0 8px 40px rgba(158,122,30,0.12), 0 2px 8px rgba(0,0,0,0.08)',
+        card:       '0 1px 4px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04)',
       },
     },
   },

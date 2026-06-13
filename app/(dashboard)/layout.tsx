@@ -66,7 +66,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
           {/* Tela de Pedidos — abre em nova aba para monitor de produção */}
           <a
-            href="/producao/producao"
+            href="/producao"
             target="_blank"
             rel="noopener noreferrer"
             className="flex flex-col items-center justify-center gap-1.5 w-full rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 transition-all py-4 text-gold"

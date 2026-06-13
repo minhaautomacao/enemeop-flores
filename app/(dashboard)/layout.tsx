@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, LogOut, MessagesSquare, MonitorPlay, CalendarPlus } from 'lucide-react';
+import { LayoutDashboard, ClipboardList, Users, Truck, BarChart3, Settings, LogOut, MessagesSquare, MonitorPlay, BarChart2 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
 import { iniciais } from '@/lib/utils';
 import { BrandPattern } from '@/components/brand-pattern';
@@ -75,14 +75,16 @@ export default async function DashboardLayout({ children }: { children: React.Re
             <span className="text-xs font-semibold text-center leading-tight">Tela de<br/>Pedidos ↗</span>
           </a>
 
-          {/* Segundo botão — tela a definir */}
-          <Link
-            href="/dashboard/encomendas"
+          {/* Monitor Social — abre em nova aba */}
+          <a
+            href="/monitor-social"
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex flex-col items-center justify-center gap-1.5 w-full rounded-lg border border-border bg-bg-raised hover:border-gold/40 hover:bg-gold/10 hover:text-gold transition-all py-4 text-text-muted"
           >
-            <CalendarPlus className="w-6 h-6" />
-            <span className="text-xs font-semibold text-center leading-tight">Nova<br/>Encomenda</span>
-          </Link>
+            <BarChart2 className="w-6 h-6" />
+            <span className="text-xs font-semibold text-center leading-tight">Monitor<br/>Social ↗</span>
+          </a>
         </div>
 
         {/* Usuário */}

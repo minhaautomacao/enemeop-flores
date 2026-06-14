@@ -22,7 +22,7 @@ interface Pedido {
   valor: number
 }
 
-// Fotos simuladas do catálogo Enemeop Flores (emojis como placeholder visual)
+// Fotos reais do catálogo Enemeop Flores via Unsplash
 const MOCK: Pedido[] = [
   {
     num: 20240613001, produto: 'Kit Maternidade Girassóis',
@@ -30,7 +30,8 @@ const MOCK: Pedido[] = [
     horario: '10:30', bairro: 'Cambuci', canal: 'WhatsApp',
     status: 'novo', prioridade: true,
     transportadora: 'Motoboy Rápido SP',
-    foto: '🌻', valor: 290,
+    foto: 'https://images.unsplash.com/photo-1597848212624-a19eb35e2651?w=120&h=120&fit=crop&auto=format',
+    valor: 290,
   },
   {
     num: 20240613002, produto: 'Buquê Premium 24 Rosas Vermelhas',
@@ -38,7 +39,8 @@ const MOCK: Pedido[] = [
     horario: '11:00', bairro: 'Mooca', canal: 'Instagram',
     status: 'novo', prioridade: false,
     transportadora: 'Retirada na loja',
-    foto: '🌹', valor: 320,
+    foto: 'https://images.unsplash.com/photo-1561181286-d3fee7d55364?w=120&h=120&fit=crop&auto=format',
+    valor: 320,
   },
   {
     num: 20240613003, produto: 'Arranjo Corporativo Médio — Lírios',
@@ -46,7 +48,8 @@ const MOCK: Pedido[] = [
     horario: '14:00', bairro: 'V. Mariana', canal: 'Site',
     status: 'confirmado', prioridade: false,
     transportadora: 'Transportadora Flores & Cia',
-    foto: '🌷', valor: 480,
+    foto: 'https://images.unsplash.com/photo-1490750967868-88df5691cc08?w=120&h=120&fit=crop&auto=format',
+    valor: 480,
   },
   {
     num: 20240613004, produto: 'Orquídea Phalaenopsis + Cartão',
@@ -54,7 +57,8 @@ const MOCK: Pedido[] = [
     horario: '14:30', bairro: 'Saúde', canal: 'WhatsApp',
     status: 'preparando', prioridade: false,
     transportadora: 'Motoboy Rápido SP',
-    foto: '🪷', valor: 140,
+    foto: 'https://images.unsplash.com/photo-1610397648930-477b8c7f0943?w=120&h=120&fit=crop&auto=format',
+    valor: 140,
   },
   {
     num: 20240613005, produto: 'Arranjo Corporativo Pequeno',
@@ -62,7 +66,8 @@ const MOCK: Pedido[] = [
     horario: '15:00', bairro: 'V. Mariana', canal: 'Site',
     status: 'preparando', prioridade: false,
     transportadora: 'Transportadora Flores & Cia',
-    foto: '💐', valor: 220,
+    foto: 'https://images.unsplash.com/photo-1487530811015-780fb8a8e88e?w=120&h=120&fit=crop&auto=format',
+    valor: 220,
   },
   {
     num: 20240613006, produto: 'Flores do Campo Misto — Vaso G',
@@ -70,7 +75,8 @@ const MOCK: Pedido[] = [
     horario: '15:30', bairro: 'Ipiranga', canal: 'WhatsApp',
     status: 'pronto', prioridade: true,
     transportadora: 'Motoboy Rápido SP',
-    foto: '🌼', valor: 175,
+    foto: 'https://images.unsplash.com/photo-1490397967560-7f4f2da4e2f7?w=120&h=120&fit=crop&auto=format',
+    valor: 175,
   },
   {
     num: 20240613007, produto: 'Buquê de Rosas Vermelhas 12un',
@@ -78,7 +84,8 @@ const MOCK: Pedido[] = [
     horario: '16:00', bairro: 'Aclimação', canal: 'WhatsApp',
     status: 'saiu', prioridade: false,
     transportadora: 'Motoboy Rápido SP',
-    foto: '🌹', valor: 180,
+    foto: 'https://images.unsplash.com/photo-1518709766631-a6a7f45921c3?w=120&h=120&fit=crop&auto=format',
+    valor: 180,
   },
 ]
 

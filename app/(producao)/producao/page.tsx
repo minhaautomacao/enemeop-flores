@@ -19,7 +19,7 @@ interface CatalogoProduto {
 }
 
 interface Pedido {
-  num: number
+  seq: number
   produto: string
   foto_url: string
   preco: number
@@ -34,14 +34,15 @@ interface Pedido {
 }
 
 // Pedidos simulados — produto_codigo referencia o catálogo real do Supabase
+// seq = número sequencial do dia (0001, 0002 …) exibido em destaque no card
 const PEDIDOS_MOCK = [
-  { num: 20240613001, produto_codigo: '011', cliente: 'Família Melo',     telefone: '(11) 98765-4321', horario: '10:30', bairro: 'Cambuci',    canal: 'WhatsApp', status: 'novo'       as StatusPedido, prioridade: true,  transportadora: 'Motoboy Rápido SP' },
-  { num: 20240613002, produto_codigo: '034', cliente: 'Carla Torres',     telefone: '(11) 91234-5678', horario: '11:00', bairro: 'Mooca',      canal: 'Instagram', status: 'novo'      as StatusPedido, prioridade: false, transportadora: 'Retirada na loja' },
-  { num: 20240613003, produto_codigo: '093', cliente: 'Empresa ABC Ltda.',telefone: '(11) 3344-5566',  horario: '14:00', bairro: 'V. Mariana', canal: 'Site',      status: 'confirmado' as StatusPedido, prioridade: false, transportadora: 'Transportadora Flores & Cia' },
-  { num: 20240613004, produto_codigo: '083', cliente: 'Pedro Souza',      telefone: '(11) 97777-8888', horario: '14:30', bairro: 'Saúde',      canal: 'WhatsApp', status: 'preparando' as StatusPedido, prioridade: false, transportadora: 'Motoboy Rápido SP' },
-  { num: 20240613005, produto_codigo: '012', cliente: 'Empresa XYZ S.A.',telefone: '(11) 2233-4455',  horario: '15:00', bairro: 'V. Mariana', canal: 'Site',      status: 'preparando' as StatusPedido, prioridade: false, transportadora: 'Transportadora Flores & Cia' },
-  { num: 20240613006, produto_codigo: 'M08', cliente: 'Ana Lima',         telefone: '(11) 95555-1234', horario: '15:30', bairro: 'Ipiranga',   canal: 'WhatsApp', status: 'pronto'     as StatusPedido, prioridade: true,  transportadora: 'Motoboy Rápido SP' },
-  { num: 20240613007, produto_codigo: '033', cliente: 'João Neto',        telefone: '(11) 98888-7777', horario: '16:00', bairro: 'Aclimação', canal: 'WhatsApp', status: 'saiu'       as StatusPedido, prioridade: false, transportadora: 'Motoboy Rápido SP' },
+  { seq: 1, produto_codigo: '011', cliente: 'Família Melo',     telefone: '(11) 98765-4321', horario: '10:30', bairro: 'Cambuci',    canal: 'WhatsApp',  status: 'novo'       as StatusPedido, prioridade: true,  transportadora: 'Motoboy Rápido SP' },
+  { seq: 2, produto_codigo: '034', cliente: 'Carla Torres',     telefone: '(11) 91234-5678', horario: '11:00', bairro: 'Mooca',      canal: 'Instagram', status: 'novo'       as StatusPedido, prioridade: false, transportadora: 'Retirada na loja' },
+  { seq: 3, produto_codigo: '093', cliente: 'Empresa ABC Ltda.',telefone: '(11) 3344-5566',  horario: '14:00', bairro: 'V. Mariana', canal: 'Site',      status: 'confirmado' as StatusPedido, prioridade: false, transportadora: 'Transportadora Flores & Cia' },
+  { seq: 4, produto_codigo: '083', cliente: 'Pedro Souza',      telefone: '(11) 97777-8888', horario: '14:30', bairro: 'Saúde',      canal: 'WhatsApp',  status: 'preparando' as StatusPedido, prioridade: false, transportadora: 'Motoboy Rápido SP' },
+  { seq: 5, produto_codigo: '012', cliente: 'Empresa XYZ S.A.',telefone: '(11) 2233-4455',  horario: '15:00', bairro: 'V. Mariana', canal: 'Site',      status: 'preparando' as StatusPedido, prioridade: false, transportadora: 'Transportadora Flores & Cia' },
+  { seq: 6, produto_codigo: 'M08', cliente: 'Ana Lima',         telefone: '(11) 95555-1234', horario: '15:30', bairro: 'Ipiranga',   canal: 'WhatsApp',  status: 'pronto'     as StatusPedido, prioridade: true,  transportadora: 'Motoboy Rápido SP' },
+  { seq: 7, produto_codigo: '033', cliente: 'João Neto',        telefone: '(11) 98888-7777', horario: '16:00', bairro: 'Aclimação', canal: 'WhatsApp',  status: 'saiu'       as StatusPedido, prioridade: false, transportadora: 'Motoboy Rápido SP' },
 ]
 
 const COLUNAS: { key: StatusPedido; label: string; cor: string; fundo: string }[] = [
@@ -79,7 +80,7 @@ export default function ProducaoPage() {
       const montados: Pedido[] = PEDIDOS_MOCK.map(pm => {
         const prod = mapa[pm.produto_codigo]
         return {
-          num: pm.num,
+          seq: pm.seq,
           produto: prod?.nome ?? pm.produto_codigo,
           foto_url: prod?.foto_url ?? '',
           preco: prod?.preco ?? 0,
@@ -98,7 +99,7 @@ export default function ProducaoPage() {
     } catch {
       // fallback: monta sem foto
       setPedidos(PEDIDOS_MOCK.map(pm => ({
-        num: pm.num, produto: pm.produto_codigo, foto_url: '', preco: 0,
+        seq: pm.seq, produto: pm.produto_codigo, foto_url: '', preco: 0,
         cliente: pm.cliente, telefone: pm.telefone, horario: pm.horario,
         bairro: pm.bairro, canal: pm.canal, status: pm.status,
         prioridade: pm.prioridade, transportadora: pm.transportadora,
@@ -177,15 +178,16 @@ export default function ProducaoPage() {
                   )}
                   {lista.map((p) => (
                     <div
-                      key={p.num}
+                      key={p.seq}
                       className={`rounded-xl border overflow-hidden ${
-                        p.prioridade ? 'border-amber-500/40 ring-1 ring-amber-500/20' : 'border-white/10'
+                        p.prioridade ? 'border-amber-500/50 ring-1 ring-amber-500/20' : 'border-white/10'
                       }`}
                     >
-                      {/* Foto + número */}
-                      <div className={`flex items-center gap-3 px-3 pt-3 pb-2 ${p.prioridade ? 'bg-amber-500/10' : 'bg-white/5'}`}>
+                      {/* Topo: foto + número grande + nome do produto */}
+                      <div className={`flex gap-3 p-3 ${p.prioridade ? 'bg-amber-500/10' : 'bg-white/5'}`}>
+
                         {/* Foto real do catálogo */}
-                        <div className="w-14 h-14 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-white/10">
+                        <div className="w-20 h-20 shrink-0 rounded-xl overflow-hidden border border-white/10 bg-white/10">
                           {p.foto_url ? (
                             <img
                               src={p.foto_url}
@@ -194,55 +196,61 @@ export default function ProducaoPage() {
                               referrerPolicy="no-referrer"
                             />
                           ) : (
-                            <div className="w-full h-full flex items-center justify-center text-white/20 text-xs">
-                              🌸
-                            </div>
+                            <div className="w-full h-full flex items-center justify-center text-2xl">🌸</div>
                           )}
                         </div>
-                        {/* Número e produto */}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5 mb-0.5">
-                            <span className="font-mono text-[11px] font-bold text-amber-400 tracking-tight">
-                              #{p.num}
-                            </span>
-                            {p.prioridade && (
-                              <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 text-[9px] font-black text-amber-400 uppercase tracking-widest">
-                                URGENTE
-                              </span>
-                            )}
+
+                        {/* Número grande + produto */}
+                        <div className="flex-1 min-w-0 flex flex-col justify-between">
+                          <div>
+                            {/* Número do pedido — destaque máximo */}
+                            <div className="flex items-baseline gap-2 leading-none mb-1">
+                              <span className="text-[10px] font-semibold text-white/30 uppercase tracking-widest">Pedido</span>
+                              {p.prioridade && (
+                                <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 text-[8px] font-black text-amber-400 uppercase tracking-widest">
+                                  URGENTE
+                                </span>
+                              )}
+                            </div>
+                            <p className="font-mono font-black text-amber-400 leading-none" style={{ fontSize: '2rem' }}>
+                              #{String(p.seq).padStart(4, '0')}
+                            </p>
                           </div>
-                          <p className="text-sm font-semibold text-white leading-tight line-clamp-2">{p.produto}</p>
-                          <p className="text-[11px] text-amber-400 font-bold mt-0.5">R$ {p.preco.toFixed(2)}</p>
+                          {/* Nome do produto */}
+                          <div>
+                            <p className="text-xs font-semibold text-white leading-snug line-clamp-2">{p.produto}</p>
+                            <p className="text-[11px] text-amber-400/80 font-bold mt-0.5">R$ {p.preco.toFixed(2)}</p>
+                          </div>
                         </div>
                       </div>
 
-                      {/* Cliente */}
-                      <div className="px-3 py-2 space-y-1.5 bg-[#1a1a1a]">
+                      {/* Meio: cliente + transportadora */}
+                      <div className="px-3 py-2.5 bg-[#1a1a1a] space-y-2">
+                        {/* Nome do cliente em destaque */}
                         <div>
-                          <p className="text-[9px] font-semibold text-white/30 uppercase tracking-widest mb-0.5">Cliente</p>
+                          <p className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">Cliente</p>
                           <p className="text-sm font-bold text-white">{p.cliente}</p>
                           <p className="text-[10px] text-white/40">{p.telefone}</p>
                         </div>
                         {/* Transportadora */}
-                        <div className="flex items-center gap-1.5 bg-white/5 rounded-lg px-2 py-1.5">
-                          <Truck className="w-3 h-3 text-white/40 shrink-0" />
+                        <div className="flex items-center gap-2 bg-white/5 rounded-lg px-2.5 py-1.5">
+                          <Truck className="w-3.5 h-3.5 text-white/40 shrink-0" />
                           <div className="min-w-0">
-                            <p className="text-[9px] font-semibold text-white/30 uppercase tracking-widest leading-none">Transportadora</p>
-                            <p className="text-[10px] font-semibold text-white/70 truncate">{p.transportadora}</p>
+                            <p className="text-[9px] font-semibold text-white/25 uppercase tracking-widest leading-none">Transportadora</p>
+                            <p className="text-[11px] font-semibold text-white/70 truncate">{p.transportadora}</p>
                           </div>
                         </div>
                       </div>
 
-                      {/* Rodapé */}
+                      {/* Rodapé: canal, bairro, horário */}
                       <div className="flex items-center justify-between px-3 py-2 bg-[#161616] border-t border-white/5">
                         <div className="flex items-center gap-1.5">
-                          <span className="text-[9px] font-semibold text-white/30 uppercase tracking-widest">via</span>
+                          <span className="text-[9px] text-white/25 uppercase tracking-widest">via</span>
                           <span className="text-[10px] text-white/50">{p.canal}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
+                          <span className="text-white/15">·</span>
                           <span className="text-[10px] text-white/40">{p.bairro}</span>
-                          <span className="text-sm font-bold text-white tabular-nums">{p.horario}</span>
                         </div>
+                        <span className="text-sm font-bold text-white tabular-nums">{p.horario}</span>
                       </div>
                     </div>
                   ))}

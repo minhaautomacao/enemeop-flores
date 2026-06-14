@@ -22,70 +22,77 @@ interface Pedido {
   valor: number
 }
 
-// Fotos reais do catálogo Enemeop Flores via Unsplash
+// Fotos reais do catálogo enemeopflores.com.br
 const MOCK: Pedido[] = [
   {
-    num: 20240613001, produto: 'Kit Maternidade Girassóis',
+    num: 20240613001,
+    produto: '011 – Arranjo de Girassol no Vaso (Kit Maternidade)',
     cliente: 'Família Melo', telefone: '(11) 98765-4321',
     horario: '10:30', bairro: 'Cambuci', canal: 'WhatsApp',
     status: 'novo', prioridade: true,
     transportadora: 'Motoboy Rápido SP',
-    foto: 'https://images.unsplash.com/photo-1597848212624-a19eb35e2651?w=120&h=120&fit=crop&auto=format',
-    valor: 290,
+    foto: 'https://www.enemeopflores.com.br/wp-content/uploads/2024/11/33741b9c-4f4c-4043-8214-791d12924bd2-300x300.jpeg',
+    valor: 135,
   },
   {
-    num: 20240613002, produto: 'Buquê Premium 24 Rosas Vermelhas',
+    num: 20240613002,
+    produto: '034 – Buquê de 24 Rosas Vermelhas',
     cliente: 'Carla Torres', telefone: '(11) 91234-5678',
     horario: '11:00', bairro: 'Mooca', canal: 'Instagram',
     status: 'novo', prioridade: false,
     transportadora: 'Retirada na loja',
-    foto: 'https://images.unsplash.com/photo-1561181286-d3fee7d55364?w=120&h=120&fit=crop&auto=format',
-    valor: 320,
+    foto: 'https://www.enemeopflores.com.br/wp-content/uploads/2026/04/7a22d073-f342-43d9-9ef4-dfa31d95f865-300x300.jpeg',
+    valor: 560,
   },
   {
-    num: 20240613003, produto: 'Arranjo Corporativo Médio — Lírios',
+    num: 20240613003,
+    produto: '093 – Buquê com Lírios Rosa',
     cliente: 'Empresa ABC Ltda.', telefone: '(11) 3344-5566',
     horario: '14:00', bairro: 'V. Mariana', canal: 'Site',
     status: 'confirmado', prioridade: false,
     transportadora: 'Transportadora Flores & Cia',
-    foto: 'https://images.unsplash.com/photo-1490750967868-88df5691cc08?w=120&h=120&fit=crop&auto=format',
-    valor: 480,
+    foto: 'https://www.enemeopflores.com.br/wp-content/uploads/2026/06/e035f2ac-9a3a-49ea-b62a-6be7e896d455-300x300.webp',
+    valor: 395,
   },
   {
-    num: 20240613004, produto: 'Orquídea Phalaenopsis + Cartão',
+    num: 20240613004,
+    produto: '083 – Orquídea Branca Phalaenópsis 1 haste',
     cliente: 'Pedro Souza', telefone: '(11) 97777-8888',
     horario: '14:30', bairro: 'Saúde', canal: 'WhatsApp',
     status: 'preparando', prioridade: false,
     transportadora: 'Motoboy Rápido SP',
-    foto: 'https://images.unsplash.com/photo-1610397648930-477b8c7f0943?w=120&h=120&fit=crop&auto=format',
-    valor: 140,
+    foto: 'https://www.enemeopflores.com.br/wp-content/uploads/2025/02/212debcf-342c-4ddd-907e-680085ad4c75-300x300.jpeg',
+    valor: 170,
   },
   {
-    num: 20240613005, produto: 'Arranjo Corporativo Pequeno',
+    num: 20240613005,
+    produto: '012 – Arranjo Orquídeas Brancas (Frente única)',
     cliente: 'Empresa XYZ S.A.', telefone: '(11) 2233-4455',
     horario: '15:00', bairro: 'V. Mariana', canal: 'Site',
     status: 'preparando', prioridade: false,
     transportadora: 'Transportadora Flores & Cia',
-    foto: 'https://images.unsplash.com/photo-1487530811015-780fb8a8e88e?w=120&h=120&fit=crop&auto=format',
-    valor: 220,
+    foto: 'https://www.enemeopflores.com.br/wp-content/uploads/2025/02/6d59cd94-51dc-4350-9448-9d38e2795828-300x300.jpeg',
+    valor: 225,
   },
   {
-    num: 20240613006, produto: 'Flores do Campo Misto — Vaso G',
+    num: 20240613006,
+    produto: 'Mod.08 – Arranjo Mix Flores do Campo',
     cliente: 'Ana Lima', telefone: '(11) 95555-1234',
     horario: '15:30', bairro: 'Ipiranga', canal: 'WhatsApp',
     status: 'pronto', prioridade: true,
     transportadora: 'Motoboy Rápido SP',
-    foto: 'https://images.unsplash.com/photo-1490397967560-7f4f2da4e2f7?w=120&h=120&fit=crop&auto=format',
-    valor: 175,
+    foto: 'https://www.enemeopflores.com.br/wp-content/uploads/2024/04/e42fa228-f459-48c8-acbf-a5a81be342d2-300x300.jpeg',
+    valor: 145,
   },
   {
-    num: 20240613007, produto: 'Buquê de Rosas Vermelhas 12un',
+    num: 20240613007,
+    produto: '033 – Buquê de 12 Rosas Vermelhas',
     cliente: 'João Neto', telefone: '(11) 98888-7777',
     horario: '16:00', bairro: 'Aclimação', canal: 'WhatsApp',
     status: 'saiu', prioridade: false,
     transportadora: 'Motoboy Rápido SP',
-    foto: 'https://images.unsplash.com/photo-1518709766631-a6a7f45921c3?w=120&h=120&fit=crop&auto=format',
-    valor: 180,
+    foto: 'https://www.enemeopflores.com.br/wp-content/uploads/2025/04/3f91918b-c229-4c67-945f-d1d68665d1d3-300x300.jpeg',
+    valor: 280,
   },
 ]
 
@@ -179,8 +186,8 @@ export default function ProducaoPage() {
                     {/* Foto + número do pedido */}
                     <div className={`flex items-center gap-3 px-3 pt-3 pb-2 ${p.prioridade ? 'bg-amber-500/10' : 'bg-white/5'}`}>
                       {/* Foto do produto */}
-                      <div className="w-14 h-14 shrink-0 rounded-lg bg-white/10 border border-white/10 flex items-center justify-center text-3xl">
-                        {p.foto}
+                      <div className="w-14 h-14 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-white/10">
+                        <img src={p.foto} alt={p.produto} className="w-full h-full object-cover" />
                       </div>
                       {/* Número e produto */}
                       <div className="flex-1 min-w-0">

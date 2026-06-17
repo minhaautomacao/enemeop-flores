@@ -22,6 +22,7 @@ export type Database = {
           nome?: string | null;
           cargo?: string | null;
         };
+        Relationships: [];
       };
       pedidos: {
         Row: {
@@ -34,11 +35,33 @@ export type Database = {
           horario_entrega: string | null;
           bairro: string | null;
           canal: string;
+          obs: string | null;
           criado_em: string;
           atualizado_em: string;
         };
-        Insert: Omit<Database['public']['Tables']['pedidos']['Row'], 'id' | 'criado_em' | 'atualizado_em'>;
-        Update: Partial<Database['public']['Tables']['pedidos']['Insert']>;
+        Insert: {
+          cliente_nome: string;
+          cliente_telefone: string;
+          produto: string;
+          valor?: number;
+          status?: 'novo' | 'confirmado' | 'preparando' | 'saiu' | 'entregue' | 'cancelado';
+          horario_entrega?: string | null;
+          bairro?: string | null;
+          canal?: string;
+          obs?: string | null;
+        };
+        Update: {
+          cliente_nome?: string;
+          cliente_telefone?: string;
+          produto?: string;
+          valor?: number;
+          status?: 'novo' | 'confirmado' | 'preparando' | 'saiu' | 'entregue' | 'cancelado';
+          horario_entrega?: string | null;
+          bairro?: string | null;
+          canal?: string;
+          obs?: string | null;
+        };
+        Relationships: [];
       };
       leads: {
         Row: {
@@ -52,8 +75,25 @@ export type Database = {
           ltv: number;
           criado_em: string;
         };
-        Insert: Omit<Database['public']['Tables']['leads']['Row'], 'id' | 'criado_em'>;
-        Update: Partial<Database['public']['Tables']['leads']['Insert']>;
+        Insert: {
+          nome?: string | null;
+          telefone: string;
+          canal?: string;
+          intencao?: 'urgente' | 'pesquisando' | 'recorrente' | 'corporativo' | null;
+          ultimo_contato?: string;
+          total_pedidos?: number;
+          ltv?: number;
+        };
+        Update: {
+          nome?: string | null;
+          telefone?: string;
+          canal?: string;
+          intencao?: 'urgente' | 'pesquisando' | 'recorrente' | 'corporativo' | null;
+          ultimo_contato?: string;
+          total_pedidos?: number;
+          ltv?: number;
+        };
+        Relationships: [];
       };
     };
     Views: Record<string, never>;
@@ -62,8 +102,8 @@ export type Database = {
   };
 };
 
-export type Profile = Database['public']['Tables']['profiles']['Row'];
-export type Pedido  = Database['public']['Tables']['pedidos']['Row'];
-export type Lead    = Database['public']['Tables']['leads']['Row'];
+export type Profile      = Database['public']['Tables']['profiles']['Row'];
+export type Pedido       = Database['public']['Tables']['pedidos']['Row'];
+export type Lead         = Database['public']['Tables']['leads']['Row'];
 export type StatusPedido = Pedido['status'];
 export type Intencao     = NonNullable<Lead['intencao']>;

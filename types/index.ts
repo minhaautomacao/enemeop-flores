@@ -22,7 +22,7 @@ export type Database = {
           nome?: string | null;
           cargo?: string | null;
         };
-        Relationships: [];
+        Relationships: never[];
       };
       pedidos: {
         Row: {
@@ -61,7 +61,7 @@ export type Database = {
           canal?: string;
           obs?: string | null;
         };
-        Relationships: [];
+        Relationships: never[];
       };
       leads: {
         Row: {
@@ -93,7 +93,7 @@ export type Database = {
           total_pedidos?: number;
           ltv?: number;
         };
-        Relationships: [];
+        Relationships: never[];
       };
     };
     Views: Record<string, never>;

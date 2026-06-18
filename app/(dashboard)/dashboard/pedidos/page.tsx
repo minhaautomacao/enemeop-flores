@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useTransition } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { NovoPedidoModal } from './NovoPedidoModal';
+import { atualizarStatusPedido } from '@/app/actions/pedidos';
 import type { Pedido, StatusPedido } from '@/types';
 
 const STATUS_LABEL: Record<StatusPedido, string> = {
@@ -23,6 +24,13 @@ const STATUS_BADGE: Record<StatusPedido, string> = {
   cancelado:  'badge-error',
 };
 
+const PROXIMO_STATUS_LABEL: Partial<Record<StatusPedido, string>> = {
+  novo:       'Confirmar',
+  confirmado: 'Preparar',
+  preparando: 'Saiu',
+  saiu:       'Entregue',
+};
+
 const STATUS_FILTROS: { label: string; value: string }[] = [
   { label: 'Todos',       value: 'todos'      },
   { label: 'Novos',       value: 'novo'       },
@@ -38,6 +46,8 @@ export default function PedidosPage() {
   const [filtro, setFiltro]           = useState('todos');
   const [busca, setBusca]             = useState('');
   const [modalAberto, setModalAberto] = useState(false);
+  const [isPending, startTransition]  = useTransition();
+  const [atualizando, setAtualizando] = useState<string | null>(null);
 
   const carregarPedidos = useCallback(async () => {
     const supabase = createClient();
@@ -141,7 +151,22 @@ export default function PedidosPage() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
-                      <button className="btn-ghost py-1 px-2 text-xs">Ver</button>
+                      {PROXIMO_STATUS_LABEL[p.status] && (
+                        <button
+                          disabled={isPending && atualizando === p.id}
+                          onClick={() => {
+                            setAtualizando(p.id);
+                            startTransition(async () => {
+                              await atualizarStatusPedido(p.id, p.status);
+                              await carregarPedidos();
+                              setAtualizando(null);
+                            });
+                          }}
+                          className="btn-gold py-1 px-2 text-xs disabled:opacity-50"
+                        >
+                          {isPending && atualizando === p.id ? '…' : PROXIMO_STATUS_LABEL[p.status]}
+                        </button>
+                      )}
                       <a
                         href={`https://wa.me/55${p.cliente_telefone.replace(/\D/g, '')}`}
                         target="_blank"

@@ -21,17 +21,22 @@ export default async function DashboardPage() {
 
   const hoje = new Date().toISOString().split('T')[0];
 
-  const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }] = await Promise.all([
+  const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }, { data: pedidosPagos }, { count: entregasHoje }] = await Promise.all([
     supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
     supabase.from('leads').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
     supabase.from('pedidos').select('id, produto, status, cliente_nome, valor, criado_em').order('criado_em', { ascending: false }).limit(5),
+    supabase.from('pedidos').select('valor').gte('criado_em', hoje).in('status', ['confirmado', 'saiu', 'entregue']),
+    supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje).in('status', ['saiu', 'entregue']),
   ]);
 
+  const receitaHoje = (pedidosPagos ?? []).reduce((s, p) => s + Number(p.valor ?? 0), 0);
+  const receitaFmt = receitaHoje.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+
   const stats = [
-    { label: 'Pedidos hoje',   valor: String(pedidosHoje ?? 0),    sub: 'registrados hoje',        cor: 'text-gold' },
-    { label: 'Receita do dia', valor: 'R$ 0',                       sub: 'nenhum pedido pago ainda', cor: 'text-status-success' },
-    { label: 'Entregas',       valor: '0',                          sub: 'nenhuma entrega hoje',    cor: 'text-status-info' },
-    { label: 'Novos clientes', valor: String(novosClientes ?? 0),   sub: 'capturados hoje',         cor: 'text-gold-light' },
+    { label: 'Pedidos hoje',   valor: String(pedidosHoje ?? 0),         sub: 'registrados hoje',     cor: 'text-gold' },
+    { label: 'Receita do dia', valor: `R$ ${receitaFmt}`,               sub: 'pedidos confirmados',  cor: 'text-status-success' },
+    { label: 'Entregas',       valor: String(entregasHoje ?? 0),         sub: 'saíram ou entregues',  cor: 'text-status-info' },
+    { label: 'Novos clientes', valor: String(novosClientes ?? 0),        sub: 'capturados hoje',      cor: 'text-gold-light' },
   ];
 
   return (

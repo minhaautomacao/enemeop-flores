@@ -21,15 +21,16 @@ export default async function DashboardPage() {
 
   const hoje = new Date().toISOString().split('T')[0];
 
-  const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }, { data: pedidosPagos }, { count: entregasHoje }] = await Promise.all([
+  const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }, { count: entregasHoje }] = await Promise.all([
     supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
     supabase.from('leads').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
     supabase.from('pedidos').select('id, produto, status, cliente_nome, valor, criado_em').order('criado_em', { ascending: false }).limit(5),
-    supabase.from('pedidos').select('valor').gte('criado_em', hoje).in('status', ['confirmado', 'saiu', 'entregue']),
     supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje).in('status', ['saiu', 'entregue']),
   ]);
 
-  const receitaHoje = (pedidosPagos ?? []).reduce((s, p) => s + Number(p.valor ?? 0), 0);
+  const { data: pedidosPagosRaw } = await supabase
+    .from('pedidos').select('valor').gte('criado_em', hoje).in('status', ['confirmado', 'saiu', 'entregue']);
+  const receitaHoje = ((pedidosPagosRaw ?? []) as { valor: number }[]).reduce((s, p) => s + Number(p.valor ?? 0), 0);
   const receitaFmt = receitaHoje.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
 
   const stats = [

@@ -25,14 +25,16 @@ export default async function EntregasPage() {
   const supabase = await createClient();
   const hoje = new Date().toISOString().split('T')[0];
 
-  const { data: pedidos } = await supabase
+  type EntregaRow = { id: string; produto: string; cliente_nome: string; cliente_telefone: string; bairro: string | null; horario_entrega: string | null; canal: string; status: string; criado_em: string };
+
+  const { data: pedidosRaw } = await supabase
     .from('pedidos')
     .select('id, produto, cliente_nome, cliente_telefone, bairro, horario_entrega, canal, status, criado_em')
     .gte('criado_em', hoje)
     .in('status', ['confirmado', 'preparando', 'saiu', 'entregue'])
     .order('horario_entrega', { ascending: true });
 
-  const lista = pedidos ?? [];
+  const lista = (pedidosRaw ?? []) as EntregaRow[];
   const emRota     = lista.filter(p => p.status === 'saiu').length;
   const aguardando = lista.filter(p => p.status === 'confirmado' || p.status === 'preparando').length;
   const entregues  = lista.filter(p => p.status === 'entregue').length;

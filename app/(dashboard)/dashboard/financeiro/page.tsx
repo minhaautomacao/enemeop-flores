@@ -11,24 +11,28 @@ export default async function FinanceiroPage() {
   const hoje = new Date().toISOString().split('T')[0];
   const inicioMes = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
 
-  const [{ data: pedidosHoje }, { data: pedidosMes }] = await Promise.all([
-    supabase
-      .from('pedidos')
-      .select('id, produto, cliente_nome, valor, canal, status, criado_em')
-      .gte('criado_em', hoje)
-      .order('criado_em', { ascending: false }),
-    supabase
-      .from('pedidos')
-      .select('valor, canal, status')
-      .gte('criado_em', inicioMes),
-  ]);
+  type PedidoRow = { id: string; produto: string; cliente_nome: string; valor: number; canal: string; status: string; criado_em: string };
+  type PedidoMesRow = { valor: number; canal: string; status: string };
 
-  const pagosHoje = (pedidosHoje ?? []).filter(p =>
+  const { data: pedidosHojeRaw } = await supabase
+    .from('pedidos')
+    .select('id, produto, cliente_nome, valor, canal, status, criado_em')
+    .gte('criado_em', hoje)
+    .order('criado_em', { ascending: false });
+  const pedidosHoje = (pedidosHojeRaw ?? []) as PedidoRow[];
+
+  const { data: pedidosMesRaw } = await supabase
+    .from('pedidos')
+    .select('valor, canal, status')
+    .gte('criado_em', inicioMes);
+  const pedidosMes = (pedidosMesRaw ?? []) as PedidoMesRow[];
+
+  const pagosHoje = pedidosHoje.filter(p =>
     p.status === 'entregue' || p.status === 'saiu' || p.status === 'confirmado'
   );
   const receitaHoje = pagosHoje.reduce((s, p) => s + Number(p.valor ?? 0), 0);
 
-  const pagos = (pedidosMes ?? []).filter(p =>
+  const pagos = pedidosMes.filter(p =>
     p.status === 'entregue' || p.status === 'saiu' || p.status === 'confirmado'
   );
   const receitaMes = pagos.reduce((s, p) => s + Number(p.valor ?? 0), 0);

@@ -96,8 +96,8 @@ export type Database = {
         Relationships: never[];
       };
     };
-    Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Views: Record<never, never>;
+    Functions: Record<never, never>;
     Enums: Record<string, never>;
   };
 };

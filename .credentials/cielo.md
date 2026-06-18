@@ -16,8 +16,8 @@ Email: cieloecommerce@cielo.com.br
 
 | Chave | Valor |
 |---|---|
-| client_id | (aguardando Cielo) |
-| client_secret | (aguardando Cielo) |
+| client_id (Merchant ID) | 429e98c5-43c9-4f9d-954f-890d98c1e865 |
+| client_secret (Merchant Key) | (enviado por email para enemeopflores@gmail.com — ver email gerado em 2026-06-18) |
 
 ## Como cadastrar no painel da Fábrica
 
@@ -37,7 +37,7 @@ Use o endpoint `/api/credentials/encrypt` do painel da Fábrica.
 
 - Cartão de Crédito: Visa, Master, Elo, Amex, Diners, Discover, Aura ✅
 - Cartão de Débito: Visa, Master, Elo ✅
-- Pix: ⚠️ DESABILITADO — habilitar em minhaconta2.cielo.com.br → E-commerce → Link de Pagamento → Configurações
+- Pix: ✅ HABILITADO (2026-06-18)
 
 ## URLs de notificação (configurar após integração)
 

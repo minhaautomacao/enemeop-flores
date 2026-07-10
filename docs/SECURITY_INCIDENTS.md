@@ -174,3 +174,30 @@ uma vulnerabilidade de acesso ativa (RLS desabilitado) em produção.
 - **Status:** pendente de decisão
 - **Teste de encerramento:** `gh repo view <repo> --json visibility`
   deve retornar `PRIVATE`
+
+## Incidente 10 — App Secret e Instagram App Secret em memória versionada (achado durante a execução final)
+
+- **Identificação:** `.claude/memory/estado-atual.md` (Fábrica) — seção
+  "Credenciais Meta obtidas", continha App Secret e Instagram App Secret
+  reais em texto puro. **Diferente do Incidente 5** (que é sobre um
+  arquivo local não versionado) — este arquivo **estava rastreado no
+  Git**, não foi pego pelas varreduras anteriores porque os padrões de
+  busca usados (JWT, connection string, prefixo `EAA`) não cobrem um
+  hash hexadecimal de 32 caracteres
+- **Data aproximada:** commit `6a99daa`, 2026-05-23 — a exposição mais
+  antiga encontrada em toda a auditoria (~48 dias em repositório público
+  até a contenção)
+- **Repositório:** AI-SaaS-Factory-Fabrica-de-Saas (público)
+- **Classificação:** S1
+- **Impacto:** mesmo impacto do Incidente 5 (geração de tokens de acesso
+  Meta válidos), mas com exposição pública confirmada, não só local
+- **Contenção realizada:** o bloco inteiro com o conteúdo específico da
+  Enemeop (incluindo as duas credenciais) foi removido do arquivo durante
+  a execução final da reorganização (2026-07-10) — arquivo passou a
+  conter só o protocolo genérico da Fábrica
+- **Rotação necessária:** sim — mesmo plano do Incidente 5, com urgência
+  maior pelo tempo de exposição
+- **Status:** conteúdo removido da árvore de trabalho; **permanece no
+  histórico Git** até rotação + limpeza de histórico (não executadas)
+- **Teste de encerramento:** mesmo do Incidente 5 — confirmar rotação no
+  painel Meta for Developers

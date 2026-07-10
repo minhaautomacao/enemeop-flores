@@ -6,6 +6,43 @@
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { type Fase, classificarIntencao, intencaoInterrompeFluxo, mensagemForaDeEscopo, mensagemTransferencia } from '../_shared/funil.ts';
+
+/**
+ * Portão de escopo compartilhado (ver ../_shared/funil.ts e
+ * orchestrator/src/lib/sdr.ts) — mesma regra determinística usada no
+ * Instagram/Messenger (webhook-meta) e no orchestrator Node: assunto fora
+ * do escopo comercial, reclamação e pedido de atendimento humano são
+ * interceptados ANTES de qualquer chamada de IA, com resposta fixa.
+ *
+ * Integração DELIBERADAMENTE PARCIAL nesta função: diferente do
+ * webhook-meta (reescrito para usar avancarFunil por completo), aqui só o
+ * classificador de intenção foi conectado. O restante do fluxo (fases em
+ * português livre, extração via IA, formulário de endereço, cotação de
+ * frete e geração de pagamento) já é bem mais "real" do que o webhook-meta
+ * estava antes desta integração — já chama agente-logistica e
+ * agente-financeiro de verdade — e reescrevê-lo por completo sem poder
+ * rodar `deno check`/testes neste ambiente (sem Deno CLI disponível) seria
+ * arriscar quebrar um fluxo em produção sem forma de verificar. Ver
+ * relatório final da integração do funil comercial para os detalhes desta
+ * decisão e o que falta para a unificação completa.
+ *
+ * Mapa aproximado das fases livres desta função para o Fase determinístico
+ * do funil, usado só para dar contexto de fase ao classificador (ex.: não
+ * deixar uma palavra fora de escopo interromper uma compra em andamento).
+ */
+const FASE_LIVRE_PARA_FUNIL: Record<string, Fase> = {
+  descoberta: 'qualificacao',
+  interesse: 'recomendacao',
+  proposta: 'produto_selecionado',
+  confirmar_produto: 'produto_selecionado',
+  coletando_endereco: 'aguardando_endereco',
+  confirmando_dados: 'aguardando_endereco',
+  confirmar_frete: 'calculando_frete',
+  aguardando_pagamento: 'aguardando_pagamento',
+  concluido: 'pedido_criado',
+  perdido: 'transferido_humano',
+};
 
 const SERVICE_KEY   = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_URL  = Deno.env.get('SUPABASE_URL') ?? '';
@@ -489,6 +526,26 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, te
   const historico = [...(conversa.historico ?? []), novaMsg].slice(-20);
   const nomeCliente = conversa.nome_cliente ?? nomeRemetente ?? null;
   let pedidoInfo = conversa.pedido_info ?? {};
+
+  // Portão de escopo compartilhado — roda ANTES de qualquer chamada de IA.
+  // Ver comentário no topo do arquivo: integração deliberadamente parcial.
+  const faseFunil = FASE_LIVRE_PARA_FUNIL[conversa.fase] ?? 'qualificacao';
+  const intencao = classificarIntencao(texto, faseFunil);
+  if (intencaoInterrompeFluxo(intencao)) {
+    const respostaFixa = intencao === 'assunto_fora_escopo' ? mensagemForaDeEscopo() : mensagemTransferencia();
+    await enviarTexto(phone, respostaFixa);
+    const msgAssistenteGate: Mensagem = { role: 'assistant', content: respostaFixa, ts: new Date().toISOString() };
+    await salvarConversa(conversa.id, {
+      historico: [...historico, msgAssistenteGate].slice(-20),
+      // fase e pedido_info NÃO mudam para assunto_fora_escopo — cliente pode
+      // retomar a compra na próxima mensagem sem perder o que já coletou.
+      // reclamação/atendimento_humano só marcam o pedido_info, sem apagar
+      // dados já coletados, para não obrigar o cliente a repetir tudo.
+      pedido_info: intencao === 'assunto_fora_escopo' ? pedidoInfo : { ...pedidoInfo, motivo_transferencia: `${intencao}: "${texto}"` },
+    });
+    console.log(`[webhook-whatsapp] ${phone} — portão de escopo interceptou (${intencao})`);
+    return;
+  }
 
   const ultimaMsgAnterior = conversa.historico?.slice(-1)[0]?.ts ?? undefined;
 

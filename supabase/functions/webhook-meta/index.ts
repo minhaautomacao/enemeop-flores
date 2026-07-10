@@ -1,15 +1,44 @@
 /**
- * webhook-meta — Agente de Vendas com Memória de Conversa
+ * webhook-meta — Instagram Direct + Messenger, usando o funil comercial
+ * determinístico compartilhado (ver ../_shared/funil.ts).
+ *
+ * Reescrito para parar de deixar o LLM decidir fase, preço, frete, total ou
+ * status de pagamento — isso agora é 100% responsabilidade do dispatcher
+ * avancarFunil (mesma lógica usada pelo orchestrator Node, ver
+ * orchestrator/src/lib/sdr.ts e o teste de paridade
+ * orchestrator/src/lib/funil.parity.test.ts). O LLM não é mais chamado
+ * neste fluxo comercial — toda mensagem ao cliente é texto fixo, deste
+ * arquivo ou do funil.
+ *
+ * ATENÇÃO — não foi possível rodar `deno check`/testes deste arquivo no
+ * ambiente onde esta integração foi construída (sem Deno CLI disponível).
+ * Ver o relatório final da integração para o que isso implica antes de
+ * deploy.
  *
  * Variáveis de ambiente:
  *   META_VERIFY_TOKEN, META_APP_SECRET, META_IG_APP_SECRET, META_IG_ACCESS_TOKEN
  *   META_INSTAGRAM_ID, META_PAGE_ACCESS_TOKEN
  *   FACTORY_SECRET, SAAS_WORKSPACE_ID
- *   GROQ_API_KEY (ou ANTHROPIC_API_KEY como fallback)
+ *   GROQ_API_KEY (ou ANTHROPIC_API_KEY como fallback) — usado só para
+ *     respostas de comentário público, não para o fluxo de DM comercial.
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (auto-injetados)
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { gerarLinkPagamento } from '../_shared/cielo.ts';
+import {
+  type EstadoConversa,
+  type DadosPedido,
+  type ProdutoCatalogo,
+  type DependenciasFunil,
+  type Fase,
+  estadoInicial,
+  classificarIntencao,
+  intencaoInterrompeFluxo,
+  mensagemForaDeEscopo,
+  mensagemTransferencia,
+  avancarFunil,
+} from '../_shared/funil.ts';
 
 const VERIFY_TOKEN   = Deno.env.get('META_VERIFY_TOKEN') ?? '';
 const APP_SECRET     = Deno.env.get('META_APP_SECRET') ?? '';
@@ -22,132 +51,6 @@ const IG_TOKEN       = Deno.env.get('META_IG_ACCESS_TOKEN') ?? '';
 const PAGE_TOKEN     = Deno.env.get('META_PAGE_ACCESS_TOKEN') ?? '';
 const WHATSAPP_NUM   = Deno.env.get('STORE_WHATSAPP_NUMBER') ?? '';
 
-// ── Catálogo de produtos ──────────────────────────────────────────────────
-
-const CATALOGO = `
-SOBRE A ENEMEOP FLORES:
-Fundada em 1997 por Clean Espindula e Luis Evangelista. "ENEMEOP" vem do Tupi-Guarani e significa "perfume das flores".
-Missão: "Prover produtos e serviços com alta qualidade e estilo próprio, garantindo a excelência no atendimento."
-Localização: Rua Costa Aguiar, 1184 — Ipiranga, São Paulo, SP.
-Telefone: (11) 98282-9083 / (11) 2272-3158.
-Funcionamento: Seg–Sáb 9h–19h | Dom e Feriados 9h30–14h.
-Entrega: até 3h após confirmação de pagamento. Área: São Paulo e Grande SP.
-Entrega disponível: Seg–Sex 9h–18h | Sáb, Dom e Feriados 9h–14h.
-
-CATÁLOGO COMPLETO DE PRODUTOS:
-
-RAMALHETES:
-- Mini Ramalhete (Mod.28): R$ 55
-- Ramalhete Girassol e Alstroemerias (051): R$ 70
-- Ramalhete de Rosas (030): R$ 70
-- Mini Ramalhete + Ferrero Rocher (Mod.29): R$ 100
-- Ramalhete 3 Rosas + Chocolates (094): R$ 95
-- Ramalhete Rosas Brancas (057): R$ 105
-- Ramalhete 3 Rosas Nacionais Rosa (Mod.31): R$ 105
-- Ramalhete Mix Rosas + Ferrero Rocher (081): R$ 150
-
-ARRANJOS FLORAIS:
-- Modelo 01 – Arranjo no Vaso de Vidro: R$ 70
-- Arranjo Girassol Solitário (Mod.09): R$ 75
-- Arranjo Flores Luto Hortênsias (Mod.17): R$ 155
-- Arranjo com Alstroemerias no Vaso de Vidro (027): R$ 155
-- Arranjo de Rosas (Mod.07): R$ 160
-- Arranjo Girassol em Vaso + Ferrero Rocher (010): R$ 120
-- Arranjo Mix Flores do Campo (Mod.08): R$ 145
-- Arranjo Girassol no Vaso (011): R$ 135
-- Arranjo 2 Rosas Nacionais e Junco (002): R$ 105
-- Arranjo Coração 2 Rosas + Ferrero Rocher (003): R$ 140
-- Arranjo 4 Rosas Brancas e Alstroemerias (006): R$ 225
-- Arranjo Orquídeas Brancas Frente Única (012): R$ 225
-- Arranjo Orquídeas Pink Vaso de Vidro (013): R$ 225
-- Arranjo Orquídeas Brancas e Ruscus (014): R$ 225
-- Arranjo Rosas Rosa no Vaso (Mod.05): R$ 225
-- Arranjo de Alstroemerias (Mod.24): R$ 265
-- Arranjo Girassóis (Mod.26): R$ 255
-- Mini Arranjo Branco (Mod.16): R$ 220
-- Arranjo Branco (Mod.19): R$ 255
-- Arranjo Laranja (Mod.20): R$ 145
-- Arranjo Girassol e Flores do Campo (Mod.25): R$ 295
-- Arranjo Rosas Vermelhas Nacionais no Vidro (Mod.18): R$ 425
-- Buquê de Rosas no Vaso de Vidro (004): R$ 295
-- Buquê 12 Rosas Rosa no Vaso de Vidro (Mod.58): R$ 425
-- Arranjo Exclusivo Orquídeas Cymbidium (Mod.22): R$ 225
-- Arranjo Orquídeas Cymbidium Amarelas (Mod.23): R$ 225
-- Arranjo Permanente (Mod.15): R$ 1.280
-- Arranjo Permanente Grande (Mod.14): R$ 2.550
-
-BUQUÊS DE FLORES:
-- Buquê de Rosas Vermelhas (032): R$ 140
-- Buquê 6 Rosas Vermelhas Nacionais (Mod.35): R$ 185
-- Buquê 6 Rosas Nacionais (Mod.44): R$ 185
-- Buquê de Rosas Vermelhas + Coração (Mod.59): R$ 205
-- Buquê Rosas Nacionais Vermelhas (Mod.43): R$ 245
-- Buquê de Rosas Brancas (Mod.55): R$ 280
-- Buquê 12 Rosas Vermelhas (033): R$ 280
-- Buquê Rosas Nacionais + Ferrero Rocher (Mod.36): R$ 290
-- Buquê Mix Alstroemerias (Mod.40): R$ 295
-- Buquê Mix Flores com Girassóis e Campo (054): R$ 295
-- Buquê Luto Rosas Brancas (Mod.50): R$ 390
-- Buquê com Lírios Rosa (093): R$ 395
-- Buquê Luxuoso Alstroemerias Coloridas (061): R$ 395
-- Buquê 12 Rosas Rosa Nacionais e Alstroemerias (045/046): R$ 370
-- Buquê 12 Rosas Pink Nacionais (Mod.38): R$ 370
-- Buquê 12 Rosas Nacionais Rosa (Mod.41): R$ 370
-- Buquê Mix Flores Nacionais + Ferrero (Mod.37): R$ 150
-- Buquê Especial Rosas e Juncos (Mod.48): R$ 420
-- Buquê Mix Flores Nobre + Vinho Importado (Mod.60): R$ 425
-- Buquê Mix de Flores (Mod.42): R$ 495
-- Buquê 24 Rosas Vermelhas (034): R$ 560
-- Buquê de Noiva Rosas Pink (062): R$ 565
-- Buquê Mix Flores Nobre (039): R$ 590
-- Buquê Mix de Flores (047): R$ 745
-- Buquê 12 Girassóis Premium (052): R$ 435
-- Buquê 100 Rosas Vermelhas (056): R$ 1.490
-
-BUQUÊS DE NOIVA:
-- Buquê Noiva Natural Branco (Mod.74): R$ 445
-- Buquê Noiva Mix Flores Brancas (Mod.78): R$ 490
-- Buquê Noiva (Mod.73/065): R$ 590
-- Buquê Noiva Noiva Rosas Lilás (Mod.75): R$ 720
-- Buquê Noiva Orquídeas Brancas M (066): R$ 740
-- Buquê Noiva Orquídeas e Juncos (068): R$ 740
-- Buquê Tulipas Brancas Noiva (094): R$ 720
-- Buquê Tulipas (067): R$ 790
-- Buquê Noiva Natural Rosas Brancas e Spray (Mod.76): R$ 570
-- Buquê Noiva Mix Nobre (Mod.70): R$ 730
-- Buquê Noiva com Callas Branco (Mod.71): R$ 880
-- Buquê Noiva Mix (069): R$ 640
-- Buquê Noiva com Ervas e Flores (077): R$ 645
-- Buquê Noiva Flores Desidratadas (080): R$ 770
-- Buquê Noiva Mix Flores Nobres (079): R$ 980
-- Buquê Noiva Cascata de Orquídeas (063): R$ 1.180
-- Buquê Noiva Flores Brancas e Folhagens (064): R$ 670
-
-ORQUÍDEAS:
-- Mini Orquídea no Vaso de Vidro (Mod.87): R$ 215
-- Orquídea Phalaenópsis Mescla pequena 2 hastes (Mod.90): R$ 145
-- Orquídea Phalaenópsis Mescla em Vaso (Mod.89): R$ 195
-- Orquídea Branca Phalaenópsis 1 haste (083): R$ 170
-- Orquídea Phalaenópsis Pink 1 haste (Mod.91): R$ 225
-- Orquídea Phalaenópsis Branca 1 haste (Mod.92): R$ 290
-- Orquídea Phalaenópsis Branca 2 hastes (084): R$ 290
-- Orquídea Phalaenópsis Pink (Mod.85): R$ 300
-- Orquídea Phalaenópsis Pink no Vaso de Vidro (Mod.88): R$ 315
-- Orquídea Phalaenópsis Cascata Branca 2 hastes (Mod.86): R$ 390
-- Arranjo Orquídeas Brancas Frente Única (012): R$ 225
-
-MATERNIDADE E BEBÊ:
-- Kit Maternidade Flores e Pelúcia (Mod.21): R$ 410
-- Buquê Mix Flores Nobres Maternidade (Mod.49): R$ 980
-
-KITS E PRESENTES:
-- Ferrero Rocher 100g: R$ 45
-- Cesta de Queijos e Vinho Especial (082): R$ 890
-
-FORMAS DE PAGAMENTO: Cartão de crédito, PIX, online seguro.
-PERSONALIZAÇÃO: arranjos sob encomenda disponíveis.
-`.trim();
-
 // ── Supabase client ───────────────────────────────────────────────────────
 
 function getDb() {
@@ -156,28 +59,28 @@ function getDb() {
 
 async function buscarConfigDB(chave: string): Promise<string> {
   try {
-    const db = getDb();
-    const { data } = await db.from('funcao_configs').select('valor').eq('chave', chave).single();
+    const { data } = await getDb().from('funcao_configs').select('valor').eq('chave', chave).single();
     return (data?.valor as string) ?? '';
   } catch { return ''; }
 }
 
-// ── Tipos ──────────────────────────────────────────────────────────────────
+// ── Tipos de persistência (tabela conversas — sem migration nova) ─────────
+//
+// fase usa diretamente os valores de Fase (funil.ts). dados/perguntasFeitas
+// do EstadoConversa vão dentro do jsonb pedido_info, já existente.
 
 interface Mensagem { role: 'user' | 'assistant'; content: string; ts: string; }
 
-interface Conversa {
+interface ConversaRow {
   id: string;
   canal_id: string;
   canal: string;
   fase: string;
   historico: Mensagem[];
-  pedido_info: Record<string, unknown> | null;
+  pedido_info: { dados?: DadosPedido; perguntasFeitas?: string[] } | null;
   lead_id: string | null;
   nome_cliente: string | null;
 }
-
-// ── Busca nome do cliente ──────────────────────────────────────────────────
 
 async function buscarNomeCliente(canalId: string): Promise<string | null> {
   const token = IG_TOKEN || await buscarConfigDB('META_IG_ACCESS_TOKEN');
@@ -192,9 +95,7 @@ async function buscarNomeCliente(canalId: string): Promise<string | null> {
   } catch { return null; }
 }
 
-// ── Gerenciamento de conversa ──────────────────────────────────────────────
-
-async function buscarOuCriarConversa(canalId: string, canal: string): Promise<Conversa> {
+async function buscarOuCriarConversa(canalId: string, canal: string): Promise<ConversaRow> {
   const db = getDb();
   const { data } = await db
     .from('conversas')
@@ -203,298 +104,333 @@ async function buscarOuCriarConversa(canalId: string, canal: string): Promise<Co
     .eq('canal', canal)
     .single();
 
-  if (data) return data as Conversa;
+  if (data) return data as ConversaRow;
 
   const { data: nova } = await db
     .from('conversas')
-    .insert({ canal_id: canalId, canal, workspace_id: WORKSPACE_ID || null })
+    .insert({ canal_id: canalId, canal, workspace_id: WORKSPACE_ID || null, fase: estadoInicial().fase })
     .select('*')
     .single();
 
-  return nova as Conversa;
+  return nova as ConversaRow;
 }
 
-async function salvarConversa(id: string, updates: Partial<Conversa>): Promise<void> {
+async function salvarConversa(id: string, updates: Partial<ConversaRow>): Promise<void> {
   const db = getDb();
   await db.from('conversas').update({ ...updates, atualizado_em: new Date().toISOString() }).eq('id', id);
 }
 
-// ── Prompt do agente ──────────────────────────────────────────────────────
-
-function buildSystemPrompt(fase: string, pedidoInfo: Record<string, unknown> | null, nomeCliente: string | null): string {
-  const nome = nomeCliente ?? null;
-  return `Você é uma consultora virtual especializada em atendimento premium para floricultura. Representa a Enemeop Flores — floricultura no Ipiranga, São Paulo, desde 1997. Seu nome é Flor.
-
-${nome ? `O cliente se chama ${nome}. Use o nome de forma natural e moderada durante a conversa.` : ''}
-
-${CATALOGO}
-
-FASE ATUAL DA CONVERSA: ${fase}
-${pedidoInfo ? `PEDIDO EM ANDAMENTO: ${JSON.stringify(pedidoInfo)}` : ''}
-
-IDENTIDADE E COMPORTAMENTO:
-Você age como uma atendente real experiente — natural, humana, fluida, educada, sofisticada e acolhedora. Nunca parece um robô. No máximo 1 emoji por mensagem.
-
-OBJETIVO: Descobrir na ordem certa (UMA pergunta por vez):
-1. Ocasião (aniversário, namoro, casamento, maternidade, condolências)
-2. Para quem é
-3. Perfil da pessoa presenteada
-4. Preferências (flores, cores, estilo)
-5. Data e horário da entrega
-6. Região da entrega
-7. Faixa de valor
-
-RECOMENDAÇÃO: Até 3 opções com preços do catálogo. Sugira upgrade natural sem pressionar.
-
-ESCALONAMENTO: Reclamação, pagamento com problema, cliente irritado → acionar atendente humana.
-
-RETORNE APENAS O TEXTO DA RESPOSTA — sem aspas, sem prefixo, sem JSON.`;
+function estadoDaConversa(row: ConversaRow): EstadoConversa {
+  return {
+    fase: (row.fase as Fase) || 'inicio',
+    dados: row.pedido_info?.dados ?? {},
+    perguntasFeitas: row.pedido_info?.perguntasFeitas ?? [],
+  };
 }
 
-// ── Análise de fase ────────────────────────────────────────────────────────
+// ── Catálogo real (tabela catalogo_produtos — nunca inventado) ───────────
 
-function buildFasePrompt(historico: Mensagem[], ultimaMensagem: string, faseAtual: string): string {
-  return `Analise a conversa de venda de floricultura e determine:
-1. A nova fase
-2. Detalhes do pedido se definido
-3. Nome do cliente se mencionado
+interface ProdutoRow { codigo: string; nome: string; preco: number; foto_url: string | null; categoria: string | null; }
 
-Fases: descoberta | interesse | proposta | aguardando_pagamento | concluido | perdido
-
-Histórico: ${historico.slice(-4).map(m => `${m.role}: ${m.content}`).join(' | ')}
-Última mensagem: "${ultimaMensagem}"
-Fase atual: ${faseAtual}
-
-Retorne APENAS JSON válido:
-{
-  "nova_fase": "string",
-  "pedido_info": { "produto": "", "quantidade": 1, "data_entrega": "", "endereco": "", "valor": 0 } | null,
-  "pronto_para_pagamento": false,
-  "nome_cliente": null
-}`;
-}
-
-// ── Chamada IA ─────────────────────────────────────────────────────────────
-
-async function chamarIA(systemPrompt: string, mensagens: Array<{role: string; content: string}>, maxTokens = 120): Promise<string | null> {
-  const groqKey = Deno.env.get('GROQ_API_KEY') || await buscarConfigDB('GROQ_API_KEY');
-  if (groqKey) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
-        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
-          body: JSON.stringify({
-            model: 'llama-3.1-8b-instant',
-            max_tokens: maxTokens,
-            messages: [{ role: 'system', content: systemPrompt }, ...mensagens],
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          return (data.choices?.[0]?.message?.content as string)?.trim() ?? null;
-        }
-        if (res.status !== 429) { console.error(`[ia] Groq ${res.status}`); break; }
-        console.warn('[ia] Groq rate limit, retry...');
-      } catch (e) { console.error('[ia] Groq falhou:', e); break; }
-    }
+function pontuarProduto(p: ProdutoRow, params: { query: string; budget?: number; color?: string }): number {
+  let score = 0;
+  const nome = p.nome.toLowerCase();
+  for (const palavra of params.query.toLowerCase().split(/\s+/)) {
+    if (palavra.length > 3 && nome.includes(palavra)) score += 2;
   }
-
-  const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY') || await buscarConfigDB('ANTHROPIC_API_KEY');
-  if (anthropicKey) {
-    try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: maxTokens,
-          system: systemPrompt,
-          messages: mensagens,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return (data.content?.[0]?.text as string)?.trim() ?? null;
-      }
-      console.error(`[ia] Anthropic ${res.status}: ${await res.text()}`);
-    } catch (e) { console.error('[ia] Anthropic falhou:', e); }
+  if (params.budget) {
+    if (p.preco <= params.budget) score += 4;
+    if (p.preco <= params.budget * 0.8) score += 2;
+    if (p.preco > params.budget * 1.25) score -= 4;
   }
-
-  return null;
+  if (params.color && nome.includes(params.color.toLowerCase())) score += 5;
+  return score;
 }
 
-// ── Gerar link de pagamento ────────────────────────────────────────────────
+async function buscarCatalogoReal(params: { query: string; occasion?: string; budget?: number; color?: string }): Promise<ProdutoCatalogo[]> {
+  let query = getDb().from('catalogo_produtos').select('codigo, nome, preco, foto_url, categoria').eq('ativo', true);
+  if (params.budget) query = query.lte('preco', params.budget * 1.3);
+  const { data, error } = await query.limit(30);
+  if (error || !data) return [];
 
-async function gerarLinkPagamento(pedidoInfo: Record<string, unknown>): Promise<string | null> {
-  const mpToken = Deno.env.get('MERCADOPAGO_ACCESS_TOKEN');
-  if (!mpToken) return null;
+  const produtos = data as ProdutoRow[];
+  return produtos
+    .map(p => ({ p, score: pontuarProduto(p, params) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+    .map(({ p }) => ({
+      nome: p.nome,
+      preco: Number(p.preco),
+      fotoUrl: p.foto_url ?? undefined,
+      disponivel: true,
+      codigo: p.codigo,
+      origem: 'catalogo_produtos',
+    }));
+}
+
+// ── Frete real (agente-logistica — mesma Edge Function do WhatsApp) ──────
+
+async function calcularFreteReal(cep: string): Promise<{ ok: true; valor: number } | { ok: false }> {
   try {
-    const res = await fetch('https://api.mercadopago.com/checkout/preferences', {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${mpToken}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_KEY}` },
+      body: JSON.stringify({ endereco: { cep }, workspace_id: WORKSPACE_ID }),
+    });
+    if (!res.ok) return { ok: false };
+    const data = await res.json() as { disponivel?: boolean; preco_cliente?: number };
+    if (!data.disponivel || data.preco_cliente == null) return { ok: false };
+    return { ok: true, valor: data.preco_cliente };
+  } catch (e) {
+    console.error('[webhook-meta] falha ao calcular frete real:', e);
+    return { ok: false };
+  }
+}
+
+// ── Pedido (rascunho) e pagamento real (Cielo, via _shared/cielo.ts) ────
+
+interface DadosClientePedido { nome: string; telefone?: string; canal: string; canalId?: string; }
+
+async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePedido): Promise<{ pedidoId: string } | null> {
+  const produto = dados.produto;
+  if (!produto || dados.valorTotal == null) {
+    console.error('[webhook-meta] criarPedidoProvisorio chamado sem produto/valorTotal');
+    return null;
+  }
+  const enderecoTexto = dados.endereco
+    ? [dados.endereco.rua, dados.endereco.numero, dados.endereco.bairro, dados.endereco.cidade].filter(Boolean).join(', ')
+    : null;
+  try {
+    const { data, error } = await getDb()
+      .from('pedidos')
+      .insert({
+        cliente_nome: cliente.nome || 'Cliente',
+        cliente_telefone: cliente.telefone ?? '',
+        canal: cliente.canal,
+        canal_id: cliente.canalId ?? null,
+        canal_origem: cliente.canal,
+        produto: produto.nome,
+        produtos: [{ nome: produto.nome, codigo: produto.codigo, preco: produto.preco, quantidade: produto.quantidade ?? 1 }],
+        valor: dados.valorTotal,
+        status: 'pendente',
+        horario_entrega: produto.dataEntrega ?? null,
+        nome_destinatario: dados.endereco?.nomeDestinatario ?? null,
+        endereco_entrega: enderecoTexto,
+        bairro: dados.endereco?.bairro ?? null,
+        workspace_id: WORKSPACE_ID,
+      })
+      .select('id')
+      .single();
+    if (error || !data) {
+      console.error('[webhook-meta] falha ao criar pedido provisorio:', error?.message);
+      return null;
+    }
+    return { pedidoId: data.id as string };
+  } catch (e) {
+    console.error('[webhook-meta] excecao ao criar pedido provisorio:', e);
+    return null;
+  }
+}
+
+async function gerarPagamentoReal(pedidoId: string, valorTotal: number): Promise<{ link: string; paymentId: string } | null> {
+  const resultado = await gerarLinkPagamento(WORKSPACE_ID, {
+    numeroPedido: pedidoId,
+    item: { nome: 'Pedido Enemeop Flores', valor: Math.round(valorTotal * 100) },
+    parcelasMax: 3,
+    expiracaoDias: 1,
+  });
+  if (!resultado.criado || !resultado.linkPagamento) return null;
+  const linkFinal = resultado.shortLink ?? resultado.linkPagamento;
+  const linkId = resultado.linkId ?? pedidoId;
+  try {
+    await getDb().from('pedidos').update({ link_pagamento: linkFinal, link_pagamento_id: linkId }).eq('id', pedidoId);
+  } catch (e) {
+    console.error('[webhook-meta] falha ao registrar link de pagamento no pedido:', e);
+  }
+  return { link: linkFinal, paymentId: linkId };
+}
+
+function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFunil {
+  return {
+    buscarCatalogo: buscarCatalogoReal,
+    calcularFrete: calcularFreteReal,
+    gerarPagamento: gerarPagamentoReal,
+    criarPedido: (dados) => criarPedidoProvisorio(dados, cliente),
+  };
+}
+
+// ── Envio de foto real via Graph API (attachment de imagem) ──────────────
+
+async function enviarFotoInstagramOuFacebook(canal: string, canalId: string, imagemUrl: string): Promise<boolean> {
+  const pageToken = PAGE_TOKEN || await buscarConfigDB('META_PAGE_ACCESS_TOKEN');
+  const igId = Deno.env.get('META_INSTAGRAM_ID') || await buscarConfigDB('META_INSTAGRAM_ID');
+  const isInstagram = canal === 'instagram' && !!igId && !!IG_TOKEN;
+  const endpoint = isInstagram
+    ? `https://graph.instagram.com/v21.0/${igId}/messages`
+    : `https://graph.facebook.com/v21.0/me/messages`;
+  const token = isInstagram ? IG_TOKEN : (pageToken || IG_TOKEN);
+
+  try {
+    const res = await fetch(`${endpoint}?access_token=${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        items: [{ title: String(pedidoInfo['produto'] ?? 'Arranjo Floral'), quantity: 1, unit_price: Number(pedidoInfo['valor'] ?? 0) }],
-        payment_methods: { default_payment_method_id: 'pix' },
-        statement_descriptor: 'Enemeop Flores',
+        recipient: { id: canalId },
+        message: { attachment: { type: 'image', payload: { url: imagemUrl, is_reusable: true } } },
+        messaging_type: 'RESPONSE',
       }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      return data.init_point as string;
+    if (!res.ok) {
+      console.error(`[webhook-meta] erro ao enviar foto status=${res.status} canal=${canal}`);
+      return false;
     }
-  } catch (e) { console.error('[pagamento] Mercado Pago falhou:', e); }
-  return null;
+    return true;
+  } catch (e) {
+    console.error('[webhook-meta] falha ao enviar foto:', e);
+    return false;
+  }
 }
 
-// ── Processar DM ──────────────────────────────────────────────────────────
+async function enviarTextoInstagramOuFacebook(canal: string, canalId: string, texto: string): Promise<boolean> {
+  const pageToken = PAGE_TOKEN || await buscarConfigDB('META_PAGE_ACCESS_TOKEN');
+  const igId = Deno.env.get('META_INSTAGRAM_ID') || await buscarConfigDB('META_INSTAGRAM_ID');
+  const isInstagram = canal === 'instagram' && !!igId && !!IG_TOKEN;
+  const endpoint = isInstagram
+    ? `https://graph.instagram.com/v21.0/${igId}/messages`
+    : `https://graph.facebook.com/v21.0/me/messages`;
+  const token = isInstagram ? IG_TOKEN : (pageToken || IG_TOKEN);
 
-const MSG_FALLBACK_POR_FASE: Record<string, string> = {
-  descoberta: 'Oi! Para qual ocasião é?',
-  interesse: 'Me conta um pouco mais sobre quem vai receber, pra eu sugerir as melhores opções?',
-  proposta: 'Ainda estou por aqui! Alguma das opções que te passei fez sentido pra você?',
-  aguardando_pagamento: 'Só um instante, já confirmo os detalhes do seu pagamento.',
-};
-const MSG_FALLBACK_GENERICO = 'Desculpa a demora! Pode repetir sua última mensagem que eu continuo com você.';
+  try {
+    const res = await fetch(`${endpoint}?access_token=${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipient: { id: canalId },
+        message: { text: texto },
+        messaging_type: 'RESPONSE',
+      }),
+    });
+    if (!res.ok) {
+      const erroBody = await res.text().catch(() => '');
+      console.error(`[webhook-meta] erro DM status=${res.status} endpoint=${isInstagram ? 'ig' : 'fb'} recipient=${canalId} corpo=${erroBody}`);
+      return false;
+    }
+    console.log(`[webhook-meta] DM enviado canal=${canal} endpoint=${isInstagram ? 'ig' : 'fb'} para=${canalId}`);
+    return true;
+  } catch (e) {
+    console.error(`[webhook-meta] falha DM: ${e}`);
+    return false;
+  }
+}
+
+// ── Processar DM — usa o funil determinístico compartilhado ─────────────
 
 async function processarDM(canalId: string, canal: string, mensagemCliente: string): Promise<void> {
   const igToken = IG_TOKEN || await buscarConfigDB('META_IG_ACCESS_TOKEN');
   if (!igToken) return;
 
-  const conversa = await buscarOuCriarConversa(canalId, canal);
-  if (conversa.fase === 'concluido') {
-    console.log(`[webhook-meta] conversa_reaberta_de_concluido canal_id=${canalId} canal=${canal}`);
-    conversa.fase = 'descoberta';
+  const conversaRow = await buscarOuCriarConversa(canalId, canal);
+  let estado = estadoDaConversa(conversaRow);
+
+  if (estado.fase === 'pedido_criado' || estado.fase === 'encerrado_sem_venda') {
+    console.log(`[webhook-meta] conversa_reaberta canal_id=${canalId} canal=${canal}`);
+    estado = estadoInicial();
   }
 
-  let nomeCliente = conversa.nome_cliente ?? null;
-  if (!nomeCliente && conversa.historico.length === 0) {
+  let nomeCliente = conversaRow.nome_cliente ?? null;
+  if (!nomeCliente && (conversaRow.historico ?? []).length === 0) {
     nomeCliente = await buscarNomeCliente(canalId);
-    if (nomeCliente) await salvarConversa(conversa.id, { nome_cliente: nomeCliente } as Partial<Conversa>);
+    if (nomeCliente) await salvarConversa(conversaRow.id, { nome_cliente: nomeCliente });
   }
 
   const novaMsg: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString() };
-  const historico = [...(conversa.historico ?? []), novaMsg].slice(-20);
+  const historico = [...(conversaRow.historico ?? []), novaMsg].slice(-20);
 
-  const [respostaIA, analiseRaw] = await Promise.all([
-    chamarIA(
-      buildSystemPrompt(conversa.fase, conversa.pedido_info, nomeCliente),
-      historico.map(m => ({ role: m.role, content: m.content })),
-      350,
-    ),
-    chamarIA(
-      buildFasePrompt(historico, mensagemCliente, conversa.fase),
-      [{ role: 'user', content: mensagemCliente }],
-      200,
-    ),
-  ]);
+  // Portão de escopo — determinístico, roda antes de qualquer avanço de
+  // funil (mesma regra do orchestrator Node, ver sdr.ts).
+  const intencao = classificarIntencao(mensagemCliente, estado.fase);
 
-  let novaFase = conversa.fase;
-  let pedidoInfo = conversa.pedido_info ?? null;
-  let prontoParaPagamento = false;
+  let respostaFinal: string;
+  let fotoUrl: string | null | undefined;
 
-  if (analiseRaw) {
-    try {
-      const analise = JSON.parse(analiseRaw.replace(/```json\n?|\n?```/g, '').trim());
-      novaFase = analise.nova_fase ?? conversa.fase;
-      if (analise.pedido_info?.produto) pedidoInfo = analise.pedido_info;
-      prontoParaPagamento = analise.pronto_para_pagamento ?? false;
-      const nomeDetectado = (analise.nome_cliente as string | null)?.trim() || null;
-      if (nomeDetectado && !nomeCliente) {
-        nomeCliente = nomeDetectado;
-        const db = getDb();
-        await Promise.allSettled([
-          salvarConversa(conversa.id, { nome_cliente: nomeDetectado }),
-          db.from('leads').update({ nome: nomeDetectado }).eq('canal_id', canalId).is('nome', null),
-        ]);
-      }
-    } catch { /* mantém fase atual */ }
-  }
-
-  let respostaFinal = respostaIA;
-  if (!respostaFinal) {
-    const candidato = MSG_FALLBACK_POR_FASE[novaFase] ?? MSG_FALLBACK_POR_FASE[conversa.fase] ?? MSG_FALLBACK_GENERICO;
-    const ultimaAssistente = [...historico].reverse().find(m => m.role === 'assistant');
-    respostaFinal = ultimaAssistente?.content === candidato ? MSG_FALLBACK_GENERICO : candidato;
-  }
-
-  if (prontoParaPagamento && pedidoInfo) {
-    const linkPagamento = await gerarLinkPagamento(pedidoInfo);
-    if (linkPagamento) {
-      respostaFinal = `Perfeito! Seu arranjo: ${pedidoInfo['produto']}. Link de pagamento PIX: ${linkPagamento} ✅`;
-      novaFase = 'aguardando_pagamento';
+  if (intencaoInterrompeFluxo(intencao)) {
+    if (intencao === 'assunto_fora_escopo') {
+      respostaFinal = mensagemForaDeEscopo();
+      // fase/dados não mudam — cliente pode voltar ao fluxo comercial depois.
     } else {
-      respostaFinal = `Ótimo! Me chama no WhatsApp para confirmar os detalhes e gerar o PIX: wa.me/${WHATSAPP_NUM}`;
-      novaFase = 'proposta';
+      respostaFinal = mensagemTransferencia();
+      estado = { ...estado, fase: 'transferido_humano', dados: { ...estado.dados, motivoTransferencia: `${intencao}: "${mensagemCliente}"` } };
+    }
+  } else {
+    const primeiraMensagem = (conversaRow.historico ?? []).length === 0;
+    if (primeiraMensagem && !nomeCliente) {
+      respostaFinal = 'Oi! Pode me dizer seu nome pra eu te atender melhor?';
+    } else {
+      const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', canal, canalId });
+      const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps);
+      estado = resultado.estado;
+      respostaFinal = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ${resultado.mensagem}` : resultado.mensagem;
+      fotoUrl = resultado.fotoUrl;
     }
   }
 
   const msgAssistente: Mensagem = { role: 'assistant', content: respostaFinal, ts: new Date().toISOString() };
   const historicoFinal = [...historico, msgAssistente].slice(-20);
 
-  await salvarConversa(conversa.id, {
+  await salvarConversa(conversaRow.id, {
     historico: historicoFinal,
-    fase: novaFase,
-    pedido_info: pedidoInfo ?? undefined,
-  } as Partial<Conversa>);
+    fase: estado.fase,
+    pedido_info: { dados: estado.dados, perguntasFeitas: estado.perguntasFeitas },
+  });
 
-  console.log(`[webhook-meta] ${canalId} | fase: ${conversa.fase}→${novaFase} | resposta: ${respostaFinal.slice(0, 60)}`);
+  console.log(`[webhook-meta] ${canalId} | fase: ${conversaRow.fase}→${estado.fase} | resposta: ${respostaFinal.slice(0, 60)}`);
 
-  // ── Envio de resposta via Graph API ─────────────────────────────────
-  // Instagram Business Login (Caminho B): POST /{ig-user-id}/messages via host graph.instagram.com
-  //   (obrigatório para Instagram User Access Token — ver docs/KNOWN_ISSUES.md)
-  // Facebook/Messenger (Caminho A):       POST /me/messages via host graph.facebook.com
-  try {
-    const pageToken = PAGE_TOKEN || await buscarConfigDB('META_PAGE_ACCESS_TOKEN');
-    const igId = Deno.env.get('META_INSTAGRAM_ID') || await buscarConfigDB('META_INSTAGRAM_ID');
-
-    const isInstagram = canal === 'instagram' && !!igId && !!igToken;
-    const endpoint = isInstagram
-      ? `https://graph.instagram.com/v21.0/${igId}/messages`
-      : `https://graph.facebook.com/v21.0/me/messages`;
-    const dmToken = isInstagram ? igToken : (pageToken || igToken);
-
-    // ── DIAGNÓSTICO TEMPORÁRIO — remover após validar token (não loga o valor do token) ──
-    const trimmedIgToken = igToken.trim();
-    console.log(
-      `[diag-token] igTokenPresente=${!!igToken} length=${igToken.length} trimLength=${trimmedIgToken.length} ` +
-      `leadingWhitespace=${igToken !== igToken.trimStart()} trailingWhitespace=${igToken !== igToken.trimEnd()} ` +
-      `hasQuote=${/['"]/.test(igToken)} hasNewline=${/[\r\n]/.test(igToken)} ` +
-      `looksLikeJson=${trimmedIgToken.startsWith('{') || trimmedIgToken.startsWith('[')} ` +
-      `igIdPresente=${!!igId} igIdUsado=${isInstagram} endpointUsado=${isInstagram ? 'ig' : 'fb'}`
-    );
-    // ── FIM DIAGNÓSTICO TEMPORÁRIO ────────────────────────────────────────────────────────
-
-    const res = await fetch(`${endpoint}?access_token=${dmToken}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        recipient: { id: canalId },
-        message: { text: respostaFinal },
-        messaging_type: 'RESPONSE',
-      }),
-    });
-    if (!res.ok) {
-      const erroBody = await res.text();
-      console.error(`[webhook-meta] erro DM status=${res.status} endpoint=${isInstagram ? 'ig' : 'fb'} url=${endpoint} recipient=${canalId} corpo=${erroBody}`);
+  // ── Envio — foto primeiro (se houver), depois o texto (ver seção 6) ────
+  if (fotoUrl) {
+    const enviado = await enviarFotoInstagramOuFacebook(canal, canalId, fotoUrl);
+    if (enviado) {
+      await enviarTextoInstagramOuFacebook(canal, canalId, respostaFinal);
     } else {
-      console.log(`[webhook-meta] DM enviado canal=${canal} endpoint=${isInstagram ? 'ig' : 'fb'} para=${canalId}`);
+      // Falha definitiva no envio de mídia: nunca finge que enviou —
+      // encaminha para atendimento humano.
+      await enviarTextoInstagramOuFacebook(canal, canalId, mensagemTransferencia());
     }
-  } catch (e) { console.error(`[webhook-meta] falha DM: ${e}`); }
+  } else {
+    await enviarTextoInstagramOuFacebook(canal, canalId, respostaFinal);
+  }
 }
 
-// ── Processar comentário ───────────────────────────────────────────────────
+// ── Processar comentário — fora do escopo do funil comercial, mantém IA ──
+// (baixo risco: nunca cita preço/frete/pagamento, apenas convida ao DM/WhatsApp)
+
+const SYSTEM_COMENTARIO = 'Você é a Flor, atendente da Enemeop Flores. Alguém comentou numa publicação. Responda de forma calorosa e curta (máx. 2 linhas). Nunca cite preços em comentários públicos. Se for elogio: agradeça e convide para o DM. Se for dúvida: responda brevemente e direcione ao DM. Português brasileiro natural. Máx. 1 emoji. RETORNE APENAS o texto.';
+
+async function chamarIAComentario(mensagemUsuario: string): Promise<string | null> {
+  const groqKey = Deno.env.get('GROQ_API_KEY') || await buscarConfigDB('GROQ_API_KEY');
+  if (groqKey) {
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
+        body: JSON.stringify({
+          model: 'llama-3.1-8b-instant',
+          max_tokens: 100,
+          messages: [{ role: 'system', content: SYSTEM_COMENTARIO }, { role: 'user', content: mensagemUsuario }],
+        }),
+      });
+      if (res.ok) return ((await res.json()).choices?.[0]?.message?.content as string)?.trim() ?? null;
+    } catch (e) { console.error('[webhook-meta] falha IA comentario:', e); }
+  }
+  return null;
+}
 
 async function processarComentario(evento: MetaEvento): Promise<void> {
   if (!evento.comment_id) return;
   const token = IG_TOKEN || await buscarConfigDB('META_IG_ACCESS_TOKEN');
   if (!token) return;
 
-  const SYSTEM_COMENTARIO = `Você é a Flor, atendente da Enemeop Flores. Alguém comentou numa publicação. Responda de forma calorosa e curta (máx. 2 linhas). Nunca cite preços em comentários públicos. Se for elogio: agradeça e convide para o DM. Se for dúvida: responda brevemente e direcione ao DM. Português brasileiro natural. Máx. 1 emoji. RETORNE APENAS o texto.`;
-
-  const resposta = await chamarIA(SYSTEM_COMENTARIO, [{ role: 'user', content: evento.mensagem }], 100);
-  if (!resposta) return;
+  const resposta = await chamarIAComentario(evento.mensagem)
+    ?? `Obrigada pelo comentário! Manda um DM pra gente ou chama no WhatsApp: wa.me/${WHATSAPP_NUM}`;
 
   try {
     const endpoint = evento.canal === 'instagram'
@@ -576,7 +512,7 @@ function extrairEventos(body: Record<string, unknown>): MetaEvento[] {
   return eventos;
 }
 
-// ── Envia ao orquestrador ─────────────────────────────────────────────────
+// ── Envia ao orquestrador (só para log/roteamento de lead, não gera resposta) ─
 
 async function enviarAoOrquestrador(evento: MetaEvento): Promise<void> {
   if (!SERVICE_KEY || !SUPABASE_URL) return;

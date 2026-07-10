@@ -12,10 +12,10 @@ Projeto Supabase `gftnjvdvzgjkhwxnxnwl` (Enemeop), 4 tabelas com RLS
 
 | Tabela | Linhas | Quem lê/grava (confirmado no código) |
 |---|---|---|
-| `workspace_credentials` | 5 | Não encontrei leitura/escrita direta desta tabela específica no código atual (a tabela existe pela migration `20260527000004_workspace_credentials.sql` da Fábrica, pensada para ser acessada só por `service_role`) |
-| `conversas` | 27 | `webhook-meta/index.ts`, `webhook-whatsapp/index.ts`, `orchestrator/src/lib/instagram.ts` — todos usam client Supabase autenticado com `SUPABASE_SERVICE_ROLE_KEY` (service_role, ignora RLS) |
-| `qr_temp` | 4390 | Nenhuma referência encontrada em nenhum dos dois repositórios Git — provavelmente lida/gravada pela Edge Function `captura-qr`, cujo código-fonte não está versionado em nenhum dos dois repositórios (ver `INFRASTRUCTURE_MAP.md`) |
-| `funcao_configs` | 2 | `_shared/instagram.ts`, `_shared/anthropic.ts`, `webhook-whatsapp/index.ts`, `webhook-meta/index.ts` — todos leitura via `service_role`, nenhuma escrita encontrada no código (valores parecem ser inseridos manualmente via Studio) |
+| `workspace_credentials` | 5 | **Atualizado na Etapa C:** código-fonte de `webhook-mercadopago` (recuperado do deploy, não estava em nenhum repositório Git) confirma leitura via `service_role`, filtrando por `workspace_id`+`tipo='financeiro'`+`chave`. Nenhuma escrita nem uso de anon key encontrado em nenhum consumidor identificado |
+| `conversas` | 27 (Enemeop) / 121 (Fábrica, cópia separada) | `webhook-meta/index.ts`, `webhook-whatsapp/index.ts`, `webhook-mercadopago` (recuperado na Etapa C), `orchestrator/src/lib/instagram.ts` — todos usam `service_role`. **Confirmado na Etapa C:** o dashboard (`conversas/page.tsx`, `LeadsTable.tsx`, `monitor-social/page.tsx`) **não toca esta tabela do projeto Enemeop diretamente** — ele lê a cópia do projeto **Fábrica** via a Edge Function `conversas-enemeop` (que já roda com `service_role`, RLS já habilitado naquela cópia). Isso reforça que aplicar a proposta na cópia do Enemeop é segura para o frontend |
+| `qr_temp` | 4390 | **Confirmado na Etapa C:** código-fonte de `captura-qr` recuperado do deploy — insere via `service_role` (`SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`), sem nenhum uso de anon key. A recomendação `service_role`-only está confirmada, não é mais suposição |
+| `funcao_configs` | 2 (Enemeop) / 9 (Fábrica, cópia separada) | `_shared/instagram.ts`, `_shared/anthropic.ts`, `webhook-whatsapp/index.ts`, `webhook-meta/index.ts` — todos leitura via `service_role`, nenhuma escrita encontrada no código (valores parecem ser inseridos manualmente via Studio) |
 
 ## Risco
 
@@ -58,13 +58,12 @@ nenhum (o dashboard usa a Edge Function `conversas-enemeop`, que roda com
 testes).
 
 ### `qr_temp`
-Sem confirmação de código de quem lê/grava (função `captura-qr` não
-versionada). Proposta: `service_role` only, por ser uma tabela de dado de
-sessão técnica (QR code) sem caso de uso legítimo para acesso direto de
-usuário final ou frontend. **Risco registrado explicitamente na
-migration**: se `captura-qr` ou outro consumidor usar a anon key em vez
-de service_role, a política quebra esse fluxo — recuperar o código-fonte
-da função antes de aplicar em produção é fortemente recomendado.
+**Atualizado na Etapa C:** código-fonte de `captura-qr` recuperado
+diretamente do deploy via Supabase MCP (nunca esteve em nenhum
+repositório Git — ver `docs/MISSING_SOURCE_FUNCTIONS.md`). Confirma uso
+exclusivo de `service_role`, sem nenhuma referência a anon key. A
+proposta `service_role`-only está validada por evidência direta, não é
+mais uma suposição de baixa confiança.
 
 ### `funcao_configs`
 Confirmado pelo código: só leitura, só via `service_role`, nenhuma

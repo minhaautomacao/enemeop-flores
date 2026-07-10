@@ -7,7 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildInstrucaoPrimeiraMensagem, mensagemEscalada } from './sdr.js'
+import { buildInstrucaoPrimeiraMensagem } from './sdr.js'
 
 test('primeira mensagem sem nome conhecido pede o nome', () => {
   const instrucao = buildInstrucaoPrimeiraMensagem(true, undefined)
@@ -38,27 +38,10 @@ test('instrucao usa AGENT_NAME configurado, nao "FLORA" fixo', async (t) => {
   process.env.AGENT_NAME = nomeOriginal
 })
 
-test('mensagem de escalonamento nao tem numero de telefone hardcoded quando STORE_HUMAN_PHONE nao esta configurado', () => {
-  const original = process.env.STORE_HUMAN_PHONE
-  delete process.env.STORE_HUMAN_PHONE
-
-  const msg = mensagemEscalada()
-  // Regressão: garante que o numero fixo antigo, (11) 91280-8282, nao volta
-  // a aparecer hardcoded — e que nenhum padrao de telefone brasileiro vaza
-  // quando a env var nao esta configurada.
-  assert.doesNotMatch(msg, /\(11\)\s*9\d{4}-?\d{4}/)
-  assert.match(msg, /especialista/)
-
-  if (original !== undefined) process.env.STORE_HUMAN_PHONE = original
-})
-
-test('mensagem de escalonamento usa STORE_HUMAN_PHONE quando configurado', async () => {
-  process.env.STORE_HUMAN_PHONE = '(11) 90000-0000'
-  const mod = await import(`./sdr.js?human-phone-test=${Date.now()}`)
-  const msg = mod.mensagemEscalada()
-  assert.match(msg, /\(11\) 90000-0000/)
-  delete process.env.STORE_HUMAN_PHONE
-})
+// Mensagem de transferência para atendimento humano (texto fixo "WhatsApp
+// final 8282", nunca telefone completo hardcoded) é testada em
+// funil.test.ts, junto com o classificador de intenção que decide quando
+// ela é usada — ver testes 14-15 daquele arquivo.
 
 test('instrucao vazia quando nao e primeira mensagem', () => {
   assert.equal(buildInstrucaoPrimeiraMensagem(false, 'Camila'), '')

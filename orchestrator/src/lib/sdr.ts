@@ -5,6 +5,15 @@ import { responderLead, notificarEscalada } from './whatsapp.js'
 import { responderInstagram, salvarConversa, responderComentarioInstagram, responderComentarioFacebook } from './instagram.js'
 import { searchLiveProductsFromSite, type LiveProduct, type SearchLiveProductsParams } from '../catalog/liveSiteCatalog.js'
 import { randomUUID } from 'crypto'
+import {
+  classificarIntencao,
+  intencaoInterrompeFluxo,
+  mensagemForaDeEscopo,
+  mensagemTransferencia,
+  extrairDadosQualificacao,
+  estadoInicial,
+  type EstadoConversa,
+} from './funil.js'
 
 // Fallback evita que a simples importação deste módulo quebre sem
 // GROQ_API_KEY configurada (ex.: testes locais que só exercitam a lógica
@@ -16,13 +25,11 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'not-configured' })
 const AGENT_NAME    = process.env.AGENT_NAME ?? 'Flora'
 const WHATSAPP_LINK = process.env.STORE_WHATSAPP_LINK ?? ''
 const PIX_KEY       = process.env.STORE_PIX_KEY ?? ''
-const HUMAN_PHONE   = process.env.STORE_HUMAN_PHONE ?? ''
 
-export function mensagemEscalada(): string {
-  return HUMAN_PHONE
-    ? `Um momento! Vou conectar você com nossa especialista. Ela entrará em contato em instantes pelo número ${HUMAN_PHONE}.`
-    : 'Um momento! Vou conectar você com nossa especialista. Ela entrará em contato em instantes.'
-}
+// Transferência para atendimento humano usa mensagemTransferencia() de
+// lib/funil.ts (texto fixo "WhatsApp final 8282", sem expor o número
+// completo em texto de cliente — ver HUMAN_SUPPORT_WHATSAPP no .env.example
+// para o roteamento interno real da escalada).
 
 // Instrução de primeira mensagem — cumprimenta pelo nome quando já conhecido
 // (unifica o comportamento entre WhatsApp e Instagram, que antes divergiam),
@@ -71,22 +78,19 @@ Seu nome é **${AGENT_NAME}**. Atende pelo WhatsApp com missão de ajudar o clie
 7. Se o cliente pedir atendente humano: "Um momento! Vou conectar você com nossa especialista."
 8. Após 3 trocas sem intenção de compra: "Se preferir, pode me chamar diretamente: ${WHATSAPP_LINK}"
 
+## Escopo — você é uma agente de VENDAS, não uma assistente geral
+- Você só conversa sobre: flores, presentes, arranjos, buquês, cestas, pedidos, entrega, pagamento e dúvidas sobre produtos da Enemeop Flores.
+- Assuntos fora disso (política, religião, notícias, conselhos gerais, curiosidades, temas técnicos, papo social sem objetivo comercial) são interceptados antes de chegar até você — se ainda assim aparecer algo fora do escopo, redirecione educadamente para o WhatsApp, não converse sobre o assunto.
+- Nunca prolongue conversa social sem objetivo comercial.
+
 ## O que NUNCA fazer
 - Inventar produto, cor, preço ou descrição que não esteja no bloco [PRODUTOS DISPONÍVEIS]
+- Afirmar que enviou uma foto sem uma URL real de imagem
+- Inventar valor de frete — sempre vem do cálculo real
+- Confirmar pagamento sem retorno do provedor de pagamento
 - Prometer entrega sem confirmar horário do pedido
 - Tratar dois clientes como se fossem o mesmo
 - Ser robótico — seja humano, caloroso, natural`
-
-const ESCALADA_TRIGGERS = [
-  'falar com pessoa', 'falar com humano', 'atendente', 'atendimento humano',
-  'quero falar com alguém', 'fala comigo', 'assistente pessoal', 'gerente',
-  'responsável', 'proprietário', 'dono', 'falar com carlos'
-]
-
-function deveEscalar(mensagem: string): boolean {
-  const lower = mensagem.toLowerCase()
-  return ESCALADA_TRIGGERS.some(t => lower.includes(t))
-}
 
 interface Mensagem {
   role: 'user' | 'assistant'
@@ -112,6 +116,27 @@ async function salvarHistorico(numero: string, historico: Mensagem[]): Promise<v
   const redis = getRedis()
   const recente = historico.slice(-HISTORICO_MAX_MSGS)
   await redis.setex(`sdr:hist:${numero}`, HISTORICO_TTL_S, JSON.stringify(recente))
+}
+
+// ── Estado do funil (fase + dados coletados) — ver lib/funil.ts ─────────────
+// Persistido separado do histórico de mensagens para não misturar o
+// controle de etapas com o conteúdo da conversa.
+
+async function carregarEstadoFunil(chave: string): Promise<EstadoConversa> {
+  const redis = getRedis()
+  const raw = await redis.get(`sdr:estado:${chave}`)
+  if (!raw) return estadoInicial()
+  try {
+    return JSON.parse(raw)
+  } catch (err) {
+    console.error(`[SDR] Estado do funil corrompido para ${chave}:`, err)
+    return estadoInicial()
+  }
+}
+
+async function salvarEstadoFunil(chave: string, estado: EstadoConversa): Promise<void> {
+  const redis = getRedis()
+  await redis.setex(`sdr:estado:${chave}`, HISTORICO_TTL_S, JSON.stringify(estado))
 }
 
 // ── Detecção de intenção de produto ──────────────────────────────────────────
@@ -177,19 +202,38 @@ function formatarContextoProdutos(produtos: LiveProduct[]): string {
 // ── Processamento WhatsApp ────────────────────────────────────────────────────
 
 export async function processarMensagemSDR(numero: string, textoCliente: string, nomeCliente?: string): Promise<void> {
-  if (deveEscalar(textoCliente)) {
-    await responderLead({
-      numero,
-      mensagem: mensagemEscalada(),
-    })
+  // Portão de escopo — roda ANTES de qualquer chamada de IA generativa.
+  // A Flora é uma agente de vendas, não uma assistente geral: assunto fora
+  // do escopo comercial, reclamação e pedido de atendimento humano nunca
+  // chegam ao Groq — a resposta é sempre fixa e determinística.
+  let estadoFunil = await carregarEstadoFunil(numero)
+  const intencao = classificarIntencao(textoCliente, estadoFunil.fase)
+
+  if (intencaoInterrompeFluxo(intencao)) {
+    if (intencao === 'assunto_fora_escopo') {
+      await responderLead({ numero, mensagem: mensagemForaDeEscopo() })
+      // Fase e dados coletados NÃO mudam — o cliente pode voltar ao fluxo
+      // comercial na próxima mensagem sem perder o que já foi coletado.
+      console.log(`[SDR] Assunto fora de escopo de ${numero} — redirecionado`)
+      return
+    }
+    // reclamacao ou atendimento_humano → transferência real, com motivo registrado
+    await responderLead({ numero, mensagem: mensagemTransferencia() })
+    estadoFunil = { ...estadoFunil, fase: 'transferido_humano', dados: { ...estadoFunil.dados, motivoTransferencia: `${intencao}: "${textoCliente}"` } }
+    await salvarEstadoFunil(numero, estadoFunil)
     await notificarEscalada(
       randomUUID(),
-      'escalada-whatsapp',
-      `Cliente ${numero} pediu atendimento humano. Última mensagem: "${textoCliente}"`
+      `escalada-whatsapp-${intencao}`,
+      `Cliente ${numero} — ${intencao}. Última mensagem: "${textoCliente}"`
     )
-    console.log(`[SDR] Escalada solicitada por ${numero}`)
+    console.log(`[SDR] Transferência (${intencao}) solicitada por ${numero}`)
     return
   }
+
+  // Atualiza dados de qualificação coletados até aqui (sem sobrescrever o
+  // que já foi respondido — evita repetir pergunta já respondida).
+  estadoFunil = { ...estadoFunil, dados: extrairDadosQualificacao(textoCliente, estadoFunil.dados) }
+  await salvarEstadoFunil(numero, estadoFunil)
 
   const historico = await carregarHistorico(numero)
   const primeiraMensagem = historico.length === 0
@@ -319,18 +363,33 @@ export async function processarMensagemSDRInstagram(
   textoCliente: string,
   opts?: { leadId?: string; nomeExibido?: string }
 ): Promise<void> {
-  if (deveEscalar(textoCliente)) {
-    await responderInstagram(canalId, mensagemEscalada())
+  const chave = `ig:${canalId}`
+
+  // Portão de escopo — mesma regra do WhatsApp (ver processarMensagemSDR).
+  let estadoFunil = await carregarEstadoFunil(chave)
+  const intencao = classificarIntencao(textoCliente, estadoFunil.fase)
+
+  if (intencaoInterrompeFluxo(intencao)) {
+    if (intencao === 'assunto_fora_escopo') {
+      await responderInstagram(canalId, mensagemForaDeEscopo())
+      console.log(`[SDR/Instagram] Assunto fora de escopo de ${canalId} — redirecionado`)
+      return
+    }
+    await responderInstagram(canalId, mensagemTransferencia())
+    estadoFunil = { ...estadoFunil, fase: 'transferido_humano', dados: { ...estadoFunil.dados, motivoTransferencia: `${intencao}: "${textoCliente}"` } }
+    await salvarEstadoFunil(chave, estadoFunil)
     await notificarEscalada(
       randomUUID(),
-      'escalada-instagram',
-      `Cliente Instagram (${canalId}) pediu atendimento humano. Última mensagem: "${textoCliente}"`
+      `escalada-instagram-${intencao}`,
+      `Cliente Instagram (${canalId}) — ${intencao}. Última mensagem: "${textoCliente}"`
     )
-    console.log(`[SDR/Instagram] Escalada solicitada por ${canalId}`)
+    console.log(`[SDR/Instagram] Transferência (${intencao}) solicitada por ${canalId}`)
     return
   }
 
-  const chave = `ig:${canalId}`
+  estadoFunil = { ...estadoFunil, dados: extrairDadosQualificacao(textoCliente, estadoFunil.dados) }
+  await salvarEstadoFunil(chave, estadoFunil)
+
   const historico = await carregarHistorico(chave)
   const primeiraMensagem = historico.length === 0
   historico.push({ role: 'user', content: textoCliente })

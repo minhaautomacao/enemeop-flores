@@ -6,3 +6,8 @@ node_modules/
 *.log
 
 .vercel
+
+# Credenciais reais — nunca commitar (allowlist: bloqueia tudo, libera so README.md)
+.credentials/**
+!.credentials/**/
+!.credentials/**/README.md

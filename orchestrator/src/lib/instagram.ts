@@ -45,6 +45,44 @@ export async function responderInstagram(recipientId: string, texto: string): Pr
   }
 }
 
+/**
+ * Envia uma foto real de produto via Instagram DM (Graph API attachment de
+ * imagem). Nunca deve ser chamada com uma URL inventada — o chamador
+ * (funil.ts, responderPedidoDeFoto) só produz fotoUrl quando existe uma
+ * URL real vinda do catálogo.
+ */
+export async function responderInstagramComFoto(recipientId: string, imagemUrl: string): Promise<boolean> {
+  if (!ACCESS_TOKEN) {
+    console.warn('[Instagram] INSTAGRAM_ACCESS_TOKEN não configurado — foto não enviada')
+    return false
+  }
+
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/${PAGE_ID}/messages?access_token=${ACCESS_TOKEN}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recipient: { id: recipientId },
+          message: { attachment: { type: 'image', payload: { url: imagemUrl, is_reusable: true } } },
+          messaging_type: 'RESPONSE',
+        }),
+      }
+    )
+    const data = await res.json() as { message_id?: string; error?: { message: string } }
+    if (data.error) {
+      console.error('[Instagram] Erro Graph API ao enviar foto:', data.error.message)
+      return false
+    }
+    console.log(`[Instagram] ✓ Foto enviada para ${recipientId} — id: ${data.message_id}`)
+    return true
+  } catch (e) {
+    console.error('[Instagram] Falha ao enviar foto:', e)
+    return false
+  }
+}
+
 export async function responderComentarioInstagram(commentId: string, texto: string): Promise<boolean> {
   const token = ACCESS_TOKEN || PAGE_ACCESS_TOKEN
   if (!token) {

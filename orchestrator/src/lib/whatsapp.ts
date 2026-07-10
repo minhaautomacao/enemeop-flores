@@ -115,6 +115,53 @@ export async function enviarMensagem(opts: EnviarMensagemOpts): Promise<boolean>
   return false
 }
 
+// ── Envio de imagem (foto real de produto) ─────────────────────────────────
+
+export interface EnviarImagemOpts {
+  numero: string
+  imagemUrl: string
+  legenda?: string
+}
+
+/**
+ * Envia uma foto real de produto via Z-API. Nunca deve ser chamada com uma
+ * URL inventada — o chamador (funil.ts, responderPedidoDeFoto) só produz
+ * fotoUrl quando existe uma URL real vinda do catálogo.
+ */
+export async function enviarImagem(opts: EnviarImagemOpts): Promise<boolean> {
+  if (!credenciaisOk()) {
+    console.warn('[WhatsApp] ZAPI_INSTANCE_ID ou ZAPI_TOKEN ausentes — imagem ignorada')
+    return false
+  }
+
+  const phone = normalizarTelefone(opts.numero)
+  const url   = `${ZAPI_BASE}/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}/send-image`
+  const body  = JSON.stringify({ phone, image: opts.imagemUrl, caption: opts.legenda ?? '' })
+  const headers = {
+    'Content-Type': 'application/json',
+    'Client-Token': ZAPI_CLIENT_TOKEN,
+  }
+
+  try {
+    const res = await fetchComTimeout(url, { method: 'POST', headers, body })
+    if (!res.ok) {
+      const texto = await res.text()
+      console.error(`[WhatsApp] Erro HTTP ${res.status} ao enviar imagem: ${texto}`)
+      return false
+    }
+    const data = await res.json() as ZApiSendResponse
+    if (data.error || data.message === 'error') {
+      console.error('[WhatsApp] Erro da API ao enviar imagem:', data.error ?? data.message)
+      return false
+    }
+    console.log(`[WhatsApp] Imagem enviada para ${phone}`)
+    return true
+  } catch (err: unknown) {
+    console.error('[WhatsApp] Falha ao enviar imagem:', err)
+    return false
+  }
+}
+
 // ── Escalada para humano ──────────────────────────────────────────────────────
 
 export async function notificarEscalada(taskId: string, tipo: string, motivo: string): Promise<void> {

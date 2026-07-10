@@ -53,6 +53,7 @@ export type LiveProduct = {
   colors: string[]
   flowers: string[]
   category?: string
+  image?: string
 }
 
 export type SearchLiveProductsParams = {
@@ -78,6 +79,10 @@ interface WooCategory {
   slug: string
 }
 
+interface WooImage {
+  src: string
+}
+
 interface WooProduct {
   id: number
   name: string
@@ -90,6 +95,7 @@ interface WooProduct {
   description: string
   categories: WooCategory[]
   attributes: WooAttribute[]
+  images: WooImage[]
 }
 
 // ── Log estruturado ───────────────────────────────────────────────────────────
@@ -353,6 +359,7 @@ function mapWooToLiveProduct(p: WooProduct): LiveProduct {
     colors:      colorsFromWooProduct(p),
     flowers:     flowersFromWooProduct(p),
     category,
+    image:       p.images?.[0]?.src || undefined,
   }
 }
 
@@ -549,6 +556,10 @@ async function fetchProductDetailScrape(raw: RawProduct): Promise<LiveProduct | 
   // Cores e flores: SOMENTE da descrição da página individual
   const pageText = description ?? ''
 
+  const image = root.querySelector('meta[property="og:image"]')?.getAttribute('content')
+    || root.querySelector('.woocommerce-product-gallery__image img')?.getAttribute('src')
+    || undefined
+
   const detail: LiveProduct = {
     name:        raw.name,
     url:         raw.url,
@@ -557,6 +568,7 @@ async function fetchProductDetailScrape(raw: RawProduct): Promise<LiveProduct | 
     colors:      extractColors(pageText),
     flowers:     extractFlowers(pageText),
     category:    raw.category,
+    image,
   }
 
   log('INFO', 'scrape_page_read', {

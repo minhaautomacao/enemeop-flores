@@ -5,8 +5,8 @@ import Link from 'next/link'
 import { EnumeopLogo } from '@/components/enemeop-logo'
 import { Truck } from 'lucide-react'
 
-const SUPABASE_URL = 'https://gftnjvdvzgjkhwxnxnwl.supabase.co'
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmdG5qdmR2emdqa2h3eG54bndsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAwMjExNTMsImV4cCI6MjA5NTU5NzE1M30.zgX7BLR5u8f3MNA5kwUVk3P6bjSWEjf9AZP0ksLjvY4'
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? ''
+const SUPABASE_ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
 type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu'
 

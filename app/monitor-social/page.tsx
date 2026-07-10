@@ -15,7 +15,11 @@ const IconFacebook = () => (
   </svg>
 );
 
-const FABRICA_URL = 'https://ebeapnydeiwuewxatuuw.supabase.co';
+// leads-enemeop e conversas-enemeop foram migradas para
+// enemeop-flores/supabase/functions/ — pendente de deploy no projeto
+// Enemeop (ver docs/DEPLOYMENT.md). Até o deploy, aponta para o mesmo
+// projeto Supabase do restante do app.
+const FUNCTIONS_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
 
 interface Lead {
   id: string;
@@ -75,7 +79,7 @@ export default function MonitorSocialPage() {
   const fetchDados = useCallback(async () => {
     let algumSucesso = false;
     try {
-      const rLeads = await fetch(`${FABRICA_URL}/functions/v1/leads-enemeop?limit=300`);
+      const rLeads = await fetch(`${FUNCTIONS_URL}/functions/v1/leads-enemeop?limit=300`);
       if (rLeads.ok) {
         const j = await rLeads.json();
         setLeads(j.leads ?? []);
@@ -84,7 +88,7 @@ export default function MonitorSocialPage() {
     } catch { /* leads offline */ }
 
     try {
-      const rConv = await fetch(`${FABRICA_URL}/functions/v1/conversas-enemeop?limit=30`);
+      const rConv = await fetch(`${FUNCTIONS_URL}/functions/v1/conversas-enemeop?limit=30`);
       if (rConv.ok) {
         const j = await rConv.json();
         setConversas((j.conversas ?? j.leads ?? []).slice(0, 30));

@@ -4,10 +4,12 @@ import { formatTempo } from '@/lib/utils';
 
 export const metadata: Metadata = { title: 'Clientes / CRM' };
 
-const FABRICA_URL = process.env.NEXT_PUBLIC_FABRICA_URL ?? 'https://ebeapnydeiwuewxatuuw.supabase.co';
+// leads-enemeop foi migrada para enemeop-flores/supabase/functions/ —
+// pendente de deploy no projeto Enemeop (ver docs/DEPLOYMENT.md).
+const FUNCTIONS_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
 
 async function getLeads(): Promise<Lead[]> {
-  const url = `${FABRICA_URL}/functions/v1/leads-enemeop?limit=100`;
+  const url = `${FUNCTIONS_URL}/functions/v1/leads-enemeop?limit=100`;
   try {
     const res = await fetch(url, { next: { revalidate: 15 } });
     if (!res.ok) return [];

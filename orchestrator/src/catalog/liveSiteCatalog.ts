@@ -46,6 +46,9 @@ function getWooConfig(): { url: string; key: string; secret: string } | null {
 // ── Tipos públicos ────────────────────────────────────────────────────────────
 
 export type LiveProduct = {
+  /** ID estável do produto na fonte (ex.: ID numérico do WooCommerce). Ausente
+   * quando o produto veio só do fallback de scraping (sem API estruturada). */
+  id?: string
   name: string
   url: string
   price?: number
@@ -54,6 +57,8 @@ export type LiveProduct = {
   flowers: string[]
   category?: string
   image?: string
+  /** De onde este produto veio — nunca inventado, sempre rastreável. */
+  origem: 'woocommerce_api' | 'scraping_fallback'
 }
 
 export type SearchLiveProductsParams = {
@@ -352,6 +357,7 @@ function mapWooToLiveProduct(p: WooProduct): LiveProduct {
   const category = p.categories[0]?.slug ?? ''
 
   return {
+    id:          String(p.id),
     name:        decodeHtmlEntities(p.name),
     url:         p.permalink,
     price:       priceNum,
@@ -360,6 +366,7 @@ function mapWooToLiveProduct(p: WooProduct): LiveProduct {
     flowers:     flowersFromWooProduct(p),
     category,
     image:       p.images?.[0]?.src || undefined,
+    origem:      'woocommerce_api',
   }
 }
 
@@ -569,6 +576,7 @@ async function fetchProductDetailScrape(raw: RawProduct): Promise<LiveProduct | 
     flowers:     extractFlowers(pageText),
     category:    raw.category,
     image,
+    origem:      'scraping_fallback',
   }
 
   log('INFO', 'scrape_page_read', {

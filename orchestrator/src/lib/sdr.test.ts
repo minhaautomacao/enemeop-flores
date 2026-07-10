@@ -7,7 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildInstrucaoPrimeiraMensagem } from './sdr.js'
+import { buildInstrucaoPrimeiraMensagem, chaveBase } from './sdr.js'
 
 test('primeira mensagem sem nome conhecido pede o nome', () => {
   const instrucao = buildInstrucaoPrimeiraMensagem(true, undefined)
@@ -46,4 +46,20 @@ test('instrucao usa AGENT_NAME configurado, nao "FLORA" fixo', async (t) => {
 test('instrucao vazia quando nao e primeira mensagem', () => {
   assert.equal(buildInstrucaoPrimeiraMensagem(false, 'Camila'), '')
   assert.equal(buildInstrucaoPrimeiraMensagem(false, undefined), '')
+})
+
+// ── Isolamento de estado entre canais (seção 3 do pedido de integração) ──
+
+test('chave de estado nunca colide entre WhatsApp e Instagram com o mesmo identificador', () => {
+  const mesmoId = '17841400000000000'
+  const chaveWhats = chaveBase('whatsapp', mesmoId, 'estado')
+  const chaveInsta = chaveBase('instagram', mesmoId, 'estado')
+  assert.notEqual(chaveWhats, chaveInsta)
+  assert.match(chaveWhats, /^enemeop-flores:whatsapp:/)
+  assert.match(chaveInsta, /^enemeop-flores:instagram:/)
+})
+
+test('chave de estado inclui workspace e versao do formato', () => {
+  const chave = chaveBase('whatsapp', '5511999999999', 'estado')
+  assert.match(chave, /^enemeop-flores:whatsapp:5511999999999:estado:v\d+$/)
 })

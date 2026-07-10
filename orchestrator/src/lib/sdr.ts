@@ -6,12 +6,34 @@ import { responderInstagram, salvarConversa, responderComentarioInstagram, respo
 import { searchLiveProductsFromSite, type LiveProduct, type SearchLiveProductsParams } from '../catalog/liveSiteCatalog.js'
 import { randomUUID } from 'crypto'
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+// Fallback evita que a simples importação deste módulo quebre sem
+// GROQ_API_KEY configurada (ex.: testes locais que só exercitam a lógica
+// de composição de prompt). Uma chamada real à API sem chave válida
+// continua falhando normalmente, com erro de autenticação do Groq.
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || 'not-configured' })
 
 // Identidade e contato configuráveis por workspace — ver .env.example
 const AGENT_NAME    = process.env.AGENT_NAME ?? 'Flora'
 const WHATSAPP_LINK = process.env.STORE_WHATSAPP_LINK ?? ''
 const PIX_KEY       = process.env.STORE_PIX_KEY ?? ''
+const HUMAN_PHONE   = process.env.STORE_HUMAN_PHONE ?? ''
+
+export function mensagemEscalada(): string {
+  return HUMAN_PHONE
+    ? `Um momento! Vou conectar você com nossa especialista. Ela entrará em contato em instantes pelo número ${HUMAN_PHONE}.`
+    : 'Um momento! Vou conectar você com nossa especialista. Ela entrará em contato em instantes.'
+}
+
+// Instrução de primeira mensagem — cumprimenta pelo nome quando já conhecido
+// (unifica o comportamento entre WhatsApp e Instagram, que antes divergiam),
+// usando sempre AGENT_NAME em vez do nome fixo "Flora".
+export function buildInstrucaoPrimeiraMensagem(primeiraMensagem: boolean, nomeCliente?: string | null): string {
+  if (!primeiraMensagem) return ''
+  if (nomeCliente) {
+    return `\n\n## INSTRUÇÃO OBRIGATÓRIA\nVocê é ${AGENT_NAME.toUpperCase()}. O cliente se chama **${nomeCliente}**. Cumprimente pelo nome. NÃO peça o nome — você já sabe.`
+  }
+  return '\n\n## INSTRUÇÃO OBRIGATÓRIA\nPrimeira mensagem. COMECE pedindo o nome: "Oi, pode me dizer seu nome pra eu te atender melhor?"'
+}
 
 // Prompt base — sem catálogo. Produtos chegam como contexto injetado em tempo real.
 const SYSTEM_PROMPT = `Você é a assistente virtual da **Enemeop Flores**, floricultura em São Paulo desde 1997.
@@ -158,7 +180,7 @@ export async function processarMensagemSDR(numero: string, textoCliente: string,
   if (deveEscalar(textoCliente)) {
     await responderLead({
       numero,
-      mensagem: 'Um momento! Vou conectar você com nossa especialista. Ela entrará em contato em instantes pelo número (11) 91280-8282.',
+      mensagem: mensagemEscalada(),
     })
     await notificarEscalada(
       randomUUID(),
@@ -217,12 +239,7 @@ export async function processarMensagemSDR(numero: string, textoCliente: string,
   }
 
   // Monta system prompt final com contexto de produtos (se houver) e instruções de primeira mensagem
-  let instrucoes = ''
-  if (primeiraMensagem) {
-    instrucoes = nomeCliente
-      ? `\n\n## INSTRUÇÃO OBRIGATÓRIA\nVocê é FLORA. O cliente se chama **${nomeCliente}**. Cumprimente pelo nome. NÃO peça o nome — você já sabe.`
-      : '\n\n## INSTRUÇÃO OBRIGATÓRIA\nPrimeira mensagem. COMECE pedindo o nome: "Oi, pode me dizer seu nome pra eu te atender melhor?"'
-  }
+  const instrucoes = buildInstrucaoPrimeiraMensagem(primeiraMensagem, nomeCliente)
 
   const systemFinal = SYSTEM_PROMPT + contextoProdutos + instrucoes
 
@@ -303,9 +320,7 @@ export async function processarMensagemSDRInstagram(
   opts?: { leadId?: string; nomeExibido?: string }
 ): Promise<void> {
   if (deveEscalar(textoCliente)) {
-    await responderInstagram(canalId,
-      'Um momento! Vou conectar você com nossa especialista. Ela entrará em contato em instantes pelo número (11) 91280-8282.'
-    )
+    await responderInstagram(canalId, mensagemEscalada())
     await notificarEscalada(
       randomUUID(),
       'escalada-instagram',
@@ -354,9 +369,10 @@ export async function processarMensagemSDRInstagram(
     }
   }
 
-  const instrucaoPrimeira = primeiraMensagem
-    ? '\n\n## INSTRUÇÃO OBRIGATÓRIA\nPrimeira mensagem. COMECE pedindo o nome: "Oi, pode me dizer seu nome pra eu te atender melhor?"'
-    : ''
+  // Cumprimenta pelo nome de exibição do Instagram quando disponível, em vez
+  // de sempre pedir o nome de novo (antes divergia do comportamento do
+  // WhatsApp, que já cumprimentava por nome quando conhecido).
+  const instrucaoPrimeira = buildInstrucaoPrimeiraMensagem(primeiraMensagem, opts?.nomeExibido)
 
   const systemFinal = SYSTEM_PROMPT + contextoProdutos + instrucaoPrimeira
 

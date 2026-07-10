@@ -27,8 +27,11 @@ import {
   registrarPergunta,
   jaPerguntado,
   estadoInicial,
+  avancarFunil,
+  processarConfirmacaoPagamento,
   type ProdutoCatalogo,
   type EstadoConversa,
+  type DependenciasFunil,
 } from './funil.js'
 
 // 1. cliente pede buquê para aniversário
@@ -275,4 +278,231 @@ test('intencoes de frete, pagamento e status do pedido sao classificadas correta
   assert.equal(classificarIntencao('Qual o valor da entrega?', 'aguardando_endereco'), 'frete')
   assert.equal(classificarIntencao('Como eu pago?', 'aguardando_confirmacao'), 'pagamento')
   assert.equal(classificarIntencao('Cadê meu pedido, já foi entregue?', 'pedido_criado'), 'status_pedido')
+})
+
+// ── Classificador — intenção mista, digitação, contexto de fase ──────────
+
+test('intencao mista: sinal comercial tem prioridade sobre assunto externo citado de passagem', () => {
+  const intencao = classificarIntencao('quero flores e também queria saber sobre futebol', 'inicio')
+  assert.notEqual(intencao, 'assunto_fora_escopo')
+})
+
+test('intencao mista: pergunta de valor com assunto externo responde so o valor/produto', () => {
+  const intencao = classificarIntencao('qual o valor e você gosta de música?', 'recomendacao')
+  assert.notEqual(intencao, 'assunto_fora_escopo')
+})
+
+test('assunto externo isolado, sem sinal comercial e fora de compra em andamento, ainda interrompe', () => {
+  const intencao = classificarIntencao('o que você acha do governo atual?', 'recomendacao')
+  assert.equal(intencao, 'assunto_fora_escopo')
+})
+
+test('reclamacao "meu pedido nao chegou" e atendimento humano continuam interrompendo o fluxo', () => {
+  const intencao = classificarIntencao('meu pedido não chegou', 'pedido_criado')
+  assert.equal(intencao, 'reclamacao')
+  assert.equal(intencaoInterrompeFluxo(intencao), true)
+})
+
+test('pedido de atendimento humano com frase natural ("quero falar com uma pessoa")', () => {
+  const intencao = classificarIntencao('quero falar com uma pessoa', 'recomendacao')
+  assert.equal(intencao, 'atendimento_humano')
+})
+
+test('"oi" durante aguardando_pagamento nao reinicia o funil, dispatcher so lembra do pagamento', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: { valorTotal: 162.5, linkPagamento: 'https://pagamento.exemplo/x', paymentId: 'pay_x' },
+    perguntasFeitas: [],
+  }
+  const intencao = classificarIntencao('oi', estado.fase)
+  assert.equal(intencaoInterrompeFluxo(intencao), false)
+  const r = await avancarFunil(estado, 'oi', intencao, deps)
+  assert.equal(r.estado.fase, 'aguardando_pagamento')
+  assert.match(r.mensagem, /já te enviei o link de pagamento/i)
+})
+
+test('tolerancia a erro de digitacao: "reclamaçao" e "atendente" com typo ainda classificam corretamente', () => {
+  assert.equal(classificarIntencao('isso e um reclamaçã, muito ruim', 'qualificacao'), 'reclamacao')
+  assert.equal(classificarIntencao('quero falar com atendento', 'qualificacao'), 'atendimento_humano')
+})
+
+test('preco, codigo e url do catalogo passam intactos ate a selecao do produto (LLM nunca altera fatos comerciais)', async () => {
+  const deps = depsFake({
+    buscarCatalogo: async () => [
+      { nome: 'Buquê Exclusivo', preco: 233.37, disponivel: true, codigo: 'WOO-9981', url: 'https://enemeopflores.com.br/produto/9981' },
+    ],
+  })
+  let estado = estadoInicial()
+  const r1 = await avancarFunil(estado, 'Quero flores para minha mãe, uns R$250, entrega hoje, CEP 04204-030', 'recomendacao', deps)
+  estado = r1.estado
+  let guard = 0
+  while ((estado.fase === 'qualificacao' || estado.fase === 'inicio') && guard < 6) {
+    const r = await avancarFunil(estado, 'tanto faz', 'compra_produto', deps)
+    estado = r.estado
+    guard++
+  }
+  const rEscolha = await avancarFunil(estado, 'Fico com esse mesmo', 'compra_produto', deps)
+  assert.equal(rEscolha.estado.dados.produto?.preco, 233.37)
+  assert.equal(rEscolha.estado.dados.produto?.codigo, 'WOO-9981')
+  assert.equal(rEscolha.estado.dados.produto?.url, 'https://enemeopflores.com.br/produto/9981')
+})
+
+test('cliente retoma exatamente da fase salva apos uma pausa (nao reinicia o funil)', async () => {
+  const deps = depsFake()
+  const estadoSalvo: EstadoConversa = {
+    fase: 'aguardando_endereco',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' } },
+    perguntasFeitas: ['ocasiao', 'destinatario', 'orcamento', 'dataEntrega'],
+  }
+  const r = await avancarFunil(estadoSalvo, 'CEP 04204-030, é para Camila', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'calculando_frete')
+  assert.equal(r.estado.dados.produto?.nome, 'Buquê de Rosas')
+})
+
+test('acentuacao e caixa alta nao mudam a classificacao', () => {
+  assert.equal(classificarIntencao('QUERO FALAR COM ATENDENTE', 'inicio'), 'atendimento_humano')
+  assert.equal(classificarIntencao('Reclamação: pedido chegou QUEBRADO', 'inicio'), 'reclamacao')
+})
+
+// ── Dispatcher avancarFunil — fluxo completo com dependencias fake ────────
+
+function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
+  return {
+    buscarCatalogo: async () => [
+      { nome: 'Buquê de Rosas', preco: 140, disponivel: true, fotoUrl: 'https://site/rosas.jpg' },
+      { nome: 'Arranjo Girassóis', preco: 135, disponivel: true },
+    ],
+    calcularFrete: async () => ({ ok: true, valor: 22.5 }),
+    gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
+    criarPedido: async () => ({ pedidoId: 'pedido_fake_001' }),
+    ...overrides,
+  }
+}
+
+test('dispatcher: qualificacao pergunta um campo por vez, sem repetir', async () => {
+  let estado = estadoInicial()
+  const deps = depsFake()
+
+  const r1 = await avancarFunil(estado, 'Quero um buquê para o aniversário da minha esposa', 'recomendacao', deps)
+  estado = r1.estado
+  assert.equal(estado.dados.ocasiao, 'aniversario')
+  assert.equal(estado.fase, 'qualificacao')
+  assert.match(r1.mensagem, /orçamento|orcamento|Pra qual ocasião|Pra quando|bairro ou CEP/i)
+
+  // A pergunta ja feita nao pode repetir mesmo em rodadas seguintes.
+  const camposPerguntados = [...estado.perguntasFeitas]
+  const r2 = await avancarFunil(estado, 'uns R$ 150', 'recomendacao', deps)
+  assert.ok(!camposPerguntados.includes('orcamento') || r2.estado.dados.orcamento === 150)
+})
+
+test('dispatcher: fluxo feliz completo do inicio ate pedido_criado', async () => {
+  const deps = depsFake()
+  let estado = estadoInicial()
+
+  // 1) qualificação completa em uma tacada (mensagem rica em dados)
+  const r1 = await avancarFunil(
+    estado,
+    'Quero um buquê para minha esposa, aniversário, uns R$150, entrega amanhã, CEP 04204-030',
+    'recomendacao',
+    deps,
+  )
+  estado = r1.estado
+
+  // Pode levar mais de uma pergunta dependendo do que a extração não pegou;
+  // simula respostas genéricas até sair de qualificação/recomendação.
+  let guard = 0
+  while ((estado.fase === 'qualificacao' || estado.fase === 'inicio') && guard < 6) {
+    const r = await avancarFunil(estado, 'pode ser qualquer uma, tanto faz', 'compra_produto', deps)
+    estado = r.estado
+    guard++
+  }
+  assert.equal(estado.fase, 'recomendacao')
+
+  // 2) recomendação -> cliente escolhe a primeira opção
+  const rEscolha = await avancarFunil(estado, 'Fico com esse mesmo', 'compra_produto', deps)
+  estado = rEscolha.estado
+  assert.equal(estado.fase, 'produto_selecionado')
+  assert.equal(estado.dados.produto?.nome, 'Buquê de Rosas')
+
+  // 3) confirma quantidade e data
+  const rDetalhes = await avancarFunil(estado, '1 unidade, entrega amanhã de manhã', 'compra_produto', deps)
+  estado = rDetalhes.estado
+  assert.equal(estado.fase, 'aguardando_endereco')
+
+  // 4) endereço
+  const rEndereco = await avancarFunil(estado, 'CEP 04204-030, é para Camila', 'compra_produto', deps)
+  estado = rEndereco.estado
+  assert.equal(estado.fase, 'calculando_frete')
+
+  // 5) cálculo de frete (dependência real seria agente-logistica)
+  const rFrete = await avancarFunil(estado, '', 'compra_produto', deps)
+  estado = rFrete.estado
+  assert.equal(estado.fase, 'aguardando_confirmacao')
+  assert.equal(estado.dados.valorFrete, 22.5)
+  assert.equal(estado.dados.valorTotal, 140 + 22.5)
+  assert.match(rFrete.mensagem, /Resumo do seu pedido/)
+
+  // 6) confirmação -> cria pedido, gera pagamento
+  const rConfirma = await avancarFunil(estado, 'Sim, pode confirmar', 'pagamento', deps)
+  estado = rConfirma.estado
+  assert.equal(estado.fase, 'aguardando_pagamento')
+  assert.equal(estado.dados.pedidoId, 'pedido_fake_001')
+  assert.match(estado.dados.linkPagamento!, /pagamento\.exemplo\/pedido_fake_001/)
+  assert.match(rConfirma.mensagem, /link de pagamento/)
+
+  // 7) confirmação de pagamento — SÓ via provedor, nunca pela mensagem do cliente
+  const rPago = await processarConfirmacaoPagamento(estado, estado.dados.paymentId!, deps.criarPedido)
+  assert.equal(rPago.estado.fase, 'pedido_criado')
+  assert.match(rPago.mensagem, /Pagamento confirmado/)
+})
+
+test('dispatcher: nao confirma resumo com resposta ambigua/negativa', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_confirmacao',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' }, valorFrete: 22.5, valorTotal: 162.5 },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'não, quero mudar o produto', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_confirmacao')
+  assert.equal(r.estado.dados.pedidoId, undefined)
+})
+
+test('dispatcher: frete falha -> transfere para humano, nunca estima', async () => {
+  const deps = depsFake({ calcularFrete: async () => ({ ok: false }) })
+  const estado: EstadoConversa = {
+    fase: 'calculando_frete',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' }, endereco: { cep: '04204-030' } },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, '', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'transferido_humano')
+  assert.match(r.mensagem, /WhatsApp final 8282/)
+  assert.equal(r.estado.dados.valorTotal, undefined)
+})
+
+test('dispatcher: falha ao gerar pagamento -> transfere para humano', async () => {
+  const deps = depsFake({ gerarPagamento: async () => null })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_confirmacao',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' }, valorFrete: 22.5, valorTotal: 162.5 },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim, confirmo', 'pagamento', deps)
+  assert.equal(r.estado.fase, 'transferido_humano')
+  assert.match(r.mensagem, /WhatsApp final 8282/)
+})
+
+test('dispatcher: pedido de foto funciona em qualquer fase com produto em jogo', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_endereco',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, fotoUrl: 'https://site/rosas.jpg' } },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'me manda uma foto', 'foto_produto', deps)
+  assert.equal(r.fotoUrl, 'https://site/rosas.jpg')
+  // Foto não muda a fase do funil.
+  assert.equal(r.estado.fase, 'aguardando_endereco')
 })

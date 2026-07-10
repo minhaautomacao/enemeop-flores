@@ -1,4 +1,31 @@
 /**
+ * _shared/funil.ts (Deno/Supabase Edge Functions) — cópia sincronizada de
+ * orchestrator/src/lib/funil.ts (Node/Render).
+ *
+ * DECISÃO DE ARQUITETURA (ver relatório final da integração do funil
+ * comercial): o núcleo do funil (classificação de intenção, fases,
+ * qualificação, dispatcher avancarFunil) é puro — zero imports, zero
+ * chamada de rede — e portanto roda sem alteração tanto em Node quanto em
+ * Deno. Ainda assim, Deno Edge Functions e o serviço Node do orchestrator
+ * são bundles/deploys independentes: um import relativo cruzando
+ * supabase/functions/ ↔ orchestrator/src/ não é garantidamente resolvido
+ * pelo bundler de deploy de Edge Functions da Supabase. Em vez de arriscar
+ * isso sem poder testar (não há Deno CLI disponível no ambiente onde esta
+ * integração foi construída), optou-se por manter duas cópias do mesmo
+ * código-fonte puro, com um teste de paridade em
+ * orchestrator/src/lib/funil.parity.test.ts que falha caso as duas cópias
+ * divirjam — ou seja, a "fonte única" é garantida por teste automatizado,
+ * não por um grafo de import compartilhado.
+ *
+ * NÃO EDITE este arquivo isoladamente — qualquer mudança de regra de
+ * negócio deve ser feita em orchestrator/src/lib/funil.ts e depois
+ * copiada aqui (o teste de paridade avisa se isso for esquecido).
+ *
+ * Tudo abaixo desta linha é idêntico, caractere por caractere, a
+ * orchestrator/src/lib/funil.ts.
+ */
+
+/**
  * funil.ts — Restrição de escopo, classificação de intenção e funil de
  * vendas da Flora (agente comercial da Enemeop Flores).
  *

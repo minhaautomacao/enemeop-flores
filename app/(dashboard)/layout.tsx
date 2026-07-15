@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { href: '/dashboard/pedidos',       label: 'Pedidos',           icon: ClipboardList   },
   { href: '/dashboard/leads',         label: 'Clientes / CRM',    icon: Users           },
   { href: '/dashboard/conversas',     label: 'Conversas ao Vivo', icon: MessagesSquare  },
+  { href: '/dashboard/atendimento',  label: 'Atendimento Flora', icon: MessagesSquare  },
   { href: '/dashboard/entregas',      label: 'Entregas',          icon: Truck           },
   { href: '/dashboard/financeiro',    label: 'Financeiro',        icon: BarChart3       },
   { href: '/dashboard/configuracoes', label: 'Configurações',     icon: Settings        },

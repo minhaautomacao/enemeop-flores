@@ -1,7 +1,7 @@
-import { createClient } from '@/lib/supabase/server';
+﻿import { createClient } from '@/lib/supabase/server';
 import type { Metadata } from 'next';
 
-export const metadata: Metadata = { title: 'Visão Geral' };
+export const metadata: Metadata = { title: 'VisÃ£o Geral' };
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -21,11 +21,12 @@ export default async function DashboardPage() {
 
   const hoje = new Date().toISOString().split('T')[0];
 
-  const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }, { count: entregasHoje }] = await Promise.all([
+  const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }, { count: entregasHoje }, { count: aguardandoHumano }] = await Promise.all([
     supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
     supabase.from('leads').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
     supabase.from('pedidos').select('id, produto, status, cliente_nome, valor, criado_em').order('criado_em', { ascending: false }).limit(5),
     supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje).in('status', ['saiu', 'entregue']),
+    (supabase as any).from('conversas').select('*', { count: 'exact', head: true }).in('canal', ['instagram', 'facebook']).eq('status_atendimento', 'aguardando_humano'),
   ]);
 
   const { data: pedidosPagosRaw } = await supabase
@@ -36,8 +37,9 @@ export default async function DashboardPage() {
   const stats = [
     { label: 'Pedidos hoje',   valor: String(pedidosHoje ?? 0),         sub: 'registrados hoje',     cor: 'text-gold' },
     { label: 'Receita do dia', valor: `R$ ${receitaFmt}`,               sub: 'pedidos confirmados',  cor: 'text-status-success' },
-    { label: 'Entregas',       valor: String(entregasHoje ?? 0),         sub: 'saíram ou entregues',  cor: 'text-status-info' },
+    { label: 'Entregas',       valor: String(entregasHoje ?? 0),         sub: 'saÃ­ram ou entregues',  cor: 'text-status-info' },
     { label: 'Novos clientes', valor: String(novosClientes ?? 0),        sub: 'capturados hoje',      cor: 'text-gold-light' },
+    { label: 'Aguardando humano', valor: String(aguardandoHumano ?? 0), sub: 'Inbox Flora', cor: 'text-status-warning' },
   ];
 
   return (
@@ -57,7 +59,7 @@ export default async function DashboardPage() {
 
       <div className="p-6 space-y-6">
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           {stats.map((stat) => (
             <div key={stat.label} className="stat-card">
               <p className="text-xs font-medium text-text-muted uppercase tracking-wide">{stat.label}</p>
@@ -74,15 +76,15 @@ export default async function DashboardPage() {
           {!pedidosRecentes || pedidosRecentes.length === 0 ? (
             <div className="py-10 text-center">
               <p className="text-text-muted text-sm">Nenhum pedido registrado ainda.</p>
-              <p className="text-text-faint text-xs mt-1">Os pedidos fechados pelo agente aparecerão aqui.</p>
+              <p className="text-text-faint text-xs mt-1">Os pedidos fechados pelo agente aparecerÃ£o aqui.</p>
             </div>
           ) : (
             <div className="space-y-3">
               {pedidosRecentes.map((p: Record<string, unknown>) => (
                 <div key={String(p.id)} className="flex items-center justify-between rounded-lg border border-border p-3">
                   <div>
-                    <p className="text-sm font-medium text-text-primary">{String(p.produto ?? '—')}</p>
-                    <p className="text-xs text-text-muted">{String(p.cliente_nome ?? '—')}</p>
+                    <p className="text-sm font-medium text-text-primary">{String(p.produto ?? 'â€”')}</p>
+                    <p className="text-xs text-text-muted">{String(p.cliente_nome ?? 'â€”')}</p>
                   </div>
                   <p className="text-sm font-semibold text-gold">R$ {Number(p.valor ?? 0).toFixed(2)}</p>
                 </div>
@@ -93,20 +95,21 @@ export default async function DashboardPage() {
 
         <div className="card">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-base font-semibold text-text-primary">Vendas — últimos 7 dias</h2>
+            <h2 className="text-base font-semibold text-text-primary">Vendas â€” Ãºltimos 7 dias</h2>
           </div>
           <div className="flex items-end gap-2 h-24">
-            {['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'].map((dia) => (
+            {['Seg','Ter','Qua','Qui','Sex','SÃ¡b','Dom'].map((dia) => (
               <div key={dia} className="flex-1 flex flex-col items-center gap-1">
                 <div className="w-full rounded-t bg-gold/20" style={{ height: '4px' }} />
                 <span className="text-xs text-text-faint">{dia}</span>
               </div>
             ))}
           </div>
-          <p className="text-center text-xs text-text-faint mt-2">Os dados de vendas aparecerão aqui conforme pedidos forem fechados.</p>
+          <p className="text-center text-xs text-text-faint mt-2">Os dados de vendas aparecerÃ£o aqui conforme pedidos forem fechados.</p>
         </div>
 
       </div>
     </div>
   );
 }
+

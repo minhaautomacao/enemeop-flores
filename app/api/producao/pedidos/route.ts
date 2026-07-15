@@ -5,7 +5,7 @@ export async function GET() {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from('pedidos')
-    .select('id, numero, produto, valor, cliente_nome, cliente_telefone, endereco, bairro, canal, status, criado_em, data_entrega, foto_url')
+    .select('id, produto, valor, cliente_nome, status, canal, criado_em')
     .order('criado_em', { ascending: true })
     .limit(1000);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

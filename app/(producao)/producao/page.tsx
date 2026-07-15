@@ -5,20 +5,10 @@ import Link from 'next/link'
 import { EnumeopLogo } from '@/components/enemeop-logo'
 import { Truck } from 'lucide-react'
 
-const SUPABASE_URL = 'https://gftnjvdvzgjkhwxnxnwl.supabase.co'
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmdG5qdmR2emdqa2h3eG54bndsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAwMjExNTMsImV4cCI6MjA5NTU5NzE1M30.zgX7BLR5u8f3MNA5kwUVk3P6bjSWEjf9AZP0ksLjvY4'
-
-type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu'
-
-interface CatalogoProduto {
-  codigo: string
-  nome: string
-  categoria: string
-  preco: number
-  foto_url: string
-}
+type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue'
 
 interface Pedido {
+  id: string
   seq: number
   produto: string
   foto_url: string
@@ -32,18 +22,6 @@ interface Pedido {
   prioridade?: boolean
   transportadora: string
 }
-
-// Pedidos simulados — produto_codigo referencia o catálogo real do Supabase
-// seq = número sequencial do dia (0001, 0002 …) exibido em destaque no card
-const PEDIDOS_MOCK = [
-  { seq: 1, produto_codigo: '011', cliente: 'Família Melo',     telefone: '(11) 98765-4321', horario: '10:30', bairro: 'Cambuci',    canal: 'WhatsApp',  status: 'novo'       as StatusPedido, prioridade: true,  transportadora: 'Motoboy Rápido SP' },
-  { seq: 2, produto_codigo: '034', cliente: 'Carla Torres',     telefone: '(11) 91234-5678', horario: '11:00', bairro: 'Mooca',      canal: 'Instagram', status: 'novo'       as StatusPedido, prioridade: false, transportadora: 'Retirada na loja' },
-  { seq: 3, produto_codigo: '093', cliente: 'Empresa ABC Ltda.',telefone: '(11) 3344-5566',  horario: '14:00', bairro: 'V. Mariana', canal: 'Site',      status: 'confirmado' as StatusPedido, prioridade: false, transportadora: 'Transportadora Flores & Cia' },
-  { seq: 4, produto_codigo: '083', cliente: 'Pedro Souza',      telefone: '(11) 97777-8888', horario: '14:30', bairro: 'Saúde',      canal: 'WhatsApp',  status: 'preparando' as StatusPedido, prioridade: false, transportadora: 'Motoboy Rápido SP' },
-  { seq: 5, produto_codigo: '012', cliente: 'Empresa XYZ S.A.',telefone: '(11) 2233-4455',  horario: '15:00', bairro: 'V. Mariana', canal: 'Site',      status: 'preparando' as StatusPedido, prioridade: false, transportadora: 'Transportadora Flores & Cia' },
-  { seq: 6, produto_codigo: 'M08', cliente: 'Ana Lima',         telefone: '(11) 95555-1234', horario: '15:30', bairro: 'Ipiranga',   canal: 'WhatsApp',  status: 'pronto'     as StatusPedido, prioridade: true,  transportadora: 'Motoboy Rápido SP' },
-  { seq: 7, produto_codigo: '033', cliente: 'João Neto',        telefone: '(11) 98888-7777', horario: '16:00', bairro: 'Aclimação', canal: 'WhatsApp',  status: 'saiu'       as StatusPedido, prioridade: false, transportadora: 'Motoboy Rápido SP' },
-]
 
 const COLUNAS: { key: StatusPedido; label: string; cor: string; fundo: string }[] = [
   { key: 'novo',       label: 'Novo',         cor: 'text-blue-400',   fundo: 'border-blue-500/30 bg-blue-500/5'    },
@@ -59,68 +37,47 @@ export default function ProducaoPage() {
   const [pedidos, setPedidos] = useState<Pedido[]>([])
   const [carregando, setCarregando] = useState(true)
 
-  const carregarCatalogo = useCallback(async () => {
+  const carregarPedidos = useCallback(async () => {
+    setCarregando(true)
     try {
-      const codigos = PEDIDOS_MOCK.map(p => p.produto_codigo)
-      const params = new URLSearchParams()
-      params.set('select', 'codigo,nome,categoria,preco,foto_url')
-      params.set('codigo', `in.(${codigos.join(',')})`)
-
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/catalogo_produtos?${params}`, {
-        headers: {
-          apikey: SUPABASE_ANON,
-          Authorization: `Bearer ${SUPABASE_ANON}`,
-        },
-      })
-
-      if (!res.ok) throw new Error('erro ao carregar catálogo')
-      const catalogo: CatalogoProduto[] = await res.json()
-      const mapa = Object.fromEntries(catalogo.map(p => [p.codigo, p]))
-
-      const montados: Pedido[] = PEDIDOS_MOCK.map(pm => {
-        const prod = mapa[pm.produto_codigo]
-        return {
-          seq: pm.seq,
-          produto: prod?.nome ?? pm.produto_codigo,
-          foto_url: prod?.foto_url ?? '',
-          preco: prod?.preco ?? 0,
-          cliente: pm.cliente,
-          telefone: pm.telefone,
-          horario: pm.horario,
-          bairro: pm.bairro,
-          canal: pm.canal,
-          status: pm.status,
-          prioridade: pm.prioridade,
-          transportadora: pm.transportadora,
-        }
-      })
-
+      const res = await fetch('/api/producao/pedidos', { cache: 'no-store' })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'erro ao carregar pedidos')
+      const montados: Pedido[] = (json.pedidos ?? []).map((p: Record<string, unknown>, i: number) => ({
+        id: String(p.id),
+        seq: Number(p.numero ?? i + 1),
+        produto: String(p.produto ?? 'Pedido sem produto'),
+        foto_url: String(p.foto_url ?? ''),
+        preco: Number(p.valor ?? 0),
+        cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
+        telefone: String(p.cliente_telefone ?? ''),
+        horario: p.data_entrega ? new Date(String(p.data_entrega)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : new Date(String(p.criado_em)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        bairro: String(p.bairro ?? ''),
+        canal: String(p.canal ?? ''),
+        status: String(p.status ?? 'novo') as StatusPedido,
+        prioridade: false,
+        transportadora: 'A definir',
+      }))
       setPedidos(montados)
     } catch {
-      // fallback: monta sem foto
-      setPedidos(PEDIDOS_MOCK.map(pm => ({
-        seq: pm.seq, produto: pm.produto_codigo, foto_url: '', preco: 0,
-        cliente: pm.cliente, telefone: pm.telefone, horario: pm.horario,
-        bairro: pm.bairro, canal: pm.canal, status: pm.status,
-        prioridade: pm.prioridade, transportadora: pm.transportadora,
-      })))
+      setPedidos([])
     } finally {
       setCarregando(false)
     }
   }, [])
 
   useEffect(() => {
-    carregarCatalogo()
+    carregarPedidos()
     const tick = () => setHora(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }))
     tick()
     const t = setInterval(tick, 1000)
     setUltimo(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
     const r = setInterval(() => setUltimo(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })), 30000)
     return () => { clearInterval(t); clearInterval(r) }
-  }, [carregarCatalogo])
+  }, [carregarPedidos])
 
   const porStatus = (s: StatusPedido) => pedidos.filter(p => p.status === s)
-  const ativos = pedidos.filter(p => p.status !== 'saiu').length
+  const ativos = pedidos.filter(p => !['saiu','entregue'].includes(p.status)).length
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-[#0f0f0f]">

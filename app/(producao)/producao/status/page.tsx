@@ -15,17 +15,6 @@ interface Pedido {
   prioridade?: boolean
 }
 
-const MOCK: Pedido[] = [
-  { id: '#1048', produto: 'Kit maternidade girassóis', cliente: 'Família Melo', horario: '10:30', status: 'novo',       prioridade: true },
-  { id: '#1047', produto: 'Buquê premium rosas',       cliente: 'Carla Torres', horario: '11:00', status: 'novo'       },
-  { id: '#1046', produto: 'Arranjo corporativo M',     cliente: 'Empresa ABC',  horario: '14:00', status: 'confirmado' },
-  { id: '#1045', produto: 'Orquídea vaso + card',      cliente: 'Pedro Souza',  horario: '14:30', status: 'preparando' },
-  { id: '#1044', produto: 'Arranjo corporativo P',     cliente: 'Empresa XYZ',  horario: '15:00', status: 'preparando' },
-  { id: '#1043', produto: 'Flores do campo misto',     cliente: 'Ana Lima',     horario: '15:30', status: 'pronto',     prioridade: true },
-  { id: '#1042', produto: 'Buquê de rosas vermelhas',  cliente: 'João Neto',    horario: '16:00', status: 'saiu'       },
-  { id: '#1041', produto: 'Arranjo de lírios',         cliente: 'Márcia Faria', horario: '09:00', status: 'entregue'   },
-]
-
 const STATUS_CONFIG: Record<StatusPedido, { label: string; classes: string; dot: string }> = {
   novo:       { label: 'AGUARDANDO',   classes: 'bg-status-info/10    border-status-info/30    text-status-info',    dot: 'bg-status-info'    },
   confirmado: { label: 'CONFIRMADO',   classes: 'bg-gold/10           border-gold/30           text-gold',           dot: 'bg-gold'           },
@@ -38,6 +27,7 @@ const STATUS_CONFIG: Record<StatusPedido, { label: string; classes: string; dot:
 export default function StatusPage() {
   const [hora, setHora] = useState('')
   const [data, setData] = useState('')
+  const [pedidos, setPedidos] = useState<Pedido[]>([])
 
   useEffect(() => {
     const tick = () => {
@@ -50,15 +40,37 @@ export default function StatusPage() {
     return () => clearInterval(t)
   }, [])
 
-  const ativos   = MOCK
+
+  useEffect(() => {
+    async function carregarPedidos() {
+      try {
+        const res = await fetch('/api/producao/pedidos', { cache: 'no-store' })
+        const json = await res.json()
+        if (!res.ok) throw new Error(json.error ?? 'erro')
+        setPedidos((json.pedidos ?? []).map((p: Record<string, unknown>, i: number) => ({
+          id: `#${String(p.numero ?? i + 1).padStart(4, '0')}`,
+          produto: String(p.produto ?? 'Pedido sem produto'),
+          cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
+          horario: p.data_entrega ? new Date(String(p.data_entrega)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : new Date(String(p.criado_em)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          status: String(p.status ?? 'novo') as StatusPedido,
+          prioridade: false,
+        })))
+      } catch { setPedidos([]) }
+    }
+    carregarPedidos()
+    const r = setInterval(carregarPedidos, 30000)
+    return () => clearInterval(r)
+  }, [])
+
+  const ativos   = pedidos
     .filter(p => !['entregue'].includes(p.status))
     .sort((a, b) => {
       if (a.prioridade && !b.prioridade) return -1
       if (!a.prioridade && b.prioridade) return 1
       return a.horario.localeCompare(b.horario)
     })
-  const prontos  = MOCK.filter(p => p.status === 'pronto').length
-  const prep     = MOCK.filter(p => p.status === 'preparando').length
+  const prontos  = pedidos.filter(p => p.status === 'pronto').length
+  const prep     = pedidos.filter(p => p.status === 'preparando').length
 
   return (
     <div className="flex flex-col min-h-screen bg-bg-base">
@@ -133,11 +145,11 @@ export default function StatusPage() {
         </div>
 
         {/* Entregues */}
-        {MOCK.filter(p => p.status === 'entregue').length > 0 && (
+        {pedidos.filter(p => p.status === 'entregue').length > 0 && (
           <div className="mt-6">
             <p className="text-xs font-semibold text-text-faint uppercase tracking-widest mb-3">Entregues hoje</p>
             <div className="grid grid-cols-2 gap-3">
-              {MOCK.filter(p => p.status === 'entregue').map(p => (
+              {pedidos.filter(p => p.status === 'entregue').map(p => (
                 <div key={p.id} className="flex items-center gap-3 rounded-xl border border-border bg-bg-surface/50 px-5 py-3">
                   <div className="w-2 h-2 rounded-full bg-status-success" />
                   <span className="font-mono text-sm text-text-faint">{p.id}</span>

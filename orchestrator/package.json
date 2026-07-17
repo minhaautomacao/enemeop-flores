@@ -1,0 +1,28 @@
+{
+  "name": "fabrica-saas-orchestrator",
+  "version": "0.1.0",
+  "description": "Serviço de orquestração da Fábrica de SaaS — processa filas BullMQ e despacha agentes",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "bullmq": "^5.51.0",
+    "dotenv": "^17.2.3",
+    "groq-sdk": "^1.2.1",
+    "ioredis": "^5.6.1",
+    "node-html-parser": "^8.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2"
+  }
+}

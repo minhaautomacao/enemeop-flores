@@ -44,8 +44,11 @@ interface Conversa {
   atualizado_em: string;
 }
 
+// conversas-enemeop foi migrada para enemeop-flores/supabase/functions/ —
+// pendente de deploy no projeto Enemeop (ver docs/DEPLOYMENT.md).
 async function getConversas(): Promise<Conversa[]> {
-  const url = 'https://ebeapnydeiwuewxatuuw.supabase.co/functions/v1/conversas-enemeop?limit=100';
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+  const url = `${supabaseUrl}/functions/v1/conversas-enemeop?limit=100`;
   try {
     const res = await fetch(url, { next: { revalidate: 10 } });
     if (!res.ok) return [];

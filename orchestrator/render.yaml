@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: enemeop-evolution
+    runtime: image
+    image:
+      url: docker.io/atendai/evolution-api:latest
+    plan: free
+    region: oregon
+    envVars:
+      - key: SERVER_PORT
+        value: "8080"
+      - key: AUTHENTICATION_TYPE
+        value: apikey
+      - key: AUTHENTICATION_API_KEY
+        sync: false # definir manualmente no painel Render — nao versionar
+      - key: DATABASE_ENABLED
+        value: "true"
+      - key: DATABASE_PROVIDER
+        value: postgresql
+      - key: DATABASE_CONNECTION_URI
+        sync: false # definir manualmente no painel Render — nao versionar (rotacionar antes de configurar, ver docs/CREDENTIAL_ROTATION_PLAN.md)
+      - key: DATABASE_URL
+        sync: false # definir manualmente no painel Render — nao versionar (rotacionar antes de configurar, ver docs/CREDENTIAL_ROTATION_PLAN.md)
+      - key: DATABASE_SAVE_DATA_INSTANCE
+        value: "true"
+      - key: DATABASE_SAVE_DATA_NEW_MESSAGE
+        value: "true"
+      - key: CACHE_REDIS_ENABLED
+        value: "false"
+      - key: DEL_INSTANCE
+        value: "false"
+      - key: LANGUAGE
+        value: pt-BR
+      - key: LOG_LEVEL
+        value: ERROR

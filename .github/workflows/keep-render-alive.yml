@@ -1,0 +1,15 @@
+name: Keep Render Services Alive
+
+on:
+  schedule:
+    - cron: '*/14 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Orchestrator
+        continue-on-error: true
+        run: |
+          curl -fsS --max-time 10 https://enemeop-orchestrator.onrender.com/health || true

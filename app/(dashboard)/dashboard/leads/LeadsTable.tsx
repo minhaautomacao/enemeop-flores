@@ -68,7 +68,9 @@ function formatHora(iso: string): string {
   return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
 
-const FABRICA_URL = process.env.NEXT_PUBLIC_FABRICA_URL ?? 'https://ebeapnydeiwuewxatuuw.supabase.co';
+// conversas-enemeop foi migrada para enemeop-flores/supabase/functions/ —
+// pendente de deploy no projeto Enemeop (ver docs/DEPLOYMENT.md).
+const FUNCTIONS_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
 
 function ExpandirConversa({ canalId }: { canalId: string | null }) {
   const [aberto, setAberto] = useState(false);
@@ -81,7 +83,7 @@ function ExpandirConversa({ canalId }: { canalId: string | null }) {
 
     setCarregando(true);
     try {
-      const res = await fetch(`${FABRICA_URL}/functions/v1/conversas-enemeop?canal_id=${canalId}`);
+      const res = await fetch(`${FUNCTIONS_URL}/functions/v1/conversas-enemeop?canal_id=${canalId}`);
       if (res.ok) {
         const data = await res.json();
         const conv = (data.conversas ?? []).find(

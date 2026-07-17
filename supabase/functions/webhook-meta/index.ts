@@ -26,6 +26,7 @@
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { gerarLinkPagamento } from '../_shared/cielo.ts';
+import { dentroDoHorarioComercial, mensagemAvisoForaDoHorario, mensagemConfirmacaoForaDoHorario } from '../_shared/horario-comercial.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -349,6 +350,7 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
   // Portão de escopo — determinístico, roda antes de qualquer avanço de
   // funil (mesma regra do orchestrator Node, ver sdr.ts).
   const intencao = classificarIntencao(mensagemCliente, estado.fase);
+  const foraDoHorario = !dentroDoHorarioComercial();
 
   let respostaFinal: string;
   let fotoUrl: string | null | undefined;
@@ -363,13 +365,24 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     }
   } else {
     const primeiraMensagem = (conversaRow.historico ?? []).length === 0;
+    // Aviso de horário só na primeira mensagem da conversa — nunca repetido a cada troca.
+    const avisoHorario = foraDoHorario && primeiraMensagem
+      ? mensagemAvisoForaDoHorario()
+      : '';
+
     if (primeiraMensagem && !nomeCliente) {
-      respostaFinal = 'Oi! Pode me dizer seu nome pra eu te atender melhor?';
+      respostaFinal = `${avisoHorario}Oi! Pode me dizer seu nome pra eu te atender melhor?`;
+    } else if (foraDoHorario && estado.fase === 'aguardando_confirmacao') {
+      // Fora do horário comercial a loja não confirma pedido nem gera pagamento.
+      // A fase não avança — a conversa retoma sozinha exatamente daqui na
+      // próxima mensagem dentro do horário comercial (sem handoff automático).
+      respostaFinal = mensagemConfirmacaoForaDoHorario();
     } else {
       const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', canal, canalId });
       const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps);
       estado = resultado.estado;
-      respostaFinal = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ${resultado.mensagem}` : resultado.mensagem;
+      const saudacaoNome = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ` : '';
+      respostaFinal = `${avisoHorario}${saudacaoNome}${resultado.mensagem}`;
       fotoUrl = resultado.fotoUrl;
     }
   }

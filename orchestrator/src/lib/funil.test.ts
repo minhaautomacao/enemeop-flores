@@ -12,6 +12,7 @@ import {
   intencaoInterrompeFluxo,
   mensagemForaDeEscopo,
   mensagemTransferencia,
+  mensagemTransferenciaLimitacaoTecnica,
   mensagemFinalizacao,
   extrairDadosQualificacao,
   proximaPerguntaQualificacao,
@@ -30,6 +31,7 @@ import {
   avancarFunil,
   processarConfirmacaoPagamento,
   pareceSaudacaoSimples,
+  extrairTermoDisponibilidade,
   montarMensagemRetomada,
   montarMensagemAguardandoPagamento,
   estadoComPedidoInconsistente,
@@ -75,7 +77,8 @@ test('3b. Flora nao inventa produto quando catalogo esta vazio', () => {
   const rec = selecionarRecomendacoes([])
   assert.equal(rec.principal, null)
   const msg = montarMensagemRecomendacao(rec)
-  assert.match(msg, /WhatsApp final 9083/)
+  assert.doesNotMatch(msg, /WhatsApp/i, 'catalogo vazio nao deve oferecer WhatsApp por padrao')
+  assert.match(msg, /me conta|preferencia|preferência/i)
 })
 
 test('3c. produtos indisponiveis nunca sao recomendados', () => {
@@ -124,7 +127,8 @@ test('7b. Flora nunca estima frete quando o calculo falha - transfere para human
   const resposta = await calcularFreteEtapa('00000-000', calculadorQueFalha)
   assert.equal(resposta.falhou, true)
   assert.equal(resposta.valor, null)
-  assert.match(resposta.mensagem, /WhatsApp final 9083/)
+  assert.match(resposta.mensagem, /nossa equipe/)
+  assert.doesNotMatch(resposta.mensagem, /WhatsApp/i, 'transferencia por falha de frete nao forca WhatsApp por padrao')
 })
 
 // 8. Flora resume pedido
@@ -229,7 +233,12 @@ test('14-15. cliente reclama -> intencao reclamacao, transfere para humano com m
 
   const msg = mensagemTransferencia()
   assert.match(msg, /nossa equipe/)
-  assert.match(msg, /WhatsApp final 9083/)
+  assert.doesNotMatch(msg, /WhatsApp/i, 'transferencia padrao continua no mesmo canal, nao oferece WhatsApp por padrao')
+})
+
+test('mensagemTransferenciaLimitacaoTecnica so e usada em limitacao tecnica real, com link clicavel oficial', () => {
+  const msg = mensagemTransferenciaLimitacaoTecnica()
+  assert.match(msg, /https:\/\/wa\.me\/5511982829083/, 'deve ter link clicavel, nunca so "final 9083"')
 })
 
 // 16 e 17. cliente muda de assunto no meio da compra -> Flora redireciona sem perder o funil
@@ -469,6 +478,41 @@ test('montarMensagemAguardandoPagamento nunca afirma envio sem dados.linkPagamen
   assert.match(comLink, /pagamento\.exemplo\/xyz/)
 })
 
+test('extrairTermoDisponibilidade reconhece "tem X" e variantes, ignora mensagens sem esse padrao', () => {
+  assert.equal(extrairTermoDisponibilidade('Tem girassol pra hoje'), 'girassol')
+  assert.equal(extrairTermoDisponibilidade('Tem lírios'), 'lirios')
+  assert.equal(extrairTermoDisponibilidade('vocês tem orquídea?'), 'orquidea')
+  assert.equal(extrairTermoDisponibilidade('quais flores tem pra hoje?'), null, 'nao comeca com "tem" — segue o fluxo normal de qualificacao/recomendacao')
+  assert.equal(extrairTermoDisponibilidade('tem'), null, 'sem produto nenhum mencionado')
+})
+
+test('classificarIntencao reconhece pergunta de disponibilidade por termo em qualquer fase', () => {
+  assert.equal(classificarIntencao('Tem girassol pra hoje', 'transferido_humano'), 'disponibilidade')
+  assert.equal(classificarIntencao('Tem lírios', 'aguardando_pagamento'), 'disponibilidade')
+})
+
+test('avancarFunil: pergunta de disponibilidade consulta o catalogo real pelo termo pedido, mesmo fora de inicio/qualificacao', async () => {
+  const deps = depsFake({
+    buscarCatalogo: async (params) => {
+      assert.equal(params.query, 'girassol')
+      return [{ nome: 'Arranjo Girassol em Vaso', preco: 120, disponivel: true, codigo: '010' }]
+    },
+  })
+  const estado: EstadoConversa = { fase: 'inicio', dados: {}, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'Tem girassol pra hoje', 'disponibilidade', deps)
+  assert.equal(r.estado.fase, 'recomendacao')
+  assert.match(r.mensagem, /Arranjo Girassol em Vaso/)
+})
+
+test('avancarFunil: produto perguntado nao encontrado -> resposta honesta, nunca handoff automatico', async () => {
+  const deps = depsFake({ buscarCatalogo: async () => [] })
+  const estado: EstadoConversa = { fase: 'inicio', dados: {}, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'Tem lírios', 'disponibilidade', deps)
+  assert.notEqual(r.estado.fase, 'transferido_humano')
+  assert.doesNotMatch(r.mensagem, /vou te transferir|nossa equipe/i)
+  assert.match(r.mensagem, /não temos lirios/i)
+})
+
 test('pareceSaudacaoSimples reconhece cumprimentos isolados e rejeita mensagens com conteudo comercial', () => {
   for (const s of ['oi', 'Oi!', 'olá', 'Olá.', 'bom dia', 'Boa tarde!', 'e aí', 'eae', 'opa']) {
     assert.equal(pareceSaudacaoSimples(s), true, `"${s}" deveria ser reconhecida como saudacao simples`)
@@ -634,7 +678,7 @@ test('dispatcher: frete falha -> transfere para humano, nunca estima', async () 
   }
   const r = await avancarFunil(estado, '', 'compra_produto', deps)
   assert.equal(r.estado.fase, 'transferido_humano')
-  assert.match(r.mensagem, /WhatsApp final 9083/)
+  assert.match(r.mensagem, /nossa equipe/)
   assert.equal(r.estado.dados.valorTotal, undefined)
 })
 
@@ -647,7 +691,7 @@ test('dispatcher: falha ao gerar pagamento -> transfere para humano', async () =
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'pagamento', deps)
   assert.equal(r.estado.fase, 'transferido_humano')
-  assert.match(r.mensagem, /WhatsApp final 9083/)
+  assert.match(r.mensagem, /nossa equipe/)
 })
 
 test('dispatcher: pedido de foto funciona em qualquer fase com produto em jogo', async () => {

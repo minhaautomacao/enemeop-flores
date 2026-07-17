@@ -38,6 +38,7 @@ import {
   intencaoInterrompeFluxo,
   mensagemForaDeEscopo,
   mensagemTransferencia,
+  mensagemTransferenciaLimitacaoTecnica,
   avancarFunil,
 } from '../_shared/funil.ts';
 
@@ -390,10 +391,14 @@ async function iniciarHandoffHumano(
     handoff_em: new Date().toISOString(),
   } as Partial<ConversaRow>);
 
+  // Só 'limite_tecnico' (ex.: falha real ao enviar mídia pela API) oferece
+  // WhatsApp com link clicável — qualquer outro motivo de transferência
+  // continua no mesmo canal, sem sair por padrão.
+  const mensagemBase = origem === 'limite_tecnico' ? mensagemTransferenciaLimitacaoTecnica() : mensagemTransferencia();
   const codigo = await criarOuReusarAtendimento(conversaRow.id, canal, canalId, conversaRow.nome_cliente, origem, motivo);
   return codigo
-    ? `${mensagemTransferencia()} Seu código de atendimento é ${codigo}.`
-    : mensagemTransferencia();
+    ? `${mensagemBase} Seu código de atendimento é ${codigo}.`
+    : mensagemBase;
 }
 
 // ── Processar DM — usa o funil determinístico compartilhado ─────────────
@@ -419,6 +424,15 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
 
   if (estado.fase === 'pedido_criado' || estado.fase === 'encerrado_sem_venda') {
     console.log(`[webhook-meta] conversa_reaberta canal_id=${canalId} canal=${canal}`);
+    estado = estadoInicial();
+  } else if (estado.fase === 'transferido_humano') {
+    // Chegamos aqui só porque o gate de "modo_atendimento === 'humano'" já
+    // passou acima — ou seja, não existe (mais) um handoff real ativo pra
+    // essa conversa (nunca existiu, ou foi concluído/devolvido/cancelado).
+    // fase="transferido_humano" órfã é estado fantasma: nunca deve travar o
+    // cliente recebendo a mesma mensagem de transferência pra sempre — repara
+    // e devolve a conversa pra Flora.
+    console.log(`[webhook-meta] fase_transferido_humano_orfa_reparada canal_id=${canalId} canal=${canal}`);
     estado = estadoInicial();
   }
 
@@ -467,9 +481,19 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
       const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', canal, canalId });
       const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps);
       estado = resultado.estado;
-      const saudacaoNome = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ` : '';
-      respostaFinal = `${avisoHorario}${saudacaoNome}${resultado.mensagem}`;
-      fotoUrl = resultado.fotoUrl;
+      if (estado.fase === 'transferido_humano') {
+        // O funil decidiu internamente transferir (CEP/frete falhou, falha
+        // ao gerar pagamento, ou fase inesperada) — a mensagem de
+        // transferência só pode ser enviada no momento em que um handoff
+        // real é criado, nunca como texto solto sem ticket. Mesmo mecanismo
+        // do portão externo, pra nunca duplicar nem deixar órfã de novo.
+        const motivo = estado.dados.motivoTransferencia ?? 'transferencia solicitada pelo funil';
+        respostaFinal = `${avisoHorario}${await iniciarHandoffHumano(conversaRow, canal, canalId, 'flora_sem_confianca', motivo)}`;
+      } else {
+        const saudacaoNome = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ` : '';
+        respostaFinal = `${avisoHorario}${saudacaoNome}${resultado.mensagem}`;
+        fotoUrl = resultado.fotoUrl;
+      }
     }
   }
 

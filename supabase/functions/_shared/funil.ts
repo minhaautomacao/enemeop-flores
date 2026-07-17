@@ -264,6 +264,19 @@ export function pareceSaudacaoSimples(mensagem: string): boolean {
   return REGEX_SAUDACAO_SIMPLES.test(normalizar(mensagem))
 }
 
+// Pergunta direta de disponibilidade por nome de produto — "tem girassol?",
+// "vocês tem lírios pra hoje", "tem rosas aí?". Diferente de
+// PALAVRAS_DISPONIBILIDADE (frases fixas genéricas): aqui extraímos o termo
+// do produto perguntado, pra consultar o catálogo real por ele — nunca cai
+// no fallback de "compra_produto"/fase antiga.
+const REGEX_PERGUNTA_DISPONIBILIDADE = /^(?:voces?\s+)?tem\s+(.+?)\s*(?:pra\s?hoje|para\s?hoje|hoje|a[íi]|dispon[íi]vel)?[\s?.!]*$/
+
+export function extrairTermoDisponibilidade(mensagem: string): string | null {
+  const m = normalizar(mensagem).match(REGEX_PERGUNTA_DISPONIBILIDADE)
+  const termo = m?.[1]?.trim()
+  return termo && termo.length > 1 ? termo : null
+}
+
 /**
  * Classifica a intenção da mensagem. A ordem importa: escalonamento
  * (atendimento humano / reclamação) é checado antes de qualquer intenção
@@ -290,7 +303,7 @@ export function classificarIntencao(mensagem: string, faseAtual: Fase): Intencao
   if (contemAlguma(mensagem, PALAVRAS_STATUS_PEDIDO)) return 'status_pedido'
   if (contemAlguma(mensagem, PALAVRAS_FRETE)) return 'frete'
   if (contemAlguma(mensagem, PALAVRAS_PAGAMENTO)) return 'pagamento'
-  if (contemAlguma(mensagem, PALAVRAS_DISPONIBILIDADE)) return 'disponibilidade'
+  if (contemAlguma(mensagem, PALAVRAS_DISPONIBILIDADE) || extrairTermoDisponibilidade(mensagem)) return 'disponibilidade'
   if (faseAtual === 'inicio' || faseAtual === 'qualificacao' || faseAtual === 'recomendacao') {
     return 'recomendacao'
   }
@@ -308,7 +321,16 @@ export function mensagemForaDeEscopo(): string {
 }
 
 export function mensagemTransferencia(): string {
-  return 'Vou te transferir para nossa equipe! Pode continuar por aqui mesmo — se preferir, também dá pra falar direto no WhatsApp final 9083.'
+  return 'Vou te transferir para nossa equipe! Pode continuar por aqui mesmo.'
+}
+
+/**
+ * Só para quando uma limitação técnica real impede continuar no canal atual
+ * (ex.: falha ao enviar mídia pela API do Instagram/Facebook) — nunca como
+ * oferta padrão de handoff. Sempre com link clicável, nunca só "final 9083".
+ */
+export function mensagemTransferenciaLimitacaoTecnica(): string {
+  return 'No momento não consigo continuar por aqui devido a uma limitação técnica. Fale com nossa equipe pelo WhatsApp oficial: https://wa.me/5511982829083'
 }
 
 export function mensagemFinalizacao(): string {
@@ -446,7 +468,7 @@ function formatarPreco(preco?: number): string {
 
 export function montarMensagemRecomendacao(rec: Recomendacao, ocasiao?: string): string {
   if (!rec.principal) {
-    return 'No momento não encontrei opções disponíveis para o que você pediu. Posso avisar assim que tivermos, ou prefere falar com nossa equipe pelo WhatsApp final 9083?'
+    return 'No momento não encontrei opções disponíveis para o que você pediu. Me conta melhor o que você tem em mente (cor, estilo, ocasião) que eu vejo outras alternativas.'
   }
   const p = rec.principal
   let msg = `Para ${ocasiao ?? 'essa ocasião'}, recomendo o ${p.nome}${p.descricao ? ` — ${p.descricao}` : ''}. Está disponível por ${formatarPreco(p.preco)}.${p.url ? ` Link: ${p.url}` : ''}`
@@ -840,6 +862,28 @@ export async function avancarFunil(
       ?? undefined
     const resp = responderPedidoDeFoto(alvo ? { nome: alvo.nome, preco: alvo.preco, fotoUrl: alvo.fotoUrl, disponivel: true } : undefined)
     return { estado, mensagem: resp.mensagem, fotoUrl: resp.fotoUrl }
+  }
+
+  // Pergunta direta de disponibilidade ("tem girassol?", "tem lírios?") pode
+  // acontecer em qualquer fase — consulta o catálogo real pelo termo pedido.
+  // Produto não encontrado NUNCA aciona handoff automático: responde com
+  // honestidade e oferece alternativas reais, ou pergunta preferência.
+  const termoDisponibilidade = intencao === 'disponibilidade' ? extrairTermoDisponibilidade(mensagemCliente) : null
+  if (termoDisponibilidade) {
+    const produtos = await deps.buscarCatalogo({ query: termoDisponibilidade })
+    const rec = selecionarRecomendacoes(produtos)
+    if (rec.principal) {
+      const novoEstado: EstadoConversa = {
+        ...estado,
+        fase: 'recomendacao',
+        dados: { ...estado.dados, opcoesRecomendadas: [rec.principal, ...rec.alternativas] },
+      }
+      return { estado: novoEstado, mensagem: montarMensagemRecomendacao(rec) }
+    }
+    return {
+      estado,
+      mensagem: `No momento não temos ${termoDisponibilidade} disponível. Posso te mostrar outras opções que temos hoje, ou me conta uma preferência (cor, estilo, ocasião) que eu busco algo parecido.`,
+    }
   }
 
   switch (estado.fase) {

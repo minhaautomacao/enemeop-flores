@@ -227,6 +227,16 @@ const FASES_COMPRA_EM_ANDAMENTO: Fase[] = [
   'aguardando_confirmacao', 'aguardando_pagamento',
 ]
 
+// Saudação "pura": a mensagem inteira (sem outro conteúdo) é só um
+// cumprimento — usada para detectar que o cliente voltou depois de um
+// intervalo sem trazer informação nova, e portanto a resposta deve retomar
+// o contexto real em vez de tratar como mensagem nova.
+const REGEX_SAUDACAO_SIMPLES = /^(oi+|ola|bom\s?dia|boa\s?tarde|boa\s?noite|e\s?ai|eae+|opa|hey)[\s!?.,]*$/
+
+export function pareceSaudacaoSimples(mensagem: string): boolean {
+  return REGEX_SAUDACAO_SIMPLES.test(normalizar(mensagem))
+}
+
 /**
  * Classifica a intenção da mensagem. A ordem importa: escalonamento
  * (atendimento humano / reclamação) é checado antes de qualquer intenção
@@ -276,6 +286,43 @@ export function mensagemTransferencia(): string {
 
 export function mensagemFinalizacao(): string {
   return 'Pagamento confirmado. Seu pedido foi registrado e será preparado para entrega. Qualquer atualização será enviada por aqui.'
+}
+
+/**
+ * Retomada de contexto — cliente voltou só com uma saudação enquanto havia
+ * um pedido em andamento. Cita apenas fatos presentes em `dados` (nunca
+ * inventa produto/endereço/pagamento que não estejam realmente registrados)
+ * e sempre termina perguntando se o cliente quer continuar. Se não houver
+ * nada de concreto em `dados` (estado inconsistente), admite isso e pergunta
+ * objetivamente se o cliente quer retomar ou começar um novo pedido.
+ */
+export function montarMensagemRetomada(fase: Fase, dados: DadosPedido): string {
+  const assunto = dados.produto?.nome
+    ? `o pedido do ${dados.produto.nome}`
+    : (fase === 'recomendacao' || fase === 'qualificacao') ? 'a escolha do buquê' : null
+
+  if (!assunto) {
+    return 'Não encontrei um atendimento em andamento pra retomar. Quer começar um novo pedido?'
+  }
+
+  const local = [dados.endereco?.bairro, dados.endereco?.cidade].filter(Boolean).join(', ')
+  const complementoLocal = local ? ` para entrega em ${local}` : ''
+  const complementoPagamento = fase === 'aguardando_pagamento' ? ' — o pagamento ainda está pendente' : ''
+  return `Podemos continuar de onde paramos: estávamos com ${assunto}${complementoLocal}${complementoPagamento}. Você quer seguir com essa opção?`
+}
+
+/**
+ * Resposta da fase `aguardando_pagamento` — nunca afirma ter enviado um
+ * link sem um link real em `dados.linkPagamento`. Se o link existe,
+ * reenvia-o explicitamente em vez de só dizer "já enviei". Se não existe
+ * (estado inconsistente — fase avançou sem o link ter sido persistido),
+ * admite isso e oferece gerar de novo ou recomeçar.
+ */
+export function montarMensagemAguardandoPagamento(dados: DadosPedido): string {
+  if (dados.linkPagamento) {
+    return `Retomando o pagamento do seu pedido: segue novamente o link — ${dados.linkPagamento}\nAssim que identificarmos o pagamento, seu pedido é confirmado automaticamente.`
+  }
+  return 'Não encontrei um link de pagamento válido registrado para esse pedido. Quer que eu gere um novo link, ou prefere recomeçar o pedido?'
 }
 
 // ── Etapa 1 — Qualificação (uma pergunta por vez, sem repetir) ───────────
@@ -721,6 +768,14 @@ export async function avancarFunil(
 ): Promise<ResultadoEtapa> {
   const estado: EstadoConversa = { ...estadoRecebido, dados: extrairDadosQualificacao(mensagemCliente, estadoRecebido.dados) }
 
+  // Cliente voltou só com uma saudação (sem informação nova) enquanto havia
+  // um pedido em andamento — retoma o contexto real em vez de avançar o
+  // funil como se fosse mensagem nova (nunca inventa "já paguei"/"já
+  // enviei"/"pedido confirmado" sem registro real em `dados`).
+  if (FASES_COMPRA_EM_ANDAMENTO.includes(estado.fase) && pareceSaudacaoSimples(mensagemCliente)) {
+    return { estado, mensagem: montarMensagemRetomada(estado.fase, estado.dados) }
+  }
+
   // Pedido de foto pode acontecer em qualquer fase após haver produto(s) em jogo.
   if (intencao === 'foto_produto') {
     const alvo = estado.dados.produto
@@ -753,7 +808,7 @@ export async function avancarFunil(
     case 'aguardando_confirmacao':
       return etapaConfirmacao(estado, mensagemCliente, deps)
     case 'aguardando_pagamento':
-      return { estado, mensagem: 'Já te enviei o link de pagamento — assim que identificarmos o pagamento, seu pedido é confirmado automaticamente!' }
+      return { estado, mensagem: montarMensagemAguardandoPagamento(estado.dados) }
     case 'pagamento_confirmado':
     case 'pedido_criado':
       return { estado, mensagem: mensagemFinalizacao() }

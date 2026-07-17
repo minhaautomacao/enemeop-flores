@@ -86,17 +86,59 @@ mergeada nela). Trabalho, migration e deploy feitos a partir de `master`.
    `vercel project inspect` via CLI) antes de confiar no que o MCP
    retorna — o MCP pode estar noutra conta.
 
-3. **Teste real ponta a ponta pelo Instagram/Facebook ainda não
-   executado** — depende de alguém mandar a mensagem de fato (não há
-   como originar isso via ferramenta/API disponível). Itens 1 e 2 já
-   estão confirmados OK, então este é o único bloqueio restante. Além
-   da mensagem em si, testar assumir/concluir/devolver sincronizando
-   `conversas` +
-   `atendimentos_humanos`, WhatsApp oficial continua `5511982829083`,
-   Flora não força saída do Instagram/Facebook, e só então pedir ao
-   usuário 1 mensagem real: pedir atendente → conferir 1 único código →
-   assumir no Inbox → responder pelo mesmo canal → concluir/devolver →
-   confirmar Flora retomando.
+3. **Teste real ponta a ponta pelo Instagram/Facebook — EM ANDAMENTO,
+   achou um bug real 2026-07-17.** Itens 1 e 2 confirmados OK. Testando
+   o item 3, dois envios reais pelo Instagram (conta de teste, canal_id
+   `9530087693699545`, conversa `1866ecd9-5662-49cd-8b8f-2ef0bb064b77`)
+   revelaram um bug de retomada de contexto, não relacionado ao handoff
+   humano em si:
+
+   **Evidência bruta preservada (logs expiram em 24h no Supabase):**
+   - `18:59:01 UTC` — cliente: `"Olá"` (mensagem enviada por engano, em
+     vez do texto de teste completo).
+   - `18:59:01 UTC` — Flora: `"Já te enviei o link de pagamento — assim
+     que identificarmos o pagamento, seu pedido é confirmado
+     automaticamente!"`
+   - `18:02:57 UTC` — cliente: `"Olá. Quais flores para hoje ?"` — Flora
+     respondeu com a **mesma frase idêntica** acima, ignorando o
+     conteúdo da mensagem.
+   - Estado real da conversa no momento (`select fase, pedido_info from
+     conversas where id = '1866ecd9...'`): `fase = 'aguardando_pagamento'`,
+     `pedido_info.dados = {}` (**vazio** — nenhum `linkPagamento` real
+     jamais foi registrado nesta conversa; a última menção a link de
+     pagamento no histórico é de `2026-07-12`, de um fluxo antigo
+     anterior à integração do funil determinístico).
+   - Causa raiz: `case 'aguardando_pagamento'` em
+     `orchestrator/src/lib/funil.ts` (+ cópia `_shared/funil.ts`)
+     retornava uma frase fixa (`'Já te enviei o link de pagamento...'`)
+     **sempre**, sem checar `dados.linkPagamento`, e sem tratar
+     saudação/retorno como retomada de contexto — nunca deixava claro
+     que estava reabrindo uma conversa antiga nem citava fatos reais.
+   - Bug secundário relacionado, achado na mesma revisão: `processarDM`
+     (`webhook-meta/index.ts`) não checava `modo_atendimento === 'humano'`
+     antes de processar uma mensagem — Flora responderia
+     automaticamente mesmo com um atendente humano já responsável pela
+     conversa.
+
+   **Correção aplicada, testada e commitada** (ver commit no `git log`
+   deste arquivo): `avancarFunil` agora detecta saudação simples em fase
+   de compra em andamento e retoma citando só fatos reais de `dados`
+   (nunca inventa produto/link/pagamento); a fase `aguardando_pagamento`
+   só reenvia o link se `dados.linkPagamento` existir de verdade, senão
+   admite que não encontrou e oferece gerar de novo ou recomeçar;
+   `processarDM` agora bloqueia qualquer resposta automática quando
+   `modo_atendimento === 'humano'` (só registra a mensagem no histórico
+   pro atendente ver). 6 testes direcionados novos (saudação com pedido
+   em andamento, link enviado, link não enviado, contexto inconsistente
+   — reproduzindo exatamente o estado real encontrado acima, conversa
+   concluída reaberta, modo humano bloqueando a Flora) + suíte completa
+   (63 testes em `orchestrator/`, 7 em `webhook-meta/`) passando.
+
+   **Próximo passo:** deploy do `webhook-meta` com a correção, confirmar
+   versão em produção, e repetir o teste real com uma mensagem simples
+   ("Olá") na mesma conversa `1866ecd9...` para confirmar que a resposta
+   agora deixa claro que está retomando (sem "já enviei") antes de
+   prosseguir para o teste original do handoff humano em si.
 
 ## Reorganização Fábrica/Enemeop — CONCLUÍDA (2026-07-10)
 

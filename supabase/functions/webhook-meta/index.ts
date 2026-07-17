@@ -403,6 +403,18 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
   if (!igToken) return;
 
   const conversaRow = await buscarOuCriarConversa(canalId, canal);
+
+  // Handoff humano ativo: só registra a mensagem no histórico para o
+  // atendente ver no Inbox Flora — Flora não gera nem envia resposta
+  // automática enquanto um humano estiver responsável pela conversa.
+  if (conversaRow.modo_atendimento === 'humano') {
+    const novaMsgHumano: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString() };
+    const historicoHumano = [...(conversaRow.historico ?? []), novaMsgHumano].slice(-20);
+    await salvarConversa(conversaRow.id, { historico: historicoHumano });
+    console.log(`[webhook-meta] ${canalId} | modo humano ativo — Flora nao responde`);
+    return;
+  }
+
   let estado = estadoDaConversa(conversaRow);
 
   if (estado.fase === 'pedido_criado' || estado.fase === 'encerrado_sem_venda') {

@@ -29,6 +29,9 @@ import {
   estadoInicial,
   avancarFunil,
   processarConfirmacaoPagamento,
+  pareceSaudacaoSimples,
+  montarMensagemRetomada,
+  montarMensagemAguardandoPagamento,
   type ProdutoCatalogo,
   type EstadoConversa,
   type DependenciasFunil,
@@ -308,18 +311,113 @@ test('pedido de atendimento humano com frase natural ("quero falar com uma pesso
   assert.equal(intencao, 'atendimento_humano')
 })
 
-test('"oi" durante aguardando_pagamento nao reinicia o funil, dispatcher so lembra do pagamento', async () => {
+// ── Retomada de contexto (correção do bug real 2026-07-17: Flora afirmava
+// "já te enviei o link de pagamento" sem checar se um link real existia,
+// mesmo para uma simples "Olá") ─────────────────────────────────────────
+
+test('retomada 1 — saudacao com pedido em andamento: retoma contexto real citando o produto, nunca "ja enviei" fixo', async () => {
   const deps = depsFake()
   const estado: EstadoConversa = {
     fase: 'aguardando_pagamento',
-    dados: { valorTotal: 162.5, linkPagamento: 'https://pagamento.exemplo/x', paymentId: 'pay_x' },
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' },
+      valorTotal: 162.5,
+      linkPagamento: 'https://pagamento.exemplo/x',
+      paymentId: 'pay_x',
+    },
     perguntasFeitas: [],
   }
   const intencao = classificarIntencao('oi', estado.fase)
   assert.equal(intencaoInterrompeFluxo(intencao), false)
   const r = await avancarFunil(estado, 'oi', intencao, deps)
+  assert.equal(r.estado.fase, 'aguardando_pagamento', 'saudacao nao deve alterar a fase')
+  assert.match(r.mensagem, /Podemos continuar de onde paramos/i)
+  assert.match(r.mensagem, /Buquê de Rosas/)
+  assert.match(r.mensagem, /Você quer seguir com essa opção\?/)
+})
+
+test('retomada 1b — saudacao em fase de compra sem produto na etapa de endereco tambem retoma (nao trata como mensagem nova)', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_endereco',
+    dados: { produto: { nome: 'Arranjo Girassóis', preco: 135 } },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'bom dia', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_endereco')
+  assert.match(r.mensagem, /Arranjo Girassóis/)
+})
+
+test('retomada 2 — link de pagamento realmente enviado: Flora reenvia o link real em vez de so dizer "ja enviei"', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140 }, valorTotal: 162.5, linkPagamento: 'https://pagamento.exemplo/real123', paymentId: 'pay_real123' },
+    perguntasFeitas: [],
+  }
+  // Mensagem com sinal comercial ("flores") nao e saudacao pura, entao cai
+  // na resposta normal da fase aguardando_pagamento.
+  const r = await avancarFunil(estado, 'quais flores tem pra hoje?', 'compra_produto', deps)
   assert.equal(r.estado.fase, 'aguardando_pagamento')
-  assert.match(r.mensagem, /já te enviei o link de pagamento/i)
+  assert.match(r.mensagem, /pagamento\.exemplo\/real123/, 'deve reenviar o link real, nao so afirmar que ja enviou')
+  assert.doesNotMatch(r.mensagem, /^já te enviei/i)
+})
+
+test('retomada 3 — link de pagamento NAO enviado (fase avancou sem link real): Flora nunca finge ter enviado', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140 }, valorTotal: 162.5 }, // sem linkPagamento
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quais flores tem pra hoje?', 'compra_produto', deps)
+  assert.doesNotMatch(r.mensagem, /já te enviei/i, 'nunca deve afirmar envio sem um link real registrado')
+  assert.match(r.mensagem, /não encontrei um link de pagamento válido/i)
+  assert.match(r.mensagem, /gere um novo link|recomeçar/i)
+})
+
+test('retomada 4 — contexto inconsistente (fase aguardando_pagamento com dados vazios, como o caso real encontrado em producao): pergunta objetivamente em vez de inventar', async () => {
+  const deps = depsFake()
+  // Reproduz o estado real encontrado na conversa de teste 2026-07-17:
+  // fase = 'aguardando_pagamento' mas pedido_info.dados = {} (sem produto
+  // nem link — inconsistência entre fase e dados persistidos).
+  const estadoInconsistente: EstadoConversa = { fase: 'aguardando_pagamento', dados: {}, perguntasFeitas: [] }
+
+  const rSaudacao = await avancarFunil(estadoInconsistente, 'Olá', 'compra_produto', deps)
+  assert.doesNotMatch(rSaudacao.mensagem, /já te enviei|pagamento confirmado|pedido confirmado/i)
+  assert.match(rSaudacao.mensagem, /não encontrei um atendimento em andamento/i)
+  assert.match(rSaudacao.mensagem, /novo pedido/i)
+
+  const rOutraMsg = await avancarFunil(estadoInconsistente, 'quais flores tem pra hoje?', 'compra_produto', deps)
+  assert.doesNotMatch(rOutraMsg.mensagem, /já te enviei|pagamento confirmado|pedido confirmado/i)
+  assert.match(rOutraMsg.mensagem, /não encontrei um link de pagamento válido/i)
+})
+
+test('montarMensagemRetomada cita apenas fatos reais em dados, nunca inventa produto/local nao registrado', () => {
+  const comProduto = montarMensagemRetomada('aguardando_pagamento', { produto: { nome: 'Buquê de Tulipas' } })
+  assert.match(comProduto, /Buquê de Tulipas/)
+  assert.match(comProduto, /pagamento ainda está pendente/)
+
+  const semNadaConcreto = montarMensagemRetomada('aguardando_pagamento', {})
+  assert.doesNotMatch(semNadaConcreto, /Buquê/)
+  assert.match(semNadaConcreto, /não encontrei um atendimento em andamento/i)
+})
+
+test('montarMensagemAguardandoPagamento nunca afirma envio sem dados.linkPagamento real', () => {
+  const semLink = montarMensagemAguardandoPagamento({})
+  assert.doesNotMatch(semLink, /já te enviei|já enviei/i)
+
+  const comLink = montarMensagemAguardandoPagamento({ linkPagamento: 'https://pagamento.exemplo/xyz' })
+  assert.match(comLink, /pagamento\.exemplo\/xyz/)
+})
+
+test('pareceSaudacaoSimples reconhece cumprimentos isolados e rejeita mensagens com conteudo comercial', () => {
+  for (const s of ['oi', 'Oi!', 'olá', 'Olá.', 'bom dia', 'Boa tarde!', 'e aí', 'eae', 'opa']) {
+    assert.equal(pareceSaudacaoSimples(s), true, `"${s}" deveria ser reconhecida como saudacao simples`)
+  }
+  for (const s of ['oi, quero um buquê', 'olá! quais flores vocês têm?', 'bom dia, gostaria de falar com um atendente humano']) {
+    assert.equal(pareceSaudacaoSimples(s), false, `"${s}" tem conteudo alem da saudacao e nao deveria ser tratada como retomada simples`)
+  }
 })
 
 test('tolerancia a erro de digitacao: "reclamaçao" e "atendente" com typo ainda classificam corretamente', () => {

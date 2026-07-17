@@ -783,6 +783,20 @@ async function gerarPagamentoComPedido(
 }
 
 /**
+ * `fase` sozinha nunca é fonte de verdade: uma fase de compra em andamento
+ * só é legítima se houver ao menos um produto escolhido em `dados` — é o
+ * mínimo que só se obtém percorrendo o funil de verdade. Sem isso, é um
+ * estado fantasma (dado antigo, migração, bug já corrigido) — nunca deve
+ * travar o cliente numa fase que não reflete nada real. Falta só de um
+ * detalhe posterior (ex.: link de pagamento sem ter sido gerado, com
+ * produto e valor já reais) não conta como fantasma — esse caso tem
+ * resposta própria e mais útil (ver `montarMensagemAguardandoPagamento`).
+ */
+export function estadoComPedidoInconsistente(estado: EstadoConversa): boolean {
+  return FASES_COMPRA_EM_ANDAMENTO.includes(estado.fase) && !estado.dados.produto
+}
+
+/**
  * Avança o funil em uma mensagem. Deve ser chamado DEPOIS do portão de
  * escopo (classificarIntencao + intencaoInterrompeFluxo) — este dispatcher
  * assume que a mensagem já foi considerada dentro do escopo comercial.
@@ -793,12 +807,28 @@ export async function avancarFunil(
   intencao: Intencao,
   deps: DependenciasFunil,
 ): Promise<ResultadoEtapa> {
-  const estado: EstadoConversa = { ...estadoRecebido, dados: extrairDadosQualificacao(mensagemCliente, estadoRecebido.dados) }
+  let estado: EstadoConversa = { ...estadoRecebido, dados: extrairDadosQualificacao(mensagemCliente, estadoRecebido.dados) }
+
+  if (estadoComPedidoInconsistente(estado)) {
+    // Cliente voltou só com uma saudação (sem informação nova) — pergunta
+    // objetivamente se quer retomar ou começar de novo, em vez de inventar
+    // continuidade ("já paguei"/"já enviei"/"pedido confirmado") sobre um
+    // estado que não é real.
+    if (pareceSaudacaoSimples(mensagemCliente)) {
+      return { estado, mensagem: montarMensagemRetomada(estado.fase, estado.dados) }
+    }
+    // Qualquer outra mensagem (confirmação como "sim", ou intenção comercial
+    // nova como "quais flores tem pra hoje") já é o cliente decidindo seguir
+    // em frente — a intenção explícita da mensagem atual prevalece sobre a
+    // fase antiga incompatível: repara o estado (limpa só dados/fase,
+    // histórico é preservado à parte pelo chamador) e reinicia o funil.
+    estado = { ...estadoInicial(), dados: extrairDadosQualificacao(mensagemCliente, {}) }
+    intencao = classificarIntencao(mensagemCliente, estado.fase)
+  }
 
   // Cliente voltou só com uma saudação (sem informação nova) enquanto havia
-  // um pedido em andamento — retoma o contexto real em vez de avançar o
-  // funil como se fosse mensagem nova (nunca inventa "já paguei"/"já
-  // enviei"/"pedido confirmado" sem registro real em `dados`).
+  // um pedido em andamento e consistente — retoma o contexto real em vez de
+  // avançar o funil como se fosse mensagem nova.
   if (FASES_COMPRA_EM_ANDAMENTO.includes(estado.fase) && pareceSaudacaoSimples(mensagemCliente)) {
     return { estado, mensagem: montarMensagemRetomada(estado.fase, estado.dados) }
   }

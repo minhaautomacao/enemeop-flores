@@ -32,6 +32,7 @@ import {
   pareceSaudacaoSimples,
   montarMensagemRetomada,
   montarMensagemAguardandoPagamento,
+  estadoComPedidoInconsistente,
   type ProdutoCatalogo,
   type EstadoConversa,
   type DependenciasFunil,
@@ -388,9 +389,66 @@ test('retomada 4 — contexto inconsistente (fase aguardando_pagamento com dados
   assert.match(rSaudacao.mensagem, /não encontrei um atendimento em andamento/i)
   assert.match(rSaudacao.mensagem, /novo pedido/i)
 
+  // Mensagem com intencao comercial clara (nao e so uma saudacao) — a
+  // intencao explicita prevalece sobre a fase antiga incompativel: repara
+  // e segue pro fluxo de recomendacao, nunca fica preso em pagamento.
   const rOutraMsg = await avancarFunil(estadoInconsistente, 'quais flores tem pra hoje?', 'compra_produto', deps)
-  assert.doesNotMatch(rOutraMsg.mensagem, /já te enviei|pagamento confirmado|pedido confirmado/i)
-  assert.match(rOutraMsg.mensagem, /não encontrei um link de pagamento válido/i)
+  assert.doesNotMatch(rOutraMsg.mensagem, /já te enviei|pagamento confirmado|pedido confirmado|link de pagamento/i)
+  assert.notEqual(rOutraMsg.estado.fase, 'aguardando_pagamento')
+})
+
+// ── Reparo automático de fase inconsistente (2026-07-17, sessão 2) ───────
+// "fase" sozinha nunca é fonte de verdade: a intenção explícita da
+// mensagem atual prevalece sobre uma fase antiga fantasma.
+
+test('estadoComPedidoInconsistente identifica fase de compra sem produto como fantasma, mas nao fases fora do funil de compra', () => {
+  assert.equal(estadoComPedidoInconsistente({ fase: 'aguardando_pagamento', dados: {}, perguntasFeitas: [] }), true)
+  assert.equal(estadoComPedidoInconsistente({ fase: 'produto_selecionado', dados: {}, perguntasFeitas: [] }), true)
+  assert.equal(estadoComPedidoInconsistente({ fase: 'aguardando_pagamento', dados: { produto: { nome: 'Buquê X' } }, perguntasFeitas: [] }), false)
+  assert.equal(estadoComPedidoInconsistente({ fase: 'inicio', dados: {}, perguntasFeitas: [] }), false)
+  assert.equal(estadoComPedidoInconsistente({ fase: 'qualificacao', dados: {}, perguntasFeitas: [] }), false)
+})
+
+test('regressao real 2026-07-17: aguardando_pagamento com dados vazios -> "Sim" inicia novo pedido -> "quais flores tem pra hoje" nunca mais fala de pagamento', async () => {
+  const deps = depsFake()
+  let estado: EstadoConversa = { fase: 'aguardando_pagamento', dados: {}, perguntasFeitas: [] }
+
+  // 1) "Olá" — nao ha pedido valido pra retomar, Flora pergunta objetivamente
+  const r1 = await avancarFunil(estado, 'Olá', classificarIntencao('Olá', estado.fase), deps)
+  assert.doesNotMatch(r1.mensagem, /já te enviei|pagamento confirmado|pedido confirmado/i)
+  assert.match(r1.mensagem, /não encontrei um atendimento em andamento/i)
+  assert.match(r1.mensagem, /novo pedido/i)
+  estado = r1.estado
+  assert.equal(estado.fase, 'aguardando_pagamento', 'saudacao sozinha nao repara ainda, so pergunta')
+
+  // 2) "Sim" — cliente aceita comecar de novo: repara o estado (fase antiga
+  // fantasma sai de cena), preserva so o que for extraivel da mensagem
+  const r2 = await avancarFunil(estado, 'Sim', classificarIntencao('Sim', estado.fase), deps)
+  assert.doesNotMatch(r2.mensagem, /já te enviei|pagamento confirmado|pedido confirmado|link de pagamento/i)
+  assert.notEqual(r2.estado.fase, 'aguardando_pagamento')
+  estado = r2.estado
+
+  // 3) "Quais flores tem para hoje?" — intencao comercial nova segue
+  // normalmente a partir do estado reparado, nunca repete pagamento
+  const r3 = await avancarFunil(estado, 'Quais flores tem para hoje?', classificarIntencao('Quais flores tem para hoje?', estado.fase), deps)
+  assert.doesNotMatch(r3.mensagem, /já te enviei|pagamento confirmado|pedido confirmado|link de pagamento/i)
+  assert.notEqual(r3.estado.fase, 'aguardando_pagamento')
+})
+
+test('disponibilidade prevalece sobre fase antiga incompativel mesmo sem passar por "Sim" antes', async () => {
+  const deps = depsFake()
+  const estadoFantasma: EstadoConversa = { fase: 'aguardando_pagamento', dados: {}, perguntasFeitas: [] }
+  const r = await avancarFunil(estadoFantasma, 'quais flores tem pra hoje?', 'compra_produto', deps)
+  assert.doesNotMatch(r.mensagem, /já te enviei|pagamento confirmado|pedido confirmado|link de pagamento/i)
+  assert.notEqual(r.estado.fase, 'aguardando_pagamento')
+})
+
+test('fase inconsistente em produto_selecionado (sem produto real) tambem e reparada, nao so aguardando_pagamento', async () => {
+  const deps = depsFake()
+  const estadoFantasma: EstadoConversa = { fase: 'produto_selecionado', dados: {}, perguntasFeitas: [] }
+  const r = await avancarFunil(estadoFantasma, 'quero um buquê de rosas', 'compra_produto', deps)
+  assert.notEqual(r.estado.fase, 'produto_selecionado')
+  assert.doesNotMatch(r.mensagem, /quantas unidades|pra quando você precisa da entrega/i, 'nao deve pedir detalhes de um produto que nunca foi escolhido de verdade')
 })
 
 test('montarMensagemRetomada cita apenas fatos reais em dados, nunca inventa produto/local nao registrado', () => {

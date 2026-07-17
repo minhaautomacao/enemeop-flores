@@ -43,12 +43,39 @@ mergeada nela). Trabalho, migration e deploy feitos a partir de `master`.
    secret, `send-human-message` responde 401 mesmo com tudo o mais
    correto (a criação do ticket no handoff funciona normalmente, pois
    não depende dela).
+
+   **Retomada exata (2026-07-17, fim da sessão):** usuário pediu para
+   configurar esse secret via Playwright/MCP de navegador — nenhum MCP
+   de automação de navegador está conectado nesta sessão (só
+   Supabase/Vercel/Metricool/Google Calendar). `claude mcp add` local
+   não resolveria mesmo assim, pois MCPs só carregam no início da
+   sessão. Caminho combinado com o usuário:
+   a) usuário configura manualmente em
+      `https://supabase.com/dashboard/project/gftnjvdvzgjkhwxnxnwl/functions/secrets`
+      → **Add new secret** → nome `FACTORY_SECRET` → valor copiado do
+      `.env` local acima; **ou**
+   b) usuário adiciona um conector de automação de navegador em
+      Settings → Connectors (claude.ai/Claude Code) e abre um **chat
+      novo** — só nesse chat novo o Playwright MCP aparece disponível.
+   Em qualquer um dos dois casos, a próxima sessão deve: confirmar que
+   `FACTORY_SECRET` está cadastrado (sem revelar o valor) e então seguir
+   direto para os testes direcionados abaixo — não repetir merge,
+   migration ou deploy, que já estão feitos e confirmados.
+
 2. **Teste real ponta a ponta pelo Instagram/Facebook ainda não
    executado** — depende de alguém mandar a mensagem de fato (não há
    como originar isso via ferramenta/API disponível). Depois do item 1
-   resolvido, rodar: pedir atendente → conferir 1 único código →
-   assumir no Inbox → responder pelo mesmo canal → concluir/devolver →
-   confirmar Flora retomando.
+   resolvido, rodar primeiro os testes direcionados do `webhook-meta`
+   v31 (sem segredo → 401; segredo errado → 401; ação válida
+   autenticada; `idempotency_key` repetida não duplica envio;
+   assumir/concluir/devolver sincronizam `conversas` +
+   `atendimentos_humanos`; WhatsApp oficial continua `5511982829083`;
+   Flora não força saída do Instagram/Facebook), confirmar que a
+   produção corresponde ao commit `fdbde66` (ou descendente) antes de
+   pedir a mensagem real, e só então pedir ao usuário 1 mensagem real:
+   pedir atendente → conferir 1 único código → assumir no Inbox →
+   responder pelo mesmo canal → concluir/devolver → confirmar Flora
+   retomando.
 
 ## Reorganização Fábrica/Enemeop — CONCLUÍDA (2026-07-10)
 

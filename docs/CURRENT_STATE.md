@@ -33,49 +33,74 @@ mergeada nela). Trabalho, migration e deploy feitos a partir de `master`.
   `profiles` — antes qualquer conta com signup entrava.
 
 **Pendências que bloqueiam considerar a tarefa 100% concluída:**
-1. **`FACTORY_SECRET` não configurado nas Edge Function secrets do
-   projeto Supabase Enemeop** (só foi possível configurar no Vercel — o
-   valor já existe em `.credentials/infraestrutura/.env`, é o mesmo
-   usado lá). O token de acesso salvo em `SUPABASE_ACCESS_TOKEN` nesse
-   mesmo arquivo está expirado/revogado (`supabase secrets list` retorna
-   401), e não há ferramenta MCP para setar secret de Edge Function —
-   só o Supabase CLI autenticado ou o Dashboard resolvem isso. Sem essa
-   secret, `send-human-message` responde 401 mesmo com tudo o mais
-   correto (a criação do ticket no handoff funciona normalmente, pois
-   não depende dela).
+1. ~~`FACTORY_SECRET` não configurado~~ — **FALSO ALARME, resolvido
+   2026-07-17 (sessão de continuação).** Confirmado via Supabase
+   Dashboard (Playwright) que o secret já existia desde 08 Jun 2026; o
+   digest SHA256 exibido (`93a25165a7b49712aa03aa75edd8eb8ff418beab271bcd30ac794d5ca9d0d7dd`)
+   bate exatamente com o valor local de
+   `.credentials/infraestrutura/.env` (comparado por hash, sem revelar
+   o valor). O 401 nunca foi causado por secret ausente — o CLI só
+   falhava por token de acesso expirado.
 
-   **Retomada exata (2026-07-17, fim da sessão):** usuário pediu para
-   configurar esse secret via Playwright/MCP de navegador — nenhum MCP
-   de automação de navegador está conectado nesta sessão (só
-   Supabase/Vercel/Metricool/Google Calendar). `claude mcp add` local
-   não resolveria mesmo assim, pois MCPs só carregam no início da
-   sessão. Caminho combinado com o usuário:
-   a) usuário configura manualmente em
-      `https://supabase.com/dashboard/project/gftnjvdvzgjkhwxnxnwl/functions/secrets`
-      → **Add new secret** → nome `FACTORY_SECRET` → valor copiado do
-      `.env` local acima; **ou**
-   b) usuário adiciona um conector de automação de navegador em
-      Settings → Connectors (claude.ai/Claude Code) e abre um **chat
-      novo** — só nesse chat novo o Playwright MCP aparece disponível.
-   Em qualquer um dos dois casos, a próxima sessão deve: confirmar que
-   `FACTORY_SECRET` está cadastrado (sem revelar o valor) e então seguir
-   direto para os testes direcionados abaixo — não repetir merge,
-   migration ou deploy, que já estão feitos e confirmados.
+   **Testes direcionados do `webhook-meta` v31 executados e OK**
+   (2026-07-17, direto contra produção via curl, usando uma conversa
+   sintética descartável em `conversas`/`atendimento_mensagens_enviadas`
+   com `canal_id` inválido para não atingir cliente real — dados
+   apagados ao final):
+   - Sem header `Authorization` → 401 ✅
+   - Segredo errado → 401 ✅
+   - `autor_id` diferente do `atendente_id` da conversa → 409 ✅
+   - Ação válida autenticada (auth + ownership + insert de
+     idempotência OK) → 502 esperado no envio Meta (canal_id fake) ✅
+   - Repetir a mesma `idempotency_key` → 200 `{ok:true,duplicado:true}`,
+     sem tentar reenviar ✅
+   - `historico` da conversa não foi alterado quando o envio falhou
+     (confirma que só grava após sucesso real) ✅
+   Ainda não testados neste ciclo: assumir/concluir/devolver
+   (`atendimentos_humanos`) e o envio realmente bem-sucedido pelo canal
+   Meta — dependem do teste real do item 2 abaixo.
 
-2. **Teste real ponta a ponta pelo Instagram/Facebook ainda não
+2. **NOVO BLOQUEIO CRÍTICO (achado 2026-07-17): o deploy do frontend no
+   Vercel está desatualizado em ~1 mês.** O deployment de produção mais
+   recente no projeto Vercel `enemeop-flores` é `dpl_AGtKy1gtVX86TfgVAhU3aSjfoo6g`,
+   commit `4f834b2` ("chore: força redeploy após reconexão
+   GitHub-Vercel"), de **18 Jun 2026** — apesar de `master` ter 30+
+   commits depois disso, incluindo `fdbde66` (o próprio fix desta
+   sessão) e o commit atual `6885a95`. A integração GitHub→Vercel
+   aparentemente quebrou de novo depois daquele commit de reconexão.
+   Além disso, o domínio `app.enemeopflores.com.br` **não resolve por
+   DNS** (`ERR_NAME_NOT_RESOLVED` via Playwright) e não aparece na lista
+   de domínios do projeto Vercel (só os `*.vercel.app` automáticos) —
+   pode ter sido removido do projeto ou nunca reconfigurado depois de
+   alguma mudança de conta/projeto.
+
+   **Isso significa que a suposição anterior ("Vercel production, alias
+   atualizado") era falsa** — o fix de handoff humano / Inbox Flora
+   nunca chegou ao frontend público. Testar pelo Instagram/Facebook
+   antes de corrigir isso não valida nada.
+
+   **Combinado com o usuário 2026-07-17:** ele vai reconectar a
+   integração GitHub↔Vercel manualmente em
+   `vercel.com/essencial-auto-pecas-projects/enemeop-flores/settings/git`
+   e então disparar um novo deploy (push ou redeploy manual do commit
+   atual). A próxima sessão deve: (a) confirmar via
+   `list_deployments`/`get_project` que a produção aponta pro commit
+   `6885a95` ou descendente antes de qualquer teste; (b) verificar se
+   `app.enemeopflores.com.br` voltou a resolver, e se não, perguntar ao
+   usuário sobre o domínio (fora do alcance das ferramentas MCP
+   disponíveis — sem tool de "listar/adicionar domínio" no Vercel MCP);
+   (c) só depois seguir pro teste real do item 3 abaixo.
+
+3. **Teste real ponta a ponta pelo Instagram/Facebook ainda não
    executado** — depende de alguém mandar a mensagem de fato (não há
-   como originar isso via ferramenta/API disponível). Depois do item 1
-   resolvido, rodar primeiro os testes direcionados do `webhook-meta`
-   v31 (sem segredo → 401; segredo errado → 401; ação válida
-   autenticada; `idempotency_key` repetida não duplica envio;
-   assumir/concluir/devolver sincronizam `conversas` +
-   `atendimentos_humanos`; WhatsApp oficial continua `5511982829083`;
-   Flora não força saída do Instagram/Facebook), confirmar que a
-   produção corresponde ao commit `fdbde66` (ou descendente) antes de
-   pedir a mensagem real, e só então pedir ao usuário 1 mensagem real:
-   pedir atendente → conferir 1 único código → assumir no Inbox →
-   responder pelo mesmo canal → concluir/devolver → confirmar Flora
-   retomando.
+   como originar isso via ferramenta/API disponível), e agora também
+   depende do item 2 estar resolvido. Depois disso, testar
+   assumir/concluir/devolver sincronizando `conversas` +
+   `atendimentos_humanos`, WhatsApp oficial continua `5511982829083`,
+   Flora não força saída do Instagram/Facebook, e só então pedir ao
+   usuário 1 mensagem real: pedir atendente → conferir 1 único código →
+   assumir no Inbox → responder pelo mesmo canal → concluir/devolver →
+   confirmar Flora retomando.
 
 ## Reorganização Fábrica/Enemeop — CONCLUÍDA (2026-07-10)
 

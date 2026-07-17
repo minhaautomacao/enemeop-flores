@@ -29,6 +29,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
     .eq('id', user.id)
     .single();
 
+  // Ter conta autenticada não basta — só usuários com linha em `profiles`
+  // (equipe autorizada) acessam o dashboard, incluindo o Inbox Flora.
+  if (!profileData) redirect('/login');
+
   const profile = profileData as { nome: string | null; cargo: string | null } | null;
   const nomeUsuario = profile?.nome ?? user.email ?? '';
 

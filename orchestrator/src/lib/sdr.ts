@@ -41,7 +41,7 @@ const WORKSPACE_ID = process.env.SAAS_WORKSPACE_ID ?? 'enemeop-flores'
 const ESTADO_VERSAO = 1
 
 // Transferência para atendimento humano usa mensagemTransferencia() de
-// lib/funil.ts (texto fixo "WhatsApp final 8282", sem expor o número
+// lib/funil.ts (texto fixo "WhatsApp final 9083", sem expor o número
 // completo em texto de cliente — ver HUMAN_SUPPORT_WHATSAPP no .env.example
 // para o roteamento interno real da escalada).
 

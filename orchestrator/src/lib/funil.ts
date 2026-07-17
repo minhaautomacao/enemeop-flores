@@ -267,11 +267,11 @@ export function intencaoInterrompeFluxo(intencao: Intencao): boolean {
 // ── Mensagens fixas (nunca geradas por LLM) ──────────────────────────────
 
 export function mensagemForaDeEscopo(): string {
-  return 'Posso te ajudar com flores, presentes, pedidos e entregas da Enemeop Flores. Para outros assuntos, fale com nossa equipe pelo WhatsApp final 8282.'
+  return 'Posso te ajudar com flores, presentes, pedidos e entregas da Enemeop Flores. Para outros assuntos, fale com nossa equipe pelo WhatsApp final 9083.'
 }
 
 export function mensagemTransferencia(): string {
-  return 'Esse assunto precisa da nossa equipe. Fale com a Enemeop Flores pelo WhatsApp final 8282 para continuar o atendimento.'
+  return 'Vou te transferir para nossa equipe! Pode continuar por aqui mesmo — se preferir, também dá pra falar direto no WhatsApp final 9083.'
 }
 
 export function mensagemFinalizacao(): string {
@@ -372,7 +372,7 @@ function formatarPreco(preco?: number): string {
 
 export function montarMensagemRecomendacao(rec: Recomendacao, ocasiao?: string): string {
   if (!rec.principal) {
-    return 'No momento não encontrei opções disponíveis para o que você pediu. Posso avisar assim que tivermos, ou prefere falar com nossa equipe pelo WhatsApp final 8282?'
+    return 'No momento não encontrei opções disponíveis para o que você pediu. Posso avisar assim que tivermos, ou prefere falar com nossa equipe pelo WhatsApp final 9083?'
   }
   const p = rec.principal
   let msg = `Para ${ocasiao ?? 'essa ocasião'}, recomendo o ${p.nome}${p.descricao ? ` — ${p.descricao}` : ''}. Está disponível por ${formatarPreco(p.preco)}.${p.url ? ` Link: ${p.url}` : ''}`

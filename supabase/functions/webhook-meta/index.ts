@@ -70,7 +70,7 @@ async function buscarConfigDB(chave: string): Promise<string> {
 // fase usa diretamente os valores de Fase (funil.ts). dados/perguntasFeitas
 // do EstadoConversa vão dentro do jsonb pedido_info, já existente.
 
-interface Mensagem { role: 'user' | 'assistant'; content: string; ts: string; }
+interface Mensagem { role: 'user' | 'assistant' | 'human'; content: string; ts: string; autor_id?: string; }
 
 interface ConversaRow {
   id: string;
@@ -81,6 +81,11 @@ interface ConversaRow {
   pedido_info: { dados?: DadosPedido; perguntasFeitas?: string[] } | null;
   lead_id: string | null;
   nome_cliente: string | null;
+  modo_atendimento?: string;
+  status_atendimento?: string;
+  motivo_handoff?: string | null;
+  handoff_em?: string | null;
+  atendente_id?: string | null;
 }
 
 async function buscarNomeCliente(canalId: string): Promise<string | null> {
@@ -324,6 +329,73 @@ async function enviarTextoInstagramOuFacebook(canal: string, canalId: string, te
   }
 }
 
+// ── Handoff humano — cria (ou reusa) o atendimentos_humanos aberto ──────
+//
+// Índice único parcial (conversa_id) WHERE status IN ('aguardando_humano',
+// 'em_atendimento') garante no banco que só existe um ticket aberto por
+// conversa. Se duas chamadas concorrentes tentarem criar ao mesmo tempo
+// (ex.: duas mensagens seguidas do cliente disparando handoff), a segunda
+// recebe violação de unicidade (23505) e cai no fallback: busca o ticket
+// já aberto e reusa o código — nunca gera um segundo.
+
+type OrigemHandoff = 'cliente_solicitou' | 'flora_sem_confianca' | 'limite_tecnico';
+
+async function criarOuReusarAtendimento(
+  conversaId: string,
+  canal: string,
+  canalId: string,
+  nomeCliente: string | null,
+  origem: OrigemHandoff,
+  motivo: string,
+): Promise<string | null> {
+  const db = getDb();
+  const { data: inserted, error: insertError } = await db
+    .from('atendimentos_humanos')
+    .insert({
+      conversa_id: conversaId,
+      canal,
+      canal_cliente_id: canalId,
+      nome_cliente: nomeCliente,
+      origem_handoff: origem,
+      motivo_transferencia: motivo,
+    })
+    .select('codigo')
+    .single();
+
+  if (!insertError && inserted) return (inserted as { codigo: string }).codigo;
+
+  const { data: existente } = await db
+    .from('atendimentos_humanos')
+    .select('codigo')
+    .eq('conversa_id', conversaId)
+    .in('status', ['aguardando_humano', 'em_atendimento'])
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return (existente as { codigo: string } | null)?.codigo ?? null;
+}
+
+async function iniciarHandoffHumano(
+  conversaRow: ConversaRow,
+  canal: string,
+  canalId: string,
+  origem: OrigemHandoff,
+  motivo: string,
+): Promise<string> {
+  await salvarConversa(conversaRow.id, {
+    modo_atendimento: 'humano',
+    status_atendimento: 'aguardando_humano',
+    motivo_handoff: motivo,
+    handoff_em: new Date().toISOString(),
+  } as Partial<ConversaRow>);
+
+  const codigo = await criarOuReusarAtendimento(conversaRow.id, canal, canalId, conversaRow.nome_cliente, origem, motivo);
+  return codigo
+    ? `${mensagemTransferencia()} Seu código de atendimento é ${codigo}.`
+    : mensagemTransferencia();
+}
+
 // ── Processar DM — usa o funil determinístico compartilhado ─────────────
 
 async function processarDM(canalId: string, canal: string, mensagemCliente: string): Promise<void> {
@@ -360,8 +432,10 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
       respostaFinal = mensagemForaDeEscopo();
       // fase/dados não mudam — cliente pode voltar ao fluxo comercial depois.
     } else {
-      respostaFinal = mensagemTransferencia();
-      estado = { ...estado, fase: 'transferido_humano', dados: { ...estado.dados, motivoTransferencia: `${intencao}: "${mensagemCliente}"` } };
+      const motivo = `${intencao}: "${mensagemCliente}"`;
+      const origem: OrigemHandoff = intencao === 'atendimento_humano' ? 'cliente_solicitou' : 'flora_sem_confianca';
+      respostaFinal = await iniciarHandoffHumano(conversaRow, canal, canalId, origem, motivo);
+      estado = { ...estado, fase: 'transferido_humano', dados: { ...estado.dados, motivoTransferencia: motivo } };
     }
   } else {
     const primeiraMensagem = (conversaRow.historico ?? []).length === 0;
@@ -406,7 +480,8 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     } else {
       // Falha definitiva no envio de mídia: nunca finge que enviou —
       // encaminha para atendimento humano.
-      await enviarTextoInstagramOuFacebook(canal, canalId, mensagemTransferencia());
+      const mensagemFalha = await iniciarHandoffHumano(conversaRow, canal, canalId, 'limite_tecnico', 'falha ao enviar mídia do produto');
+      await enviarTextoInstagramOuFacebook(canal, canalId, mensagemFalha);
     }
   } else {
     await enviarTextoInstagramOuFacebook(canal, canalId, respostaFinal);
@@ -543,10 +618,81 @@ async function enviarAoOrquestrador(evento: MetaEvento): Promise<void> {
   }).catch(() => {});
 }
 
+// ── send-human-message — Inbox Flora envia pelo mesmo canal do cliente ───
+//
+// Chamada interna do Next.js (app/api/atendimento/conversas/[id]/mensagens),
+// não é payload da Meta — por isso é despachada ANTES da validação de
+// assinatura HMAC, que não se aplica aqui. Autenticação própria:
+// Authorization: Bearer FACTORY_SECRET (mesma variável já declarada no
+// topo do arquivo, sem uso real até agora).
+
+interface SendHumanMessageBody {
+  conversa_id?: string;
+  mensagem?: string;
+  autor_id?: string;
+  idempotency_key?: string;
+}
+
+async function handleSendHumanMessage(req: Request): Promise<Response> {
+  const auth = req.headers.get('authorization') ?? '';
+  if (!FACTORY_SECRET || auth !== `Bearer ${FACTORY_SECRET}`) {
+    return new Response(JSON.stringify({ error: 'Não autorizado' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  let body: SendHumanMessageBody;
+  try { body = await req.json(); } catch { return new Response(JSON.stringify({ error: 'JSON inválido' }), { status: 400, headers: { 'Content-Type': 'application/json' } }); }
+
+  const { conversa_id, mensagem, autor_id, idempotency_key } = body;
+  if (!conversa_id || !mensagem?.trim() || !autor_id || !idempotency_key) {
+    return new Response(JSON.stringify({ error: 'conversa_id, mensagem, autor_id e idempotency_key são obrigatórios' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  const db = getDb();
+  const { data: conversa, error } = await db
+    .from('conversas')
+    .select('id, canal, canal_id, historico, modo_atendimento, status_atendimento, atendente_id')
+    .eq('id', conversa_id)
+    .single();
+  if (error || !conversa) {
+    return new Response(JSON.stringify({ error: 'Conversa não encontrada' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+  }
+  const row = conversa as ConversaRow;
+  if (!['instagram', 'facebook'].includes(row.canal)) {
+    return new Response(JSON.stringify({ error: 'Canal não suportado por esta ação' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+  }
+  if (row.modo_atendimento !== 'humano' || row.status_atendimento !== 'humano_atendendo' || row.atendente_id !== autor_id) {
+    return new Response(JSON.stringify({ error: 'Conversa não está assumida por este atendente' }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  // Idempotência: PK em idempotency_key garante que a mesma chave nunca
+  // dispara um segundo envio real, mesmo sob retry/duplo clique.
+  const { error: idempError } = await db
+    .from('atendimento_mensagens_enviadas')
+    .insert({ idempotency_key, conversa_id });
+  if (idempError) {
+    return new Response(JSON.stringify({ ok: true, duplicado: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  const enviado = await enviarTextoInstagramOuFacebook(row.canal, row.canal_id, mensagem.trim());
+  if (!enviado) {
+    return new Response(JSON.stringify({ error: 'Falha ao enviar pelo canal Meta' }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  const msgHumano: Mensagem = { role: 'human', content: mensagem.trim(), ts: new Date().toISOString(), autor_id };
+  const historicoFinal = [...(row.historico ?? []), msgHumano].slice(-20);
+  await salvarConversa(conversa_id, { historico: historicoFinal } as Partial<ConversaRow>);
+
+  return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+}
+
 // ── Handler principal ─────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'content-type' } });
+
+  if (req.headers.get('x-flora-inbox-action') === 'send-human-message') {
+    return await handleSendHumanMessage(req);
+  }
 
   if (req.method === 'GET') {
     const url = new URL(req.url);

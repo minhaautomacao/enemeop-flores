@@ -71,7 +71,7 @@ test('3b. Flora nao inventa produto quando catalogo esta vazio', () => {
   const rec = selecionarRecomendacoes([])
   assert.equal(rec.principal, null)
   const msg = montarMensagemRecomendacao(rec)
-  assert.match(msg, /WhatsApp final 8282/)
+  assert.match(msg, /WhatsApp final 9083/)
 })
 
 test('3c. produtos indisponiveis nunca sao recomendados', () => {
@@ -120,7 +120,7 @@ test('7b. Flora nunca estima frete quando o calculo falha - transfere para human
   const resposta = await calcularFreteEtapa('00000-000', calculadorQueFalha)
   assert.equal(resposta.falhou, true)
   assert.equal(resposta.valor, null)
-  assert.match(resposta.mensagem, /WhatsApp final 8282/)
+  assert.match(resposta.mensagem, /WhatsApp final 9083/)
 })
 
 // 8. Flora resume pedido
@@ -209,7 +209,7 @@ test('12-13. cliente pergunta sobre politica -> assunto_fora_escopo, resposta fi
   assert.equal(intencaoInterrompeFluxo(intencao), true)
   const resposta = mensagemForaDeEscopo()
   assert.match(resposta, /flores, presentes, pedidos e entregas/)
-  assert.match(resposta, /WhatsApp final 8282/)
+  assert.match(resposta, /WhatsApp final 9083/)
 })
 
 // 14 e 15. cliente faz reclamação -> Flora transfere
@@ -225,7 +225,7 @@ test('14-15. cliente reclama -> intencao reclamacao, transfere para humano com m
 
   const msg = mensagemTransferencia()
   assert.match(msg, /nossa equipe/)
-  assert.match(msg, /WhatsApp final 8282/)
+  assert.match(msg, /WhatsApp final 9083/)
 })
 
 // 16 e 17. cliente muda de assunto no meio da compra -> Flora redireciona sem perder o funil
@@ -478,7 +478,7 @@ test('dispatcher: frete falha -> transfere para humano, nunca estima', async () 
   }
   const r = await avancarFunil(estado, '', 'compra_produto', deps)
   assert.equal(r.estado.fase, 'transferido_humano')
-  assert.match(r.mensagem, /WhatsApp final 8282/)
+  assert.match(r.mensagem, /WhatsApp final 9083/)
   assert.equal(r.estado.dados.valorTotal, undefined)
 })
 
@@ -491,7 +491,7 @@ test('dispatcher: falha ao gerar pagamento -> transfere para humano', async () =
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'pagamento', deps)
   assert.equal(r.estado.fase, 'transferido_humano')
-  assert.match(r.mensagem, /WhatsApp final 8282/)
+  assert.match(r.mensagem, /WhatsApp final 9083/)
 })
 
 test('dispatcher: pedido de foto funciona em qualquer fase com produto em jogo', async () => {

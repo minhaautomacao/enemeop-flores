@@ -60,42 +60,38 @@ mergeada nela). Trabalho, migration e deploy feitos a partir de `master`.
    (`atendimentos_humanos`) e o envio realmente bem-sucedido pelo canal
    Meta — dependem do teste real do item 2 abaixo.
 
-2. **NOVO BLOQUEIO CRÍTICO (achado 2026-07-17): o deploy do frontend no
-   Vercel está desatualizado em ~1 mês.** O deployment de produção mais
-   recente no projeto Vercel `enemeop-flores` é `dpl_AGtKy1gtVX86TfgVAhU3aSjfoo6g`,
-   commit `4f834b2` ("chore: força redeploy após reconexão
-   GitHub-Vercel"), de **18 Jun 2026** — apesar de `master` ter 30+
-   commits depois disso, incluindo `fdbde66` (o próprio fix desta
-   sessão) e o commit atual `6885a95`. A integração GitHub→Vercel
-   aparentemente quebrou de novo depois daquele commit de reconexão.
-   Além disso, o domínio `app.enemeopflores.com.br` **não resolve por
-   DNS** (`ERR_NAME_NOT_RESOLVED` via Playwright) e não aparece na lista
-   de domínios do projeto Vercel (só os `*.vercel.app` automáticos) —
-   pode ter sido removido do projeto ou nunca reconfigurado depois de
-   alguma mudança de conta/projeto.
+2. ~~Deploy do frontend desatualizado~~ — **FALSO ALARME, causado por
+   erro meu (sessão 2026-07-17): consultei o projeto Vercel errado via
+   MCP.** O conector MCP do Vercel está autenticado numa conta
+   (`essencial-auto-pecas-projects`) diferente da conta que o CLI local
+   usa (`minhaautomacao`, batendo com `.vercel/project.json` do clone
+   ativo). Existem dois projetos Vercel homônimos `enemeop-flores`; o
+   real é **`minhaautomacaos-projects/enemeop-flores`**
+   (`prj_rGXjRZzqsE8riGFyvY6koAchZC0Q`, org `team_gZMrVpE7q1aYd7VXOAUcCN0E`)
+   — confirmado por `vercel whoami`, `vercel project inspect` e
+   `.vercel/project.json`. Nesse projeto correto, a integração
+   GitHub→Vercel está funcionando: o deployment de produção
+   `dpl_5Wq87oskGCCwDFZSy9g62fzAchf8` foi criado 3 segundos depois do
+   push do commit `5b01c9b` (descendente de `fdbde66`), e o alias
+   `app.enemeopflores.com.br` aponta corretamente pra ele (confirmado em
+   `vercel inspect <url> --format json` → campo `aliases`). **A
+   produção já tinha o fix de handoff humano / Inbox Flora antes mesmo
+   desta sessão.** O projeto antigo (`essencial-auto-pecas-projects`)
+   não deve ser usado nem alterado — é resquício de outra conta/config,
+   não está vinculado a este repo nem ao domínio.
 
-   **Isso significa que a suposição anterior ("Vercel production, alias
-   atualizado") era falsa** — o fix de handoff humano / Inbox Flora
-   nunca chegou ao frontend público. Testar pelo Instagram/Facebook
-   antes de corrigir isso não valida nada.
-
-   **Combinado com o usuário 2026-07-17:** ele vai reconectar a
-   integração GitHub↔Vercel manualmente em
-   `vercel.com/essencial-auto-pecas-projects/enemeop-flores/settings/git`
-   e então disparar um novo deploy (push ou redeploy manual do commit
-   atual). A próxima sessão deve: (a) confirmar via
-   `list_deployments`/`get_project` que a produção aponta pro commit
-   `6885a95` ou descendente antes de qualquer teste; (b) verificar se
-   `app.enemeopflores.com.br` voltou a resolver, e se não, perguntar ao
-   usuário sobre o domínio (fora do alcance das ferramentas MCP
-   disponíveis — sem tool de "listar/adicionar domínio" no Vercel MCP);
-   (c) só depois seguir pro teste real do item 3 abaixo.
+   **Lição para sessões futuras:** ao usar as ferramentas MCP do
+   Vercel, sempre confirmar `team_id`/projeto contra
+   `.vercel/project.json` do repo local (ou `vercel whoami` +
+   `vercel project inspect` via CLI) antes de confiar no que o MCP
+   retorna — o MCP pode estar noutra conta.
 
 3. **Teste real ponta a ponta pelo Instagram/Facebook ainda não
    executado** — depende de alguém mandar a mensagem de fato (não há
-   como originar isso via ferramenta/API disponível), e agora também
-   depende do item 2 estar resolvido. Depois disso, testar
-   assumir/concluir/devolver sincronizando `conversas` +
+   como originar isso via ferramenta/API disponível). Itens 1 e 2 já
+   estão confirmados OK, então este é o único bloqueio restante. Além
+   da mensagem em si, testar assumir/concluir/devolver sincronizando
+   `conversas` +
    `atendimentos_humanos`, WhatsApp oficial continua `5511982829083`,
    Flora não força saída do Instagram/Facebook, e só então pedir ao
    usuário 1 mensagem real: pedir atendente → conferir 1 único código →

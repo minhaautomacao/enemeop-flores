@@ -4,6 +4,31 @@
 
 ---
 
+## Regra permanente — acompanhamento de todo teste real da Flora (2026-07-19)
+
+Antes de iniciar qualquer teste real da Flora (mensagem de verdade em
+Instagram/Facebook/WhatsApp), acompanhar **online e em tempo real** — nunca
+depois, por amostragem — somente a conversa e os logs realmente envolvidos
+nesse teste (não fazer auditoria ampla de outras conversas/tabelas).
+
+Em cada resposta da Flora durante o teste:
+1. Avaliar a resposta contra a etapa esperada do funil naquele ponto.
+2. Verificar: contexto (fase/histórico coerente), produto (nome/código
+   real), preço, foto (amarrada ao código certo), frete (cotação real, não
+   estimada), pedido (dados persistidos), pagamento (status real vindo da
+   API do provedor, nunca do texto/corpo da notificação), status do pedido
+   e os indicadores do dashboard.
+3. Se qualquer etapa mostrar erro, comportamento inconsistente ou loop:
+   **interromper antes de qualquer pagamento real ou contratação de
+   entrega**, informar a causa objetiva e corrigir antes de prosseguir.
+4. Informar uma avaliação objetiva a cada etapa concluída (não só no final).
+
+**Como aplicar:** poucos tokens — ler apenas os arquivos necessários para a
+etapa em questão, rodar só os testes diretamente relacionados ao que está
+sendo verificado, sem re-auditar código/dados que não mudaram.
+
+---
+
 ## Handoff humano (webhook-meta ↔ atendimentos_humanos ↔ Inbox Flora) — 2026-07-17
 
 Branch `reorganizacao/absorver-aplicacao-2026-07-10` foi mesclada em

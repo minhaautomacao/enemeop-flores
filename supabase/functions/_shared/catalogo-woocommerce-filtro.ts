@@ -10,11 +10,13 @@
  *   - código comercial (o que a produção usa pra montar o arranjo) = prefixo
  *     alfanumérico curto no início do NOME, no padrão real do site
  *     ("002 - Arranjo...", "096 - Buque...", "M08 - ..."). Sem esse prefixo,
- *     não há código inequívoco — o produto é sinalizado e excluído (nunca
- *     inventa um código).
+ *     usa o ID do WooCommerce como código exibido de fallback — um produto
+ *     real (publicado, em estoque, com preço e foto) nunca é excluído só
+ *     por não seguir o padrão de nome.
  *   - ID do WooCommerce = identificador técnico interno, sempre presente,
- *     usado pra revalidar preço/estoque/nome/foto direto na fonte. Nunca
- *     substitui o código comercial nem é exibido ao cliente.
+ *     usado pra revalidar preço/estoque/nome/foto direto na fonte. Quando
+ *     não há código no nome, codigo === idExterno (mesmo valor, dois campos
+ *     — nunca inventa um código diferente do ID real).
  */
 
 import type { ProdutoCatalogo } from './funil.ts';
@@ -56,14 +58,13 @@ export function divergeSkuDoCodigo(p: WooProduct): boolean {
   return !!sku && !!doNome && sku.toLowerCase() !== doNome.toLowerCase();
 }
 
-/** Produto de teste/rascunho/fora de estoque/sem preço/sem imagem/sem código comercial reconhecível — nunca aparece pro cliente. */
+/** Produto de teste/rascunho/fora de estoque/sem preço/sem imagem — nunca aparece pro cliente. Ausência de código no nome NÃO exclui (usa o ID como fallback, ver paraProdutoCatalogo). */
 export function produtoValido(p: WooProduct): boolean {
   if (p.status !== 'publish') return false;
   if (p.stock_status !== 'instock') return false;
   if (/\bteste\b/i.test(p.name) || /n[aã]o\s+dispon[ií]vel/i.test(p.name)) return false;
   if (parsePreco(p) == null) return false;
   if (!p.images || p.images.length === 0) return false;
-  if (extrairCodigoDoNome(p.name) == null) return false;
   return true;
 }
 
@@ -74,13 +75,16 @@ export function construirHeaderBasicAuth(key: string | null | undefined, secret:
 }
 
 export function paraProdutoCatalogo(p: WooProduct): ProdutoCatalogo {
+  const idExterno = String(p.id);
   return {
     nome: p.name,
     preco: parsePreco(p),
     fotoUrl: p.images[0]?.src,
     disponivel: true,
-    codigo: extrairCodigoDoNome(p.name) ?? undefined,
-    idExterno: String(p.id),
+    // Sem prefixo de código no nome: usa o ID do WooCommerce como código
+    // exibido de fallback — nunca exclui um produto real por isso.
+    codigo: extrairCodigoDoNome(p.name) ?? idExterno,
+    idExterno,
     url: p.permalink,
     origem: 'woocommerce',
   };

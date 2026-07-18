@@ -706,7 +706,7 @@ export function extractCommercialCode(name: string): string | null {
   return m ? m[1] : null
 }
 
-/** Produto de teste/rascunho/fora de estoque/sem preço/sem imagem/sem código comercial reconhecível — nunca aparece pro cliente. */
+/** Produto de teste/rascunho/fora de estoque/sem preço/sem imagem — nunca aparece pro cliente. Ausência de código no nome NÃO exclui (usa o ID como fallback). */
 function isValidWooProduct(p: WooProduct): boolean {
   if (p.status !== 'publish') return false
   if (p.stock_status !== 'instock') return false
@@ -714,7 +714,6 @@ function isValidWooProduct(p: WooProduct): boolean {
   const preco = parsePrice(p.sale_price || p.price || p.regular_price)
   if (!preco) return false
   if (!p.images || p.images.length === 0) return false
-  if (extractCommercialCode(p.name) == null) return false
   return true
 }
 

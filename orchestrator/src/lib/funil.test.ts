@@ -1166,3 +1166,39 @@ test('escolha entre duas opções com o mesmo código comercial preserva o ID, n
   assert.equal(r.estado.dados.produto?.preco, 130)
   assert.equal(r.estado.dados.produto?.fotoUrl, 'https://site/b.jpg')
 })
+
+// Código duplicado escolhido SOMENTE pelo código: nunca seleciona sozinho, pede desambiguação.
+test('código duplicado entre opções, escolhido apenas pelo código, gera desambiguação em vez de selecionar automaticamente', async () => {
+  const opcoesDuplicadas: ProdutoCatalogo[] = [
+    { nome: '002 - Arranjo A', codigo: '002', idExterno: '100', preco: 105, disponivel: true, fotoUrl: 'https://site/a.jpg' },
+    { nome: '002 - Arranjo B', codigo: '002', idExterno: '200', preco: 130, disponivel: true, fotoUrl: 'https://site/b.jpg' },
+  ]
+  const deps = depsFake()
+  const estado: EstadoConversa = { fase: 'recomendacao', dados: { opcoesRecomendadas: opcoesDuplicadas }, perguntasFeitas: [] }
+  // "quero o código 002" bate com as DUAS opções — não há nome/preço/posição na mensagem, só o código.
+  const r = await avancarFunil(estado, 'quero o código 002', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'recomendacao', 'nao deve avancar de fase sem uma escolha inequivoca')
+  assert.equal(r.estado.dados.produto, undefined, 'nunca seleciona automaticamente entre opcoes conflitantes')
+  assert.match(r.mensagem, /mais de uma op[cç][aã]o com esse c[oó]digo/i)
+  assert.match(r.mensagem, /nome.*pre[cç]o.*posi[cç][aã]o|posi[cç][aã]o.*pre[cç]o.*nome/i)
+})
+
+// Escolha posterior por posição, após a desambiguação, seleciona o ID correto.
+test('após a desambiguação, escolha por posição ("a segunda") seleciona o ID, foto e preço corretos', async () => {
+  const opcoesDuplicadas: ProdutoCatalogo[] = [
+    { nome: '002 - Arranjo A', codigo: '002', idExterno: '100', preco: 105, disponivel: true, fotoUrl: 'https://site/a.jpg' },
+    { nome: '002 - Arranjo B', codigo: '002', idExterno: '200', preco: 130, disponivel: true, fotoUrl: 'https://site/b.jpg' },
+  ]
+  const deps = depsFake()
+  let estado: EstadoConversa = { fase: 'recomendacao', dados: { opcoesRecomendadas: opcoesDuplicadas }, perguntasFeitas: [] }
+
+  const r1 = await avancarFunil(estado, 'quero o código 002', 'compra_produto', deps)
+  estado = r1.estado
+  assert.equal(estado.dados.produto, undefined, 'ainda ambiguo apos a primeira tentativa')
+
+  const r2 = await avancarFunil(estado, 'a segunda', 'compra_produto', deps)
+  assert.equal(r2.estado.fase, 'produto_selecionado')
+  assert.equal(r2.estado.dados.produto?.idExterno, '200', 'posicao "a segunda" deve resolver pro ID exato da opcao B')
+  assert.equal(r2.estado.dados.produto?.preco, 130)
+  assert.equal(r2.estado.dados.produto?.fotoUrl, 'https://site/b.jpg')
+})

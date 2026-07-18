@@ -59,11 +59,18 @@ test('divergeSkuDoCodigo: sinaliza quando o SKU cadastrado diverge do código ex
   assert.equal(divergeSkuDoCodigo(semSku), false, 'sem SKU cadastrado nao ha divergencia a sinalizar');
 });
 
-// 3. Nome sem código inequívoco — nunca inventa, produto é excluído.
-test('nome sem código reconhecível: extrairCodigoDoNome retorna null e o produto é excluído (nunca inventa)', () => {
-  const semCodigo = produtoBase({ name: 'Arranjo Orquídeas Pink vaso de vidro' });
-  assert.equal(extrairCodigoDoNome(semCodigo.name), null);
-  assert.equal(produtoValido(semCodigo), false);
+// 1b. Produto real (publicado, em estoque, com preço e foto) sem prefixo de
+// código no nome NUNCA é excluído — usa o ID do WooCommerce como código
+// exibido de fallback, mantendo idExterno igual ao ID técnico.
+test('produto válido sem prefixo de código no nome: não é excluído, usa o ID do WooCommerce como código de fallback', () => {
+  const semPrefixo = produtoBase({ id: 3220, name: 'Arranjo Orquídeas Pink vaso de vidro', sku: '' });
+  assert.equal(extrairCodigoDoNome(semPrefixo.name), null, 'nome realmente nao segue o padrao XXX - resto');
+  assert.equal(produtoValido(semPrefixo), true, 'produto real nunca deve ser excluido so por falta de prefixo no nome');
+
+  const c = paraProdutoCatalogo(semPrefixo);
+  assert.equal(c.codigo, '3220', 'codigo exibido cai pro ID do WooCommerce quando nao ha prefixo no nome');
+  assert.equal(c.idExterno, '3220');
+  assert.equal(c.codigo, c.idExterno, 'sem prefixo, codigo e idExterno sao o mesmo ID real — nunca um valor inventado diferente');
 });
 
 // 4. Códigos comerciais duplicados com IDs diferentes — sinaliza, nunca funde.

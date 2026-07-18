@@ -707,41 +707,58 @@ function extrairNumeros(texto: string): number[] {
  * "mais caro", e só por último a frase ambígua de "esse mesmo" (índice 0,
  * único caso em que a posição é usada, por falta de outro sinal).
  */
-function detectarProdutoEscolhido(mensagem: string, opcoes?: ProdutoCatalogo[]): ProdutoCatalogo | null {
-  if (!opcoes || opcoes.length === 0) return null
+interface EscolhaProduto {
+  produto: ProdutoCatalogo | null
+  /** Preenchido só quando a mensagem bateu por código, mas o código é usado
+   * por mais de uma opção apresentada — nunca seleciona sozinho nesse caso,
+   * quem chama deve pedir desambiguação por nome/preço/posição. */
+  opcoesConflitantes?: ProdutoCatalogo[]
+}
+
+function detectarProdutoEscolhido(mensagem: string, opcoes?: ProdutoCatalogo[]): EscolhaProduto {
+  if (!opcoes || opcoes.length === 0) return { produto: null }
   const lower = mensagem.toLowerCase()
   const normalizado = normalizar(mensagem)
 
   const porNome = opcoes.find(o => lower.includes(o.nome.toLowerCase()))
-  if (porNome) return porNome
+  if (porNome) return { produto: porNome }
 
   // Código exato como token isolado da mensagem (ex.: "quero o código 002",
   // "manda o M08") — nunca por substring solta, pra não confundir "0" de
-  // quantidade com o código "010" de outro produto.
+  // quantidade com o código "010" de outro produto. Se o mesmo código
+  // aparece em mais de uma opção (cadastro duplicado), nunca escolhe pelo
+  // primeiro que achar — sinaliza o conflito pra quem chama desambiguar.
   const tokensMensagem = lower.split(/[^a-z0-9]+/i).filter(Boolean)
-  const porCodigo = opcoes.find(o => o.codigo && tokensMensagem.includes(o.codigo.toLowerCase()))
-  if (porCodigo) return porCodigo
+  const porCodigo = opcoes.filter(o => o.codigo && tokensMensagem.includes(o.codigo.toLowerCase()))
+  if (porCodigo.length === 1) return { produto: porCodigo[0] }
+  if (porCodigo.length > 1) return { produto: null, opcoesConflitantes: porCodigo }
 
-  if (PALAVRAS_ESCOLHA_SEGUNDA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[1]) return opcoes[1]
-  if (PALAVRAS_ESCOLHA_TERCEIRA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[2]) return opcoes[2]
+  if (PALAVRAS_ESCOLHA_SEGUNDA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[1]) return { produto: opcoes[1] }
+  if (PALAVRAS_ESCOLHA_TERCEIRA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[2]) return { produto: opcoes[2] }
 
   const numerosMensagem = extrairNumeros(mensagem)
   if (numerosMensagem.length > 0) {
     const porPreco = opcoes.find(o => o.preco != null && numerosMensagem.some(n => Math.round(n) === Math.round(o.preco!)))
-    if (porPreco) return porPreco
+    if (porPreco) return { produto: porPreco }
     const porNumeroNoNome = opcoes.find(o => extrairNumeros(o.nome).some(nn => numerosMensagem.includes(nn)))
-    if (porNumeroNoNome) return porNumeroNoNome
+    if (porNumeroNoNome) return { produto: porNumeroNoNome }
   }
 
   if (/mais barat/.test(normalizado)) {
-    return opcoes.reduce<ProdutoCatalogo | null>((min, o) => (o.preco != null && (min?.preco == null || o.preco < min.preco) ? o : min), null)
+    return { produto: opcoes.reduce<ProdutoCatalogo | null>((min, o) => (o.preco != null && (min?.preco == null || o.preco < min.preco) ? o : min), null) }
   }
   if (/mais car[oa]/.test(normalizado)) {
-    return opcoes.reduce<ProdutoCatalogo | null>((max, o) => (o.preco != null && (max?.preco == null || o.preco > max.preco) ? o : max), null)
+    return { produto: opcoes.reduce<ProdutoCatalogo | null>((max, o) => (o.preco != null && (max?.preco == null || o.preco > max.preco) ? o : max), null) }
   }
 
-  if (PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO.some(p => lower.includes(p))) return opcoes[0]
-  return null
+  if (PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO.some(p => lower.includes(p))) return { produto: opcoes[0] }
+  return { produto: null }
+}
+
+/** Mensagem quando o código informado é usado por mais de uma opção apresentada — nunca escolhe sozinho, sempre pede um sinal inequívoco. */
+function montarMensagemCodigoAmbiguo(opcoesConflitantes: ProdutoCatalogo[]): string {
+  const lista = opcoesConflitantes.map(o => `${o.nome} (${formatarPreco(o.preco)})`).join(' | ')
+  return `Encontrei mais de uma opção com esse código: ${lista}. Pode me dizer o nome, o preço ou a posição (primeira, segunda...) de qual delas você quer?`
 }
 
 function pareceConfirmacao(mensagem: string): boolean {
@@ -922,7 +939,10 @@ async function apresentarPaginaCatalogoCompleto(
 }
 
 async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
-  const escolhido = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
+  const { produto: escolhido, opcoesConflitantes } = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
+  if (opcoesConflitantes) {
+    return { estado, mensagem: montarMensagemCodigoAmbiguo(opcoesConflitantes) }
+  }
   if (escolhido) {
     const novoEstado: EstadoConversa = {
       ...estado,
@@ -944,7 +964,10 @@ async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: st
 
 async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
   // Cliente pode estar escolhendo uma opção já apresentada.
-  const escolhido = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
+  const { produto: escolhido, opcoesConflitantes } = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
+  if (opcoesConflitantes) {
+    return { estado, mensagem: montarMensagemCodigoAmbiguo(opcoesConflitantes) }
+  }
   if (escolhido) {
     const novoEstado: EstadoConversa = {
       ...estado,
@@ -1183,11 +1206,17 @@ export async function avancarFunil(
     // Nunca por posição fixa: primeiro o produto já formalmente escolhido,
     // depois tenta identificar a QUAL das opções apresentadas a mensagem se
     // refere (nome, número, preço) — só cai pra primeira opção como último
-    // recurso, quando não há nenhum outro sinal.
-    const alvo = estado.dados.produto
-      ?? detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
-      ?? estado.dados.opcoesRecomendadas?.[0]
-      ?? undefined
+    // recurso, quando não há nenhum outro sinal. Código duplicado entre
+    // opções nunca escolhe sozinho — pede desambiguação, mesma regra da
+    // seleção de compra.
+    let alvo = estado.dados.produto
+    if (!alvo) {
+      const { produto, opcoesConflitantes } = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
+      if (opcoesConflitantes) {
+        return { estado, mensagem: montarMensagemCodigoAmbiguo(opcoesConflitantes) }
+      }
+      alvo = produto ?? estado.dados.opcoesRecomendadas?.[0] ?? undefined
+    }
     const resp = responderPedidoDeFoto(alvo ? { nome: alvo.nome, preco: alvo.preco, fotoUrl: alvo.fotoUrl, disponivel: true } : undefined)
     return { estado, mensagem: resp.mensagem, fotoUrl: resp.fotoUrl }
   }

@@ -57,7 +57,7 @@ export async function criarPedidoProvisorio(
         canal_origem:      cliente.canal,
         produto:           produto.nome,
         produtos:          [{
-          nome: produto.nome, codigo: produto.codigo, preco: produto.preco,
+          nome: produto.nome, codigo: produto.codigo, woocommerce_product_id: produto.idExterno ?? null, preco: produto.preco,
           quantidade: produto.quantidade ?? 1, url: produto.url, origem: produto.origem,
         }],
         valor:             dados.valorTotal,

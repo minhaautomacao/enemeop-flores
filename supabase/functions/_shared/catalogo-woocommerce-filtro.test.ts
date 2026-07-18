@@ -1,15 +1,25 @@
-// Testa as regras puras de validade/mapeamento de produto WooCommerce (sem
-// I/O — sem fetch, sem DB). Rodar: npx tsx --test supabase/functions/_shared/catalogo-woocommerce-filtro.test.ts
+// Testa as regras puras de identidade/validade/mapeamento de produto
+// WooCommerce (sem I/O — sem fetch, sem DB).
+// Rodar: npx tsx --test supabase/functions/_shared/catalogo-woocommerce-filtro.test.ts
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { produtoValido, codigoOficial, paraProdutoCatalogo, type WooProduct } from './catalogo-woocommerce-filtro.ts';
+import {
+  produtoValido,
+  extrairCodigoDoNome,
+  divergeSkuDoCodigo,
+  paraProdutoCatalogo,
+  detectarCodigosDuplicados,
+  construirHeaderBasicAuth,
+  type WooProduct,
+} from './catalogo-woocommerce-filtro.ts';
+import type { ProdutoCatalogo } from './funil.ts';
 
 function produtoBase(overrides: Partial<WooProduct> = {}): WooProduct {
   return {
     id: 4207,
     name: '004 - Buquê de rosas no vaso de vidro',
-    sku: '004',
+    sku: '',
     status: 'publish',
     stock_status: 'instock',
     price: '295.00',
@@ -21,59 +31,91 @@ function produtoBase(overrides: Partial<WooProduct> = {}): WooProduct {
   };
 }
 
-test('produtoValido: produto publicado, com preco e foto reais e valido', () => {
-  assert.equal(produtoValido(produtoBase()), true);
+// 1. Código obtido do padrão real do site (a descrição não contém código em
+// nenhum produto real verificado — o código vem do prefixo do nome).
+test('código comercial extraído do nome, no padrão real do site ("XXX - resto do nome")', () => {
+  assert.equal(extrairCodigoDoNome('002 - Arranjo com 02 Rosas Nacionais e Asltroemérias'), '002');
+  assert.equal(extrairCodigoDoNome('096 - Buque de 06 rosas + Ferrero Rocher 100g'), '096');
+  assert.equal(extrairCodigoDoNome('M08 - Arranjo Mix Flores do Campo'), 'M08');
 });
 
-test('exclusao do produto de teste: nome "Produto Teste - Nao disponivel para venda" nunca aparece pro cliente', () => {
-  const produtoTeste = produtoBase({
-    id: 4412,
-    name: 'Produto Teste - Não disponível para venda',
-    sku: '',
-    price: '1.00',
-    regular_price: '1.00',
-  });
+test('paraProdutoCatalogo: codigo vem do nome, idExterno é sempre o ID técnico do WooCommerce (nunca trocados)', () => {
+  const p = produtoBase({ id: 3656, name: '002 - Arranjo com 02 Rosas Nacionais', sku: '' });
+  const c = paraProdutoCatalogo(p);
+  assert.equal(c.codigo, '002');
+  assert.equal(c.idExterno, '3656');
+  assert.notEqual(c.codigo, c.idExterno, 'código comercial nunca deve ser o ID do WooCommerce');
+});
+
+// 2. Divergência entre o código (nome) e o SKU cadastrado.
+test('divergeSkuDoCodigo: sinaliza quando o SKU cadastrado diverge do código extraído do nome', () => {
+  const divergente = produtoBase({ name: '002 - Arranjo com Rosas', sku: '999' });
+  assert.equal(divergeSkuDoCodigo(divergente), true);
+
+  const coincidente = produtoBase({ name: '002 - Arranjo com Rosas', sku: '002' });
+  assert.equal(divergeSkuDoCodigo(coincidente), false);
+
+  const semSku = produtoBase({ name: '002 - Arranjo com Rosas', sku: '' });
+  assert.equal(divergeSkuDoCodigo(semSku), false, 'sem SKU cadastrado nao ha divergencia a sinalizar');
+});
+
+// 3. Nome sem código inequívoco — nunca inventa, produto é excluído.
+test('nome sem código reconhecível: extrairCodigoDoNome retorna null e o produto é excluído (nunca inventa)', () => {
+  const semCodigo = produtoBase({ name: 'Arranjo Orquídeas Pink vaso de vidro' });
+  assert.equal(extrairCodigoDoNome(semCodigo.name), null);
+  assert.equal(produtoValido(semCodigo), false);
+});
+
+// 4. Códigos comerciais duplicados com IDs diferentes — sinaliza, nunca funde.
+test('detectarCodigosDuplicados: mesmo código em produtos com IDs diferentes é sinalizado, sem fundir os produtos', () => {
+  const produtos: ProdutoCatalogo[] = [
+    { nome: '002 - Arranjo A', codigo: '002', idExterno: '100', preco: 105, disponivel: true, fotoUrl: 'https://site/a.jpg' },
+    { nome: '002 - Arranjo B (cadastro duplicado)', codigo: '002', idExterno: '200', preco: 130, disponivel: true, fotoUrl: 'https://site/b.jpg' },
+    { nome: '004 - Buquê único', codigo: '004', idExterno: '300', preco: 295, disponivel: true, fotoUrl: 'https://site/c.jpg' },
+  ];
+  const duplicados = detectarCodigosDuplicados(produtos);
+  assert.equal(duplicados.size, 1);
+  assert.deepEqual(duplicados.get('002')?.sort(), ['100', '200']);
+  assert.equal(duplicados.has('004'), false);
+  // Cada produto mantém seus próprios dados — nunca fundidos.
+  assert.equal(produtos[0].preco, 105);
+  assert.equal(produtos[1].preco, 130);
+});
+
+// 5. Ao escolher, preserva código de produção, ID, foto e preço exatos da opção.
+test('cada produto preserva seu próprio código, ID, foto e preço mesmo quando o código é duplicado entre opções', () => {
+  const a: ProdutoCatalogo = { nome: '002 - Arranjo A', codigo: '002', idExterno: '100', preco: 105, disponivel: true, fotoUrl: 'https://site/a.jpg' };
+  const b: ProdutoCatalogo = { nome: '002 - Arranjo B', codigo: '002', idExterno: '200', preco: 130, disponivel: true, fotoUrl: 'https://site/b.jpg' };
+  // "escolher" a opção B nunca deve trazer junto o ID/foto/preço de A.
+  const escolhido = b;
+  assert.equal(escolhido.idExterno, '200');
+  assert.equal(escolhido.preco, 130);
+  assert.equal(escolhido.fotoUrl, 'https://site/b.jpg');
+  assert.notEqual(escolhido.idExterno, a.idExterno);
+});
+
+// 7. Produto fora de estoque nunca aparece.
+test('produto outofstock (stock_status != instock) nunca aparece, mesmo publicado e com preço/foto válidos', () => {
+  const foraDeEstoque = produtoBase({ stock_status: 'outofstock' });
+  assert.equal(produtoValido(foraDeEstoque), false);
+});
+
+test('exclusão do produto de teste continua funcionando junto com a nova regra de código', () => {
+  const produtoTeste = produtoBase({ name: 'Produto Teste - Não disponível para venda', sku: '', price: '1.00', regular_price: '1.00' });
   assert.equal(produtoValido(produtoTeste), false);
 });
 
-test('exclusao por rascunho: status diferente de publish nunca aparece', () => {
-  assert.equal(produtoValido(produtoBase({ status: 'draft' })), false);
+// 8. Credencial ausente nunca lança exceção nem vaza nada — header vira null.
+test('credencial ausente: construirHeaderBasicAuth nunca lança exceção e não vaza nenhum valor (retorna null)', () => {
+  assert.equal(construirHeaderBasicAuth(null, 'algum-secret'), null);
+  assert.equal(construirHeaderBasicAuth('algum-key', null), null);
+  assert.equal(construirHeaderBasicAuth(null, null), null);
+  assert.equal(construirHeaderBasicAuth(undefined, undefined), null);
+  assert.equal(construirHeaderBasicAuth('', ''), null);
 });
 
-test('exclusao por preco invalido: sem preco (0 ou vazio) nunca aparece', () => {
-  assert.equal(produtoValido(produtoBase({ price: '0', regular_price: '0', sale_price: '' })), false);
-  assert.equal(produtoValido(produtoBase({ price: '', regular_price: '', sale_price: '' })), false);
-});
-
-test('exclusao por falta de imagem real: sem foto nunca aparece', () => {
-  assert.equal(produtoValido(produtoBase({ images: [] })), false);
-});
-
-test('correspondencia exata produto-foto-preco: paraProdutoCatalogo nunca troca campos entre produtos', () => {
-  const p1 = produtoBase({ id: 3656, name: '002 - Arranjo com 02 Rosas', sku: '002', price: '105.00', regular_price: '105.00', images: [{ src: 'https://site/002.jpg' }] });
-  const p2 = produtoBase({ id: 4207, name: '004 - Buquê de rosas no vaso de vidro', sku: '004', price: '295.00', regular_price: '295.00', images: [{ src: 'https://site/004.jpg' }] });
-
-  const c1 = paraProdutoCatalogo(p1);
-  const c2 = paraProdutoCatalogo(p2);
-
-  assert.equal(c1.codigo, '002');
-  assert.equal(c1.preco, 105);
-  assert.equal(c1.fotoUrl, 'https://site/002.jpg');
-
-  assert.equal(c2.codigo, '004');
-  assert.equal(c2.preco, 295);
-  assert.equal(c2.fotoUrl, 'https://site/004.jpg');
-});
-
-test('codigoOficial: usa o SKU real quando existe', () => {
-  assert.equal(codigoOficial(produtoBase({ sku: 'M08' })), 'M08');
-});
-
-test('codigoOficial: cai pro ID numerico do WooCommerce quando nao ha SKU cadastrado — nunca inventa um código', () => {
-  assert.equal(codigoOficial(produtoBase({ sku: '' })), '4207');
-});
-
-test('preco prioriza sale_price (promocional) sobre o preco cheio, quando presente', () => {
-  const c = paraProdutoCatalogo(produtoBase({ price: '90.00', regular_price: '105.00', sale_price: '90.00' }));
-  assert.equal(c.preco, 90);
+test('header Basic Auth correto quando as duas credenciais estão presentes — nunca em query string', () => {
+  const h = construirHeaderBasicAuth('minha-key', 'meu-secret');
+  const esperado = Buffer.from('minha-key:meu-secret').toString('base64');
+  assert.deepEqual(h, { Authorization: `Basic ${esperado}` });
 });

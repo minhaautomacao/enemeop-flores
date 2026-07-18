@@ -779,9 +779,9 @@ test('seleção por número embutido no nome ("24 rosas") e por preço mencionad
 })
 
 const CATALOGO_ANIVERSARIO: ProdutoCatalogo[] = [
-  { nome: 'Arranjo Mix Flores do Campo', preco: 145, codigo: 'M08', disponivel: true, fotoUrl: 'https://site/M08.jpg' },
-  { nome: 'Arranjo 2 Rosas Nacionais e Junco', preco: 105, codigo: '002', disponivel: true, fotoUrl: 'https://site/002.jpg' },
-  { nome: 'Buquê de Rosas Vermelhas', preco: 140, codigo: '032', disponivel: true, fotoUrl: 'https://site/032.jpg' },
+  { nome: 'Arranjo Mix Flores do Campo', preco: 145, codigo: 'M08', idExterno: '4008', disponivel: true, fotoUrl: 'https://site/M08.jpg' },
+  { nome: 'Arranjo 2 Rosas Nacionais e Junco', preco: 105, codigo: '002', idExterno: '3656', disponivel: true, fotoUrl: 'https://site/002.jpg' },
+  { nome: 'Buquê de Rosas Vermelhas', preco: 140, codigo: '032', idExterno: '4032', disponivel: true, fotoUrl: 'https://site/032.jpg' },
 ]
 
 test('recomendação já apresentada: mensagem que não escolhe nenhuma opção NUNCA repete a busca no catálogo (regressão do loop de aniversário)', async () => {
@@ -1053,7 +1053,7 @@ test('revalidação antes do pedido: produto que saiu de disponibilidade nunca c
   })
   const estado: EstadoConversa = {
     fase: 'aguardando_confirmacao',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1071,7 +1071,7 @@ test('revalidação antes do pedido: preço mudou -> avisa o novo total e não c
   })
   const estado: EstadoConversa = {
     fase: 'aguardando_confirmacao',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1085,7 +1085,7 @@ test('revalidação antes do pedido: preço e disponibilidade confirmados na fon
   const deps = depsFake({ revalidarProduto: async () => ({ disponivel: true, preco: 140 }) })
   const estado: EstadoConversa = {
     fase: 'aguardando_confirmacao',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1131,4 +1131,38 @@ test('continuidade completa: categoria -> produto por código -> quantidade/data
   assert.equal(estado.fase, 'aguardando_pagamento')
   assert.equal(estado.dados.pedidoId, 'pedido_catalogo_dinamico_001')
   assert.match(r.mensagem, /Mercado Pago/i)
+})
+
+// 6. Revalidação sempre pelo ID técnico (idExterno), nunca pelo código comercial.
+test('revalidação antes do pedido chama revalidarProduto com o ID técnico (idExterno), nunca com o código comercial', async () => {
+  let idRecebido: string | undefined
+  const deps = depsFake({
+    revalidarProduto: async (id) => { idRecebido = id; return { disponivel: true, preco: 105 } },
+  })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_confirmacao',
+    dados: {
+      produto: { nome: '002 - Arranjo A', preco: 105, codigo: '002', idExterno: '100', quantidade: 1, dataEntrega: 'hoje' },
+      valorTotal: 127.5, valorFrete: 22.5, endereco: { cep: '01000-000' },
+    },
+    perguntasFeitas: [],
+  }
+  await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
+  assert.equal(idRecebido, '100', 'deve revalidar pelo idExterno, nunca pelo codigo comercial ("002")')
+})
+
+// 5b. Escolha preserva código, ID, foto e preço exatos mesmo quando duas opções compartilham o mesmo código comercial (cadastro duplicado).
+test('escolha entre duas opções com o mesmo código comercial preserva o ID, nome, foto e preço exatos da opção escolhida', async () => {
+  const opcoesDuplicadas: ProdutoCatalogo[] = [
+    { nome: '002 - Arranjo A', codigo: '002', idExterno: '100', preco: 105, disponivel: true, fotoUrl: 'https://site/a.jpg' },
+    { nome: '002 - Arranjo B', codigo: '002', idExterno: '200', preco: 130, disponivel: true, fotoUrl: 'https://site/b.jpg' },
+  ]
+  const deps = depsFake()
+  const estado: EstadoConversa = { fase: 'recomendacao', dados: { opcoesRecomendadas: opcoesDuplicadas }, perguntasFeitas: [] }
+  // Mesmo código nas duas opções ("002") — o cliente desambigua pelo preço,
+  // que é único por opção mesmo quando o código comercial está duplicado.
+  const r = await avancarFunil(estado, 'quero o de R$130', 'compra_produto', deps)
+  assert.equal(r.estado.dados.produto?.idExterno, '200', 'deve preservar o ID exato da opcao B, nunca o da A')
+  assert.equal(r.estado.dados.produto?.preco, 130)
+  assert.equal(r.estado.dados.produto?.fotoUrl, 'https://site/b.jpg')
 })

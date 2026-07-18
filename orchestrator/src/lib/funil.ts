@@ -49,7 +49,10 @@ export type Intencao =
 export interface ProdutoSelecionado {
   nome: string
   preco?: number
+  /** Código comercial — o que a produção usa pra montar o arranjo. Nunca o ID do WooCommerce. */
   codigo?: string
+  /** ID do WooCommerce — identificador técnico interno, usado só pra revalidar preço/estoque/nome/foto na fonte. */
+  idExterno?: string
   url?: string
   origem?: string
   fotoUrl?: string
@@ -430,8 +433,10 @@ export interface ProdutoCatalogo {
   descricao?: string
   fotoUrl?: string
   disponivel: boolean
-  /** ID estável na fonte de dados (nunca gerado/alterado pelo LLM). */
+  /** Código comercial — o que a produção usa pra montar o arranjo (nunca o ID do WooCommerce, nunca inventado). */
   codigo?: string
+  /** ID do WooCommerce — identificador técnico interno, usado pra revalidar preço/estoque/nome/foto direto na fonte. */
+  idExterno?: string
   /** URL real do produto no site — nunca inventada. */
   url?: string
   /** De onde este produto veio (ex.: "woocommerce_api", "scraping_fallback"). */
@@ -631,8 +636,8 @@ export interface DependenciasFunil {
   buscarCategorias: () => Promise<CategoriaCatalogo[]>
   /** Produtos publicados/disponíveis/com preço e foto reais de UMA categoria, ao vivo. */
   buscarProdutosPorCategoria: (categoriaId: string) => Promise<ProdutoCatalogo[]>
-  /** Revalida preço/foto/disponibilidade de um produto direto na fonte, sempre antes de criar o pedido. */
-  revalidarProduto: (codigo: string) => Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string } | null>
+  /** Revalida preço/estoque/nome/foto de um produto direto na fonte pelo ID técnico (idExterno) — nunca pelo código comercial, que pode ser duplicado. Sempre chamado antes de criar o pedido. */
+  revalidarProduto: (idExterno: string) => Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string; nome?: string } | null>
   calcularFrete: CalculadorFrete
   /** Recebe o pedido já criado (pedidoId) e o valor total, devolve link + identificador de pagamento. */
   gerarPagamento: (pedidoId: string, valorTotal: number) => Promise<{ link: string; paymentId: string } | null>
@@ -895,7 +900,7 @@ async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: st
     const novoEstado: EstadoConversa = {
       ...estado,
       fase: 'produto_selecionado',
-      dados: { ...estado.dados, produto: { nome: escolhido.nome, preco: escolhido.preco, codigo: escolhido.codigo, url: escolhido.url, origem: escolhido.origem, fotoUrl: escolhido.fotoUrl } },
+      dados: { ...estado.dados, produto: { nome: escolhido.nome, preco: escolhido.preco, codigo: escolhido.codigo, idExterno: escolhido.idExterno, url: escolhido.url, origem: escolhido.origem, fotoUrl: escolhido.fotoUrl } },
     }
     return { estado: novoEstado, mensagem: `Ótima escolha! O ${escolhido.nome} fica por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer, e pra quando precisa da entrega?` }
   }
@@ -917,7 +922,7 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
     const novoEstado: EstadoConversa = {
       ...estado,
       fase: 'produto_selecionado',
-      dados: { ...estado.dados, produto: { nome: escolhido.nome, preco: escolhido.preco, codigo: escolhido.codigo, url: escolhido.url, origem: escolhido.origem, fotoUrl: escolhido.fotoUrl } },
+      dados: { ...estado.dados, produto: { nome: escolhido.nome, preco: escolhido.preco, codigo: escolhido.codigo, idExterno: escolhido.idExterno, url: escolhido.url, origem: escolhido.origem, fotoUrl: escolhido.fotoUrl } },
     }
     return { estado: novoEstado, mensagem: `Ótima escolha! O ${escolhido.nome} fica por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer, e pra quando precisa da entrega?` }
   }
@@ -1023,12 +1028,14 @@ async function etapaConfirmacao(estado: EstadoConversa, mensagemCliente: string,
     return { estado, mensagem: `Sem problemas — me avisa quando quiser confirmar.\n\n${montarResumoPedido(estado.dados)}` }
   }
 
-  // Revalida preço/foto/disponibilidade direto na fonte antes de criar o
-  // pedido — nunca cobra um valor que já mudou, nem confirma um produto
-  // que saiu de disponibilidade entre a escolha e a confirmação.
+  // Revalida preço/estoque/nome/foto direto na fonte, sempre pelo ID técnico
+  // (idExterno) — nunca pelo código comercial, que pode estar duplicado no
+  // cadastro — antes de criar o pedido. Nunca cobra um valor que já mudou,
+  // nem confirma um produto que saiu de disponibilidade entre a escolha e a
+  // confirmação.
   const produtoAtual = estado.dados.produto
-  if (produtoAtual?.codigo) {
-    const real = await deps.revalidarProduto(produtoAtual.codigo)
+  if (produtoAtual?.idExterno) {
+    const real = await deps.revalidarProduto(produtoAtual.idExterno)
     if (!real || !real.disponivel) {
       return {
         estado: { ...estado, fase: 'escolha_categoria', dados: { ...estado.dados, produto: undefined, valorTotal: undefined } },
@@ -1038,15 +1045,15 @@ async function etapaConfirmacao(estado: EstadoConversa, mensagemCliente: string,
     const precoMudou = real.preco != null && real.preco !== produtoAtual.preco
     if (precoMudou) {
       const precoNovo = real.preco!
-      const produtoAtualizado = { ...produtoAtual, preco: precoNovo, fotoUrl: real.fotoUrl ?? produtoAtual.fotoUrl }
+      const produtoAtualizado = { ...produtoAtual, preco: precoNovo, fotoUrl: real.fotoUrl ?? produtoAtual.fotoUrl, nome: real.nome ?? produtoAtual.nome }
       const valorTotalAtualizado = precoNovo * (produtoAtualizado.quantidade ?? 1) + (estado.dados.valorFrete ?? 0)
       return {
         estado: { ...estado, dados: { ...estado.dados, produto: produtoAtualizado, valorTotal: valorTotalAtualizado } },
         mensagem: `O preço do ${produtoAtual.nome} foi atualizado para ${formatarPreco(precoNovo)} — o novo total fica ${formatarPreco(valorTotalAtualizado)}. Confirma?`,
       }
     }
-    if (real.fotoUrl && real.fotoUrl !== produtoAtual.fotoUrl) {
-      estado = { ...estado, dados: { ...estado.dados, produto: { ...produtoAtual, fotoUrl: real.fotoUrl } } }
+    if ((real.fotoUrl && real.fotoUrl !== produtoAtual.fotoUrl) || (real.nome && real.nome !== produtoAtual.nome)) {
+      estado = { ...estado, dados: { ...estado.dados, produto: { ...produtoAtual, fotoUrl: real.fotoUrl ?? produtoAtual.fotoUrl, nome: real.nome ?? produtoAtual.nome } } }
     }
   }
 

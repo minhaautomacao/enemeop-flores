@@ -94,6 +94,7 @@ interface WooProduct {
   sku: string
   permalink: string
   status: string
+  stock_status: string
   price: string
   regular_price: string
   sale_price: string
@@ -693,19 +694,43 @@ async function searchViaScraping(params: SearchLiveProductsParams): Promise<Live
 
 export interface LiveCategory { id: string; name: string }
 
-/** Produto de teste/rascunho/indisponível/sem preço/sem imagem — nunca aparece pro cliente. */
+/**
+ * Código comercial (o que a produção usa pra montar o arranjo) a partir do
+ * padrão real do nome ("XXX - Resto do nome") — verificado em produtos reais
+ * do site: description/short_description nunca contêm um código, e o SKU
+ * está sempre vazio. Sem esse prefixo no nome, não há código inequívoco —
+ * retorna null (nunca inventa).
+ */
+export function extractCommercialCode(name: string): string | null {
+  const m = name.match(/^\s*([A-Za-z0-9]{1,6})\s*-\s+\S/)
+  return m ? m[1] : null
+}
+
+/** Produto de teste/rascunho/fora de estoque/sem preço/sem imagem/sem código comercial reconhecível — nunca aparece pro cliente. */
 function isValidWooProduct(p: WooProduct): boolean {
   if (p.status !== 'publish') return false
+  if (p.stock_status !== 'instock') return false
   if (/\bteste\b/i.test(p.name) || /n[aã]o\s+dispon[ií]vel/i.test(p.name)) return false
   const preco = parsePrice(p.sale_price || p.price || p.regular_price)
   if (!preco) return false
   if (!p.images || p.images.length === 0) return false
+  if (extractCommercialCode(p.name) == null) return false
   return true
 }
 
-/** Código oficial e estável: SKU real quando existe, senão o ID numérico do WooCommerce — nunca inventado. */
-function officialCode(p: WooProduct): string {
-  return p.sku?.trim() || String(p.id)
+/** Loga quando o mesmo código comercial aparece em produtos com IDs diferentes — cadastro precisa de correção. Nunca funde/remove os produtos. */
+function flagDuplicateCodes(produtos: Array<{ id?: string; name: string }>, origem: string): void {
+  const byCode = new Map<string, Set<string>>()
+  for (const p of produtos) {
+    const code = extractCommercialCode(p.name)
+    if (!code || !p.id) continue
+    const ids = byCode.get(code) ?? new Set<string>()
+    ids.add(p.id)
+    byCode.set(code, ids)
+  }
+  for (const [code, ids] of byCode) {
+    if (ids.size > 1) log('WARN', 'duplicidade_cadastral', { codigo: code, ids: [...ids], origem })
+  }
 }
 
 export async function listCategoriesFromSite(): Promise<LiveCategory[]> {
@@ -725,28 +750,27 @@ export async function fetchProductsByCategoryFromSite(categoryId: string): Promi
   const url = `${cfg.url}/products?category=${encodeURIComponent(categoryId)}&per_page=${API_PER_PAGE}&status=publish&stock_status=instock&orderby=menu_order&order=asc`
   const { data } = await fetchJson<WooProduct[]>(url, headers, API_TIMEOUT_MS)
   if (!data) return []
-  return data.filter(isValidWooProduct).map(p => ({ ...mapWooToLiveProduct(p), id: officialCode(p) }))
+  // id continua sendo o ID real do WooCommerce (mapWooToLiveProduct) — o
+  // código comercial é extraído à parte pelo chamador (sdr.ts), nunca troca
+  // de lugar com o identificador técnico.
+  const produtos = data.filter(isValidWooProduct).map(mapWooToLiveProduct)
+  flagDuplicateCodes(produtos, `categoria:${categoryId}`)
+  return produtos
 }
 
 export async function revalidateProductFromSite(
-  codigo: string,
-): Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string } | null> {
+  idExterno: string,
+): Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string; nome?: string } | null> {
   const cfg = getWooConfig()
   if (!cfg) return null
   const headers = buildWooHeaders(cfg.key, cfg.secret)
-  const { data: bySku } = await fetchJson<WooProduct[]>(
-    `${cfg.url}/products?sku=${encodeURIComponent(codigo)}&status=publish`, headers, API_TIMEOUT_MS,
-  )
-  let produto = bySku?.[0]
-  if (!produto && /^\d+$/.test(codigo)) {
-    const { data: byId } = await fetchJson<WooProduct>(`${cfg.url}/products/${codigo}`, headers, API_TIMEOUT_MS)
-    if (byId) produto = byId
-  }
-  if (!produto || !isValidWooProduct(produto)) return { disponivel: false }
+  const { data: produto } = await fetchJson<WooProduct>(`${cfg.url}/products/${encodeURIComponent(idExterno)}`, headers, API_TIMEOUT_MS)
+  if (!produto || !isValidWooProduct(produto) || produto.stock_status !== 'instock') return { disponivel: false }
   return {
     disponivel: true,
     preco: parsePrice(produto.sale_price || produto.price || produto.regular_price),
     fotoUrl: produto.images?.[0]?.src,
+    nome: produto.name,
   }
 }
 

@@ -3,7 +3,7 @@ import { getRedis } from './redis.js'
 import { getSupabase } from './supabase.js'
 import { responderLead, notificarEscalada, enviarImagem } from './whatsapp.js'
 import { responderInstagram, responderInstagramComFoto, salvarConversa, responderComentarioInstagram, responderComentarioFacebook } from './instagram.js'
-import { searchLiveProductsFromSite, listCategoriesFromSite, fetchProductsByCategoryFromSite, revalidateProductFromSite } from '../catalog/liveSiteCatalog.js'
+import { searchLiveProductsFromSite, listCategoriesFromSite, fetchProductsByCategoryFromSite, revalidateProductFromSite, extractCommercialCode } from '../catalog/liveSiteCatalog.js'
 import { calcularFreteReal } from './frete.js'
 import { gerarPagamentoReal } from './pagamento.js'
 import { criarPedidoProvisorio } from './pedido.js'
@@ -155,13 +155,17 @@ async function buscarCatalogoParaFunil(params: {
   const produtos = await searchLiveProductsFromSite({ ...params, limit: 3 })
   // O catálogo ao vivo já filtra por status=publish (API) ou pela página
   // pública do site (scraping) — todo produto retornado está disponível.
+  // codigo = código comercial extraído do nome (o que a produção usa pra
+  // montar o arranjo) — nunca o ID técnico do WooCommerce, que fica em
+  // idExterno só pra revalidação.
   return produtos.map(p => ({
     nome:      p.name,
     preco:     p.price,
     descricao: p.description,
     fotoUrl:   p.image,
     disponivel: true,
-    codigo:    p.id,
+    codigo:    extractCommercialCode(p.name) ?? undefined,
+    idExterno: p.id,
     url:       p.url,
     origem:    p.origem,
   }))
@@ -180,7 +184,8 @@ async function buscarProdutosPorCategoriaParaFunil(categoriaId: string): Promise
     descricao: p.description,
     fotoUrl: p.image,
     disponivel: true,
-    codigo: p.id,
+    codigo: extractCommercialCode(p.name) ?? undefined,
+    idExterno: p.id,
     url: p.url,
     origem: p.origem,
   }))

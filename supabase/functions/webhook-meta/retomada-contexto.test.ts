@@ -34,6 +34,9 @@ import {
 
 const depsFake: DependenciasFunil = {
   buscarCatalogo: async () => [{ nome: 'Buquê de Rosas', preco: 140, disponivel: true, codigo: 'R1' }],
+  buscarCategorias: async () => [],
+  buscarProdutosPorCategoria: async () => [],
+  revalidarProduto: async () => ({ disponivel: true }),
   calcularFrete: async () => ({ ok: true, valor: 22.5 }),
   gerarPagamento: async (pedidoId: string) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
   criarPedido: async () => ({ pedidoId: 'pedido_x' }),

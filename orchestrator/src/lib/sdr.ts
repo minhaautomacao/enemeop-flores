@@ -3,7 +3,7 @@ import { getRedis } from './redis.js'
 import { getSupabase } from './supabase.js'
 import { responderLead, notificarEscalada, enviarImagem } from './whatsapp.js'
 import { responderInstagram, responderInstagramComFoto, salvarConversa, responderComentarioInstagram, responderComentarioFacebook } from './instagram.js'
-import { searchLiveProductsFromSite } from '../catalog/liveSiteCatalog.js'
+import { searchLiveProductsFromSite, listCategoriesFromSite, fetchProductsByCategoryFromSite, revalidateProductFromSite } from '../catalog/liveSiteCatalog.js'
 import { calcularFreteReal } from './frete.js'
 import { gerarPagamentoReal } from './pagamento.js'
 import { criarPedidoProvisorio } from './pedido.js'
@@ -167,6 +167,25 @@ async function buscarCatalogoParaFunil(params: {
   }))
 }
 
+async function buscarCategoriasParaFunil(): Promise<{ id: string; nome: string }[]> {
+  const categorias = await listCategoriesFromSite()
+  return categorias.map(c => ({ id: c.id, nome: c.name }))
+}
+
+async function buscarProdutosPorCategoriaParaFunil(categoriaId: string): Promise<ProdutoCatalogo[]> {
+  const produtos = await fetchProductsByCategoryFromSite(categoriaId)
+  return produtos.map(p => ({
+    nome: p.name,
+    preco: p.price,
+    descricao: p.description,
+    fotoUrl: p.image,
+    disponivel: true,
+    codigo: p.id,
+    url: p.url,
+    origem: p.origem,
+  }))
+}
+
 // ── Dependências reais do funil (frete, pagamento, pedido) — ver seção 3 ───
 // dos adaptadores em lib/frete.ts, lib/pagamento.ts e lib/pedido.ts.
 
@@ -185,6 +204,9 @@ function construirDependenciasFunil(opts: {
   const valorProduto = opts.estado.dados.produto?.preco ?? 0
   return {
     buscarCatalogo: buscarCatalogoParaFunil,
+    buscarCategorias: buscarCategoriasParaFunil,
+    buscarProdutosPorCategoria: buscarProdutosPorCategoriaParaFunil,
+    revalidarProduto: revalidateProductFromSite,
     calcularFrete: (cep: string) => calcularFreteReal(cep, valorProduto),
     gerarPagamento: gerarPagamentoReal,
     criarPedido: (dados) => criarPedidoProvisorio(dados, opts.cliente),

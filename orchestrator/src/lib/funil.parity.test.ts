@@ -62,6 +62,9 @@ test('nucleo Deno (_shared/funil.ts) produz exatamente os mesmos resultados que 
 
   const deps = {
     buscarCatalogo: async () => [{ nome: 'Buquê de Rosas', preco: 140, disponivel: true, codigo: 'R1', url: 'https://site/r1' }],
+    buscarCategorias: async () => [],
+    buscarProdutosPorCategoria: async () => [],
+    revalidarProduto: async () => ({ disponivel: true }),
     calcularFrete: async () => ({ ok: true as const, valor: 22.5 }),
     gerarPagamento: async (pedidoId: string) => ({ link: `https://pag/${pedidoId}`, paymentId: pedidoId }),
     criarPedido: async () => ({ pedidoId: 'pedido_x' }),

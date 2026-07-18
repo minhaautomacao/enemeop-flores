@@ -45,6 +45,8 @@
 export type Fase =
   | 'inicio'
   | 'qualificacao'
+  | 'escolha_categoria'
+  | 'catalogo_completo'
   | 'recomendacao'
   | 'produto_selecionado'
   | 'aguardando_endereco'
@@ -118,6 +120,14 @@ export interface DadosPedido {
   /** true assim que as opções acima foram apresentadas — impede reapresentar
    * o catálogo enquanto o cliente ainda não escolheu (ver etapaRecomendacao). */
   recomendacaoApresentada?: boolean
+  /** Categoria real (WooCommerce) escolhida pelo cliente para a recomendação atual. */
+  categoriaEscolhida?: { id: string; nome: string }
+  /** IDs das categorias já apresentadas nesta conversa — nunca reapresentadas do zero. */
+  categoriasApresentadas?: string[]
+  /** Códigos de produtos já apresentados nesta conversa (recomendação normal + catálogo completo) — nunca repetidos. */
+  produtosApresentadosCodigos?: string[]
+  /** Cursor de paginação do "catálogo completo": índice da categoria atual. */
+  catalogoCompletoIndiceCategoria?: number
   /** true quando o cliente já confirmou o resumo do pedido nesta troca. */
   resumoConfirmado?: boolean
 }
@@ -307,7 +317,10 @@ export function classificarIntencao(mensagem: string, faseAtual: Fase): Intencao
   if (contemAlguma(mensagem, PALAVRAS_FRETE)) return 'frete'
   if (contemAlguma(mensagem, PALAVRAS_PAGAMENTO)) return 'pagamento'
   if (contemAlguma(mensagem, PALAVRAS_DISPONIBILIDADE) || extrairTermoDisponibilidade(mensagem)) return 'disponibilidade'
-  if (faseAtual === 'inicio' || faseAtual === 'qualificacao' || faseAtual === 'recomendacao') {
+  if (
+    faseAtual === 'inicio' || faseAtual === 'qualificacao' || faseAtual === 'recomendacao' ||
+    faseAtual === 'escolha_categoria' || faseAtual === 'catalogo_completo'
+  ) {
     return 'recomendacao'
   }
   return 'compra_produto'
@@ -351,7 +364,7 @@ export function mensagemFinalizacao(): string {
 export function montarMensagemRetomada(fase: Fase, dados: DadosPedido): string {
   const assunto = dados.produto?.nome
     ? `o pedido do ${dados.produto.nome}`
-    : (fase === 'recomendacao' || fase === 'qualificacao') ? 'a escolha do buquê' : null
+    : (fase === 'recomendacao' || fase === 'qualificacao' || fase === 'escolha_categoria' || fase === 'catalogo_completo') ? 'a escolha do buquê' : null
 
   if (!assunto) {
     return 'Não encontrei um atendimento em andamento pra retomar. Quer começar um novo pedido?'
@@ -641,6 +654,12 @@ export function registrarPergunta(campo: string, perguntasFeitas: string[]): str
 
 export interface DependenciasFunil {
   buscarCatalogo: (params: { query: string; occasion?: string; budget?: number; color?: string }) => Promise<ProdutoCatalogo[]>
+  /** Categorias reais e não vazias da loja agora — nunca uma lista fixa. */
+  buscarCategorias: () => Promise<CategoriaCatalogo[]>
+  /** Produtos publicados/disponíveis/com preço e foto reais de UMA categoria, ao vivo. */
+  buscarProdutosPorCategoria: (categoriaId: string) => Promise<ProdutoCatalogo[]>
+  /** Revalida preço/foto/disponibilidade de um produto direto na fonte, sempre antes de criar o pedido. */
+  revalidarProduto: (codigo: string) => Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string } | null>
   calcularFrete: CalculadorFrete
   /** Recebe o pedido já criado (pedidoId) e o valor total, devolve link + identificador de pagamento. */
   gerarPagamento: (pedidoId: string, valorTotal: number) => Promise<{ link: string; paymentId: string } | null>
@@ -724,6 +743,198 @@ function pareceConfirmacao(mensagem: string): boolean {
   const lower = mensagem.toLowerCase().trim()
   if (PALAVRAS_NEGACAO.some(p => lower.includes(p))) return false
   return PALAVRAS_CONFIRMACAO.some(p => lower === p || lower.startsWith(p + ' ') || lower.includes(` ${p} `) || lower.endsWith(` ${p}`))
+}
+
+// ── Catálogo conversacional dinâmico (categorias reais, ao vivo) ──────────
+
+export interface CategoriaCatalogo { id: string; nome: string }
+
+function pedeCatalogoCompleto(mensagem: string): boolean {
+  const n = normalizar(mensagem)
+  return /cat[aá]logo\s*(completo|inteiro|todo)|ver\s+tudo|todas?\s+as?\s+op[cç][oõ]es|todos?\s+os?\s+produtos/.test(n)
+}
+
+/** Mesma lógica de detectarProdutoEscolhido, mas para categorias (nome, posição/ordinal, número da lista). */
+function detectarCategoriaEscolhida(mensagem: string, categorias?: CategoriaCatalogo[]): CategoriaCatalogo | null {
+  if (!categorias || categorias.length === 0) return null
+  const lower = mensagem.toLowerCase()
+  const normalizado = normalizar(mensagem)
+
+  const porNome = categorias.find(c => lower.includes(c.nome.toLowerCase()))
+  if (porNome) return porNome
+
+  if (PALAVRAS_ESCOLHA_SEGUNDA_OPCAO.some(p => normalizado.includes(normalizar(p))) && categorias[1]) return categorias[1]
+  if (PALAVRAS_ESCOLHA_TERCEIRA_OPCAO.some(p => normalizado.includes(normalizar(p))) && categorias[2]) return categorias[2]
+
+  const numeros = extrairNumeros(mensagem)
+  if (numeros.length > 0) {
+    const idx = Math.round(numeros[0]) - 1
+    if (idx >= 0 && idx < categorias.length) return categorias[idx]
+  }
+
+  if (PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO.some(p => lower.includes(p))) return categorias[0]
+  return null
+}
+
+const TAMANHO_PAGINA_CATALOGO = 3
+
+/** Entra na fase de recomendação com produtos reais de UMA categoria — nunca reaproveita fotos/produtos de outra. */
+async function iniciarRecomendacaoPorCategoria(
+  estado: EstadoConversa,
+  categoria: CategoriaCatalogo,
+  deps: DependenciasFunil,
+): Promise<ResultadoEtapa> {
+  const produtos = await deps.buscarProdutosPorCategoria(categoria.id)
+  const rec = selecionarRecomendacoes(produtos)
+  if (!rec.principal) {
+    return {
+      estado: { ...estado, fase: 'escolha_categoria', dados: { ...estado.dados, categoriaEscolhida: undefined } },
+      mensagem: `No momento não encontrei produtos disponíveis em ${categoria.nome}. Quer ver outra categoria?`,
+    }
+  }
+  const opcoes = [rec.principal, ...rec.alternativas]
+  const jaMostrados = estado.dados.produtosApresentadosCodigos ?? []
+  const novosCodigos = opcoes.filter((p): p is ProdutoCatalogo & { codigo: string } => !!p.codigo).map(p => p.codigo)
+  const novoEstado: EstadoConversa = {
+    ...estado,
+    fase: 'recomendacao',
+    dados: {
+      ...estado.dados,
+      categoriaEscolhida: categoria,
+      opcoesRecomendadas: opcoes,
+      recomendacaoApresentada: true,
+      produtosApresentadosCodigos: [...new Set([...jaMostrados, ...novosCodigos])],
+    },
+  }
+  const fotos = opcoes
+    .filter((p): p is ProdutoCatalogo & { fotoUrl: string } => !!p.fotoUrl)
+    .map(p => ({ codigo: p.codigo, nome: p.nome, url: p.fotoUrl }))
+  return {
+    estado: novoEstado,
+    mensagem: `Na categoria ${categoria.nome}, encontrei:\n${montarMensagemRecomendacao(rec)}`,
+    fotos: fotos.length > 0 ? fotos : undefined,
+  }
+}
+
+/** Apresenta uma escolha de categorias reais (WooCommerce) adequadas ao que já se sabe da conversa. */
+async function etapaEscolhaCategoria(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+  const idsJaMostrados = estado.dados.categoriasApresentadas
+  if (idsJaMostrados && idsJaMostrados.length > 0) {
+    const todas = await deps.buscarCategorias()
+    const apresentadas = todas.filter(c => idsJaMostrados.includes(c.id))
+    const escolhida = detectarCategoriaEscolhida(mensagemCliente, apresentadas)
+    if (escolhida) return iniciarRecomendacaoPorCategoria(estado, escolhida, deps)
+    if (pedeCatalogoCompleto(mensagemCliente)) return iniciarCatalogoCompleto(estado, deps)
+    // Nunca reapresenta a lista de categorias sozinha — só pergunta qual delas.
+    return { estado, mensagem: 'Qual dessas categorias você prefere? Pode me dizer o nome ou o número.' }
+  }
+
+  if (pedeCatalogoCompleto(mensagemCliente)) return iniciarCatalogoCompleto(estado, deps)
+
+  const categorias = await deps.buscarCategorias()
+  if (categorias.length === 0) {
+    // Sem categorias reais no momento — cai pro fluxo de busca direta por texto.
+    return etapaRecomendacao({ ...estado, fase: 'recomendacao' }, mensagemCliente, deps)
+  }
+  const novoEstado: EstadoConversa = {
+    ...estado,
+    fase: 'escolha_categoria',
+    dados: { ...estado.dados, categoriasApresentadas: categorias.map(c => c.id) },
+  }
+  const lista = categorias.map((c, i) => `${i + 1}. ${c.nome}`).join('\n')
+  return {
+    estado: novoEstado,
+    mensagem: `Temos estas categorias:\n${lista}\n\nQual te interessa? (nome, número, ou peça "catálogo completo" pra ver tudo aos poucos)`,
+  }
+}
+
+async function iniciarCatalogoCompleto(estado: EstadoConversa, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+  const categorias = await deps.buscarCategorias()
+  if (categorias.length === 0) {
+    return { estado, mensagem: 'No momento não consegui carregar o catálogo completo. Me conta o que você procura (cor, estilo, ocasião) que eu busco pra você.' }
+  }
+  return apresentarPaginaCatalogoCompleto(
+    { ...estado, fase: 'catalogo_completo', dados: { ...estado.dados, catalogoCompletoIndiceCategoria: 0 } },
+    categorias,
+    deps,
+  )
+}
+
+async function apresentarPaginaCatalogoCompleto(
+  estado: EstadoConversa,
+  categorias: CategoriaCatalogo[],
+  deps: DependenciasFunil,
+): Promise<ResultadoEtapa> {
+  const indice = estado.dados.catalogoCompletoIndiceCategoria ?? 0
+  if (indice >= categorias.length) {
+    return {
+      estado: { ...estado, fase: 'escolha_categoria', dados: { ...estado.dados, categoriasApresentadas: categorias.map(c => c.id) } },
+      mensagem: 'Esse foi todo o nosso catálogo! Quer escolher uma dessas opções, ou prefere que eu te ajude por categoria de novo?',
+    }
+  }
+  const categoria = categorias[indice]
+  // Nunca usa um cursor numérico absoluto: os já mostrados sempre saem da
+  // lista antes de fatiar, então a "página seguinte" é sempre o começo do
+  // que ainda não foi apresentado — imune a mudanças no catálogo ao vivo
+  // entre uma mensagem e outra.
+  const jaMostrados = new Set(estado.dados.produtosApresentadosCodigos ?? [])
+  const produtos = (await deps.buscarProdutosPorCategoria(categoria.id)).filter(p => p.disponivel)
+  const restantes = produtos.filter(p => !p.codigo || !jaMostrados.has(p.codigo))
+  const pagina = restantes.slice(0, TAMANHO_PAGINA_CATALOGO)
+
+  if (pagina.length === 0) {
+    return apresentarPaginaCatalogoCompleto(
+      { ...estado, dados: { ...estado.dados, catalogoCompletoIndiceCategoria: indice + 1 } },
+      categorias,
+      deps,
+    )
+  }
+
+  const novosCodigos = pagina.filter((p): p is ProdutoCatalogo & { codigo: string } => !!p.codigo).map(p => p.codigo)
+  const temMaisNestaCategoria = restantes.length > pagina.length
+  const novoEstado: EstadoConversa = {
+    ...estado,
+    fase: 'catalogo_completo',
+    dados: {
+      ...estado.dados,
+      opcoesRecomendadas: pagina,
+      recomendacaoApresentada: true,
+      produtosApresentadosCodigos: [...jaMostrados, ...novosCodigos],
+    },
+  }
+  const lista = pagina.map(p => `- ${p.nome} (${formatarPreco(p.preco)})`).join('\n')
+  const pergunta = temMaisNestaCategoria
+    ? `Quer ver mais opções de ${categoria.nome}, ou já posso passar pra outra categoria?`
+    : 'Quer ver a próxima categoria?'
+  const fotos = pagina
+    .filter((p): p is ProdutoCatalogo & { fotoUrl: string } => !!p.fotoUrl)
+    .map(p => ({ codigo: p.codigo, nome: p.nome, url: p.fotoUrl }))
+  return {
+    estado: novoEstado,
+    mensagem: `${categoria.nome}:\n${lista}\n\n${pergunta}`,
+    fotos: fotos.length > 0 ? fotos : undefined,
+  }
+}
+
+async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+  const escolhido = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
+  if (escolhido) {
+    const novoEstado: EstadoConversa = {
+      ...estado,
+      fase: 'produto_selecionado',
+      dados: { ...estado.dados, produto: { nome: escolhido.nome, preco: escolhido.preco, codigo: escolhido.codigo, url: escolhido.url, origem: escolhido.origem, fotoUrl: escolhido.fotoUrl } },
+    }
+    return { estado: novoEstado, mensagem: `Ótima escolha! O ${escolhido.nome} fica por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer, e pra quando precisa da entrega?` }
+  }
+  if (pareceConfirmacao(mensagemCliente)) {
+    const categorias = await deps.buscarCategorias()
+    return apresentarPaginaCatalogoCompleto(estado, categorias, deps)
+  }
+  if (PALAVRAS_NEGACAO.some(p => normalizar(mensagemCliente).includes(normalizar(p)))) {
+    return { estado: { ...estado, fase: 'escolha_categoria' }, mensagem: 'Sem problemas! Me conta o que você procura (cor, estilo, ocasião) que eu te ajudo a encontrar.' }
+  }
+  // Mensagem ambígua durante a paginação — nunca despeja o catálogo de novo sozinho, só pergunta.
+  return { estado, mensagem: 'Você quer ver mais opções, ou já escolheu algum item? Pode me dizer o nome, código ou preço.' }
 }
 
 async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
@@ -837,6 +1048,33 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
 async function etapaConfirmacao(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
   if (!pareceConfirmacao(mensagemCliente)) {
     return { estado, mensagem: `Sem problemas — me avisa quando quiser confirmar.\n\n${montarResumoPedido(estado.dados)}` }
+  }
+
+  // Revalida preço/foto/disponibilidade direto na fonte antes de criar o
+  // pedido — nunca cobra um valor que já mudou, nem confirma um produto
+  // que saiu de disponibilidade entre a escolha e a confirmação.
+  const produtoAtual = estado.dados.produto
+  if (produtoAtual?.codigo) {
+    const real = await deps.revalidarProduto(produtoAtual.codigo)
+    if (!real || !real.disponivel) {
+      return {
+        estado: { ...estado, fase: 'escolha_categoria', dados: { ...estado.dados, produto: undefined, valorTotal: undefined } },
+        mensagem: `Poxa, o ${produtoAtual.nome} saiu de disponibilidade agora há pouco. Quer que eu te mostre outra opção parecida?`,
+      }
+    }
+    const precoMudou = real.preco != null && real.preco !== produtoAtual.preco
+    if (precoMudou) {
+      const precoNovo = real.preco!
+      const produtoAtualizado = { ...produtoAtual, preco: precoNovo, fotoUrl: real.fotoUrl ?? produtoAtual.fotoUrl }
+      const valorTotalAtualizado = precoNovo * (produtoAtualizado.quantidade ?? 1) + (estado.dados.valorFrete ?? 0)
+      return {
+        estado: { ...estado, dados: { ...estado.dados, produto: produtoAtualizado, valorTotal: valorTotalAtualizado } },
+        mensagem: `O preço do ${produtoAtual.nome} foi atualizado para ${formatarPreco(precoNovo)} — o novo total fica ${formatarPreco(valorTotalAtualizado)}. Confirma?`,
+      }
+    }
+    if (real.fotoUrl && real.fotoUrl !== produtoAtual.fotoUrl) {
+      estado = { ...estado, dados: { ...estado.dados, produto: { ...produtoAtual, fotoUrl: real.fotoUrl } } }
+    }
   }
 
   const criado = await deps.criarPedido(estado.dados)
@@ -1018,8 +1256,12 @@ export async function avancarFunil(
           mensagem: proxima.pergunta,
         }
       }
-      return etapaRecomendacao({ ...estado, fase: 'recomendacao' }, mensagemCliente, deps)
+      return etapaEscolhaCategoria({ ...estado, fase: 'escolha_categoria' }, mensagemCliente, deps)
     }
+    case 'escolha_categoria':
+      return etapaEscolhaCategoria(estado, mensagemCliente, deps)
+    case 'catalogo_completo':
+      return etapaCatalogoCompleto(estado, mensagemCliente, deps)
     case 'recomendacao':
       return etapaRecomendacao(estado, mensagemCliente, deps)
     case 'produto_selecionado':

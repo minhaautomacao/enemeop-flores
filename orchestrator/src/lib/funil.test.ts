@@ -38,6 +38,7 @@ import {
   type ProdutoCatalogo,
   type EstadoConversa,
   type DependenciasFunil,
+  type CategoriaCatalogo,
 } from './funil.js'
 
 // 1. cliente pede buquê para aniversário
@@ -573,6 +574,12 @@ function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
       { nome: 'Buquê de Rosas', preco: 140, disponivel: true, fotoUrl: 'https://site/rosas.jpg' },
       { nome: 'Arranjo Girassóis', preco: 135, disponivel: true },
     ],
+    // [] por padrão faz etapaEscolhaCategoria cair no fluxo antigo de busca
+    // direta por texto (etapaRecomendacao) — testes que não mexem com
+    // categoria continuam passando sem precisar mockar isso explicitamente.
+    buscarCategorias: async () => [],
+    buscarProdutosPorCategoria: async () => [],
+    revalidarProduto: async () => ({ disponivel: true }),
     calcularFrete: async () => ({ ok: true, valor: 22.5 }),
     gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
     criarPedido: async () => ({ pedidoId: 'pedido_fake_001' }),
@@ -939,4 +946,189 @@ test('regressão completa 2026-07-17: qualificação -> 2 opções com fotos cor
   assert.equal(estado.dados.pedidoId, 'pedido_regressao_001')
   assert.match(estado.dados.linkPagamento!, /pagamento\.exemplo\/pedido_regressao_001/)
   assert.doesNotMatch(r.mensagem, /Arranjo Alegre Colorido.*R\$ 130/i)
+})
+
+// ── Catálogo conversacional dinâmico (categorias reais, ao vivo) ──────────
+
+test('filtro de categoria: ao escolher uma categoria, mostra somente produtos dessa categoria, nunca mistura com outra', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Arranjos Florais' }, { id: '20', nome: 'Buquês' }]
+  const produtosArranjos: ProdutoCatalogo[] = [{ nome: 'Arranjo Girassol', preco: 120, codigo: '010', disponivel: true, fotoUrl: 'https://site/010.jpg' }]
+  const produtosBuques: ProdutoCatalogo[] = [{ nome: 'Buquê de Rosas', preco: 140, codigo: '032', disponivel: true, fotoUrl: 'https://site/032.jpg' }]
+  const deps = depsFake({
+    buscarCategorias: async () => categorias,
+    buscarProdutosPorCategoria: async (id) => (id === '10' ? produtosArranjos : produtosBuques),
+  })
+  const estado: EstadoConversa = { fase: 'escolha_categoria', dados: { categoriasApresentadas: ['10', '20'] }, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'Arranjos Florais', 'recomendacao', deps)
+  assert.equal(r.estado.dados.categoriaEscolhida?.id, '10')
+  assert.equal(r.estado.dados.opcoesRecomendadas?.length, 1)
+  assert.equal(r.estado.dados.opcoesRecomendadas?.[0].codigo, '010')
+  assert.doesNotMatch(r.mensagem, /Buquê de Rosas/, 'nunca mistura produto de outra categoria')
+})
+
+test('fim da qualificação apresenta as categorias reais (nunca inventadas) para escolha', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Arranjos Florais' }, { id: '20', nome: 'Buquês' }]
+  const deps = depsFake({ buscarCategorias: async () => categorias })
+  const estado: EstadoConversa = {
+    fase: 'qualificacao',
+    dados: { ocasiao: 'aniversario', destinatario: 'mae', orcamento: 150, dataEntrega: 'hoje', bairroOuCep: '01000-000' },
+    perguntasFeitas: ['ocasiao', 'destinatario', 'orcamento', 'dataEntrega', 'bairroOuCep'],
+  }
+  const r = await avancarFunil(estado, 'quero ver as opções', 'recomendacao', deps)
+  assert.equal(r.estado.fase, 'escolha_categoria')
+  assert.match(r.mensagem, /Arranjos Florais/)
+  assert.match(r.mensagem, /Buquês/)
+  assert.deepEqual(r.estado.dados.categoriasApresentadas, ['10', '20'])
+})
+
+test('correspondência exata produto-foto-preço na recomendação por categoria — nunca troca foto entre opções', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Arranjos Florais' }]
+  const deps = depsFake({ buscarCategorias: async () => categorias, buscarProdutosPorCategoria: async () => CATALOGO_ANIVERSARIO })
+  const estado: EstadoConversa = { fase: 'escolha_categoria', dados: { categoriasApresentadas: ['10'] }, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'Arranjos Florais', 'recomendacao', deps)
+  for (const p of CATALOGO_ANIVERSARIO) {
+    const foto = r.fotos?.find(f => f.codigo === p.codigo)
+    assert.equal(foto?.url, p.fotoUrl, `foto do produto ${p.codigo} deve ser exatamente a dele`)
+  }
+})
+
+test('pedido de "catálogo completo" durante a escolha de categoria entra no modo paginado', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Arranjos Florais' }, { id: '20', nome: 'Buquês' }]
+  const deps = depsFake({
+    buscarCategorias: async () => categorias,
+    buscarProdutosPorCategoria: async () => [{ nome: 'X', preco: 100, codigo: 'X1', disponivel: true }],
+  })
+  const estado: EstadoConversa = { fase: 'escolha_categoria', dados: { categoriasApresentadas: ['10', '20'] }, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'quero o catálogo completo', 'recomendacao', deps)
+  assert.equal(r.estado.fase, 'catalogo_completo')
+})
+
+test('paginação do catálogo completo: mostra em grupos pequenos e nunca despeja tudo de uma vez', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Arranjos Florais' }]
+  const cincoProdutos: ProdutoCatalogo[] = Array.from({ length: 5 }, (_, i) => ({
+    nome: `Produto ${i + 1}`, preco: 100 + i, codigo: `P${i + 1}`, disponivel: true,
+  }))
+  const deps = depsFake({ buscarCategorias: async () => categorias, buscarProdutosPorCategoria: async () => cincoProdutos })
+  const estado: EstadoConversa = { fase: 'escolha_categoria', dados: {}, perguntasFeitas: [] }
+
+  const r1 = await avancarFunil(estado, 'quero ver o catálogo completo', 'recomendacao', deps)
+  assert.equal(r1.estado.fase, 'catalogo_completo')
+  assert.equal(r1.estado.dados.opcoesRecomendadas?.length, 3, 'nunca despeja mais que um grupo pequeno de uma vez')
+  assert.match(r1.mensagem, /quer ver mais/i)
+
+  const r2 = await avancarFunil(r1.estado, 'sim', 'recomendacao', deps)
+  assert.deepEqual(r2.estado.dados.opcoesRecomendadas?.map(p => p.codigo), ['P4', 'P5'], 'mostra o restante, nunca repete os 3 primeiros')
+})
+
+test('ausência de repetição: catálogo completo nunca repete um produto já mostrado ao avançar de categoria', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Categoria A' }, { id: '20', nome: 'Categoria B' }]
+  const compartilhado: ProdutoCatalogo = { nome: 'Compartilhado', preco: 50, codigo: 'C1', disponivel: true }
+  const deps = depsFake({
+    buscarCategorias: async () => categorias,
+    buscarProdutosPorCategoria: async (id) => (id === '10' ? [compartilhado] : [compartilhado, { nome: 'Exclusivo B', preco: 60, codigo: 'C2', disponivel: true }]),
+  })
+  const estado: EstadoConversa = { fase: 'escolha_categoria', dados: {}, perguntasFeitas: [] }
+  const r1 = await avancarFunil(estado, 'catálogo completo', 'recomendacao', deps)
+  assert.deepEqual(r1.estado.dados.opcoesRecomendadas?.map(p => p.codigo), ['C1'])
+  const r2 = await avancarFunil(r1.estado, 'sim', 'recomendacao', deps)
+  assert.deepEqual(r2.estado.dados.opcoesRecomendadas?.map(p => p.codigo), ['C2'], 'produto já mostrado na categoria A nunca reaparece na B')
+})
+
+test('escolha por código funciona dentro do fluxo de categoria (continuidade com a correção do commit 007b96a)', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Arranjos Florais' }]
+  const deps = depsFake({ buscarCategorias: async () => categorias, buscarProdutosPorCategoria: async () => CATALOGO_ANIVERSARIO })
+  const estado: EstadoConversa = { fase: 'escolha_categoria', dados: { categoriasApresentadas: ['10'] }, perguntasFeitas: [] }
+  const r1 = await avancarFunil(estado, 'Arranjos Florais', 'recomendacao', deps)
+  assert.equal(r1.estado.fase, 'recomendacao')
+  const r2 = await avancarFunil(r1.estado, 'quero o código 002', 'compra_produto', deps)
+  assert.equal(r2.estado.dados.produto?.codigo, '002')
+  assert.equal(r2.estado.fase, 'produto_selecionado')
+})
+
+test('revalidação antes do pedido: produto que saiu de disponibilidade nunca cria pedido', async () => {
+  let criarPedidoChamado = false
+  const deps = depsFake({
+    revalidarProduto: async () => ({ disponivel: false }),
+    criarPedido: async () => { criarPedidoChamado = true; return { pedidoId: 'x' } },
+  })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_confirmacao',
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
+  assert.equal(criarPedidoChamado, false, 'nunca cria pedido de um produto revalidado como indisponível')
+  assert.equal(r.estado.fase, 'escolha_categoria')
+  assert.equal(r.estado.dados.produto, undefined)
+  assert.match(r.mensagem, /saiu de disponibilidade/i)
+})
+
+test('revalidação antes do pedido: preço mudou -> avisa o novo total e não cria o pedido sem reconfirmação', async () => {
+  let criarPedidoChamado = false
+  const deps = depsFake({
+    revalidarProduto: async () => ({ disponivel: true, preco: 160 }),
+    criarPedido: async () => { criarPedidoChamado = true; return { pedidoId: 'x' } },
+  })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_confirmacao',
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
+  assert.equal(criarPedidoChamado, false)
+  assert.equal(r.estado.dados.produto?.preco, 160)
+  assert.equal(r.estado.dados.valorTotal, 182.5)
+  assert.match(r.mensagem, /atualizado para R\$ 160,00/)
+})
+
+test('revalidação antes do pedido: preço e disponibilidade confirmados na fonte -> segue e cria o pedido normalmente', async () => {
+  const deps = depsFake({ revalidarProduto: async () => ({ disponivel: true, preco: 140 }) })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_confirmacao',
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000' } },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_pagamento')
+  assert.match(r.mensagem, /link de pagamento/i)
+})
+
+test('continuidade completa: categoria -> produto por código -> quantidade/data -> CEP -> frete -> confirmação -> pagamento', async () => {
+  const categorias: CategoriaCatalogo[] = [{ id: '10', nome: 'Arranjos Florais' }]
+  const deps = depsFake({
+    buscarCategorias: async () => categorias,
+    buscarProdutosPorCategoria: async () => CATALOGO_ANIVERSARIO,
+    revalidarProduto: async () => ({ disponivel: true, preco: 105 }),
+    calcularFrete: async () => ({ ok: true, valor: 18 }),
+    criarPedido: async () => ({ pedidoId: 'pedido_catalogo_dinamico_001' }),
+  })
+  let estado: EstadoConversa = { fase: 'escolha_categoria', dados: { categoriasApresentadas: ['10'] }, perguntasFeitas: [] }
+
+  let r = await avancarFunil(estado, 'Arranjos Florais', 'recomendacao', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'recomendacao')
+
+  r = await avancarFunil(estado, 'quero o código 002', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'produto_selecionado')
+  assert.equal(estado.dados.produto?.codigo, '002')
+
+  r = await avancarFunil(estado, '1 unidade, entrega amanhã', 'compra_produto', deps)
+  estado = r.estado
+  assert.match(r.mensagem, /CEP/i)
+
+  r = await avancarFunil(estado, 'CEP 01040-010', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'calculando_frete')
+
+  r = await avancarFunil(estado, '', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'aguardando_confirmacao')
+  assert.equal(estado.dados.valorFrete, 18)
+
+  r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'aguardando_pagamento')
+  assert.equal(estado.dados.pedidoId, 'pedido_catalogo_dinamico_001')
+  assert.match(r.mensagem, /Mercado Pago/i)
 })

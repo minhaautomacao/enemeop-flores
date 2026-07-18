@@ -27,6 +27,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
 import { mensagemDuplicada } from './dedup.ts';
+import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPorTermoReal, revalidarProdutoReal } from '../_shared/catalogo-woocommerce.ts';
 import { dentroDoHorarioComercial, mensagemAvisoForaDoHorario, mensagemConfirmacaoForaDoHorario } from '../_shared/horario-comercial.ts';
 import {
   type EstadoConversa,
@@ -136,44 +137,10 @@ function estadoDaConversa(row: ConversaRow): EstadoConversa {
   };
 }
 
-// ── Catálogo real (tabela catalogo_produtos — nunca inventado) ───────────
-
-interface ProdutoRow { codigo: string; nome: string; preco: number; foto_url: string | null; categoria: string | null; }
-
-function pontuarProduto(p: ProdutoRow, params: { query: string; budget?: number; color?: string }): number {
-  let score = 0;
-  const nome = p.nome.toLowerCase();
-  for (const palavra of params.query.toLowerCase().split(/\s+/)) {
-    if (palavra.length > 3 && nome.includes(palavra)) score += 2;
-  }
-  if (params.budget) {
-    if (p.preco <= params.budget) score += 4;
-    if (p.preco <= params.budget * 0.8) score += 2;
-    if (p.preco > params.budget * 1.25) score -= 4;
-  }
-  if (params.color && nome.includes(params.color.toLowerCase())) score += 5;
-  return score;
-}
+// ── Catálogo real (WooCommerce ao vivo — nunca catalogo_produtos/hardcoded) ─
 
 async function buscarCatalogoReal(params: { query: string; occasion?: string; budget?: number; color?: string }): Promise<ProdutoCatalogo[]> {
-  let query = getDb().from('catalogo_produtos').select('codigo, nome, preco, foto_url, categoria').eq('ativo', true);
-  if (params.budget) query = query.lte('preco', params.budget * 1.3);
-  const { data, error } = await query.limit(30);
-  if (error || !data) return [];
-
-  const produtos = data as ProdutoRow[];
-  return produtos
-    .map(p => ({ p, score: pontuarProduto(p, params) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 3)
-    .map(({ p }) => ({
-      nome: p.nome,
-      preco: Number(p.preco),
-      fotoUrl: p.foto_url ?? undefined,
-      disponivel: true,
-      codigo: p.codigo,
-      origem: 'catalogo_produtos',
-    }));
+  return buscarProdutosPorTermoReal(WORKSPACE_ID, { query: [params.query, params.color].filter(Boolean).join(' '), budget: params.budget });
 }
 
 // ── Frete real (agente-logistica — mesma Edge Function do WhatsApp) ──────
@@ -335,6 +302,9 @@ async function buscarFormasPagamentoReal(): Promise<string[]> {
 function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFunil {
   return {
     buscarCatalogo: buscarCatalogoReal,
+    buscarCategorias: () => buscarCategoriasReais(WORKSPACE_ID),
+    buscarProdutosPorCategoria: (categoriaId) => buscarProdutosPorCategoriaReal(WORKSPACE_ID, categoriaId),
+    revalidarProduto: (codigo) => revalidarProdutoReal(WORKSPACE_ID, codigo),
     calcularFrete: calcularFreteReal,
     gerarPagamento: gerarPagamentoReal,
     criarPedido: (dados) => criarPedidoProvisorio(dados, cliente),

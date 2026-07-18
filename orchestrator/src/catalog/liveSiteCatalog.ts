@@ -91,6 +91,7 @@ interface WooImage {
 interface WooProduct {
   id: number
   name: string
+  sku: string
   permalink: string
   status: string
   price: string
@@ -680,6 +681,73 @@ async function searchViaScraping(params: SearchLiveProductsParams): Promise<Live
   })
 
   return final
+}
+
+// ── Catálogo por categoria (catálogo conversacional dinâmico) ───────────────
+//
+// Diferente de searchLiveProductsFromSite (que pontua e escolhe o melhor
+// candidato por palavra-chave), estas funções servem a navegação explícita
+// por categoria: listar categorias reais, listar produtos de uma categoria
+// específica, e revalidar um produto específico antes de fechar o pedido.
+// Nunca usa cache — sempre em tempo real.
+
+export interface LiveCategory { id: string; name: string }
+
+/** Produto de teste/rascunho/indisponível/sem preço/sem imagem — nunca aparece pro cliente. */
+function isValidWooProduct(p: WooProduct): boolean {
+  if (p.status !== 'publish') return false
+  if (/\bteste\b/i.test(p.name) || /n[aã]o\s+dispon[ií]vel/i.test(p.name)) return false
+  const preco = parsePrice(p.sale_price || p.price || p.regular_price)
+  if (!preco) return false
+  if (!p.images || p.images.length === 0) return false
+  return true
+}
+
+/** Código oficial e estável: SKU real quando existe, senão o ID numérico do WooCommerce — nunca inventado. */
+function officialCode(p: WooProduct): string {
+  return p.sku?.trim() || String(p.id)
+}
+
+export async function listCategoriesFromSite(): Promise<LiveCategory[]> {
+  const cfg = getWooConfig()
+  if (!cfg) return []
+  const headers = buildWooHeaders(cfg.key, cfg.secret)
+  const url = `${cfg.url}/products/categories?per_page=100&hide_empty=true`
+  const { data } = await fetchJson<Array<{ id: number; name: string; count: number }>>(url, headers, API_TIMEOUT_MS)
+  if (!data) return []
+  return data.filter(c => c.count > 0).map(c => ({ id: String(c.id), name: decodeHtmlEntities(c.name) }))
+}
+
+export async function fetchProductsByCategoryFromSite(categoryId: string): Promise<LiveProduct[]> {
+  const cfg = getWooConfig()
+  if (!cfg) return []
+  const headers = buildWooHeaders(cfg.key, cfg.secret)
+  const url = `${cfg.url}/products?category=${encodeURIComponent(categoryId)}&per_page=${API_PER_PAGE}&status=publish&stock_status=instock&orderby=menu_order&order=asc`
+  const { data } = await fetchJson<WooProduct[]>(url, headers, API_TIMEOUT_MS)
+  if (!data) return []
+  return data.filter(isValidWooProduct).map(p => ({ ...mapWooToLiveProduct(p), id: officialCode(p) }))
+}
+
+export async function revalidateProductFromSite(
+  codigo: string,
+): Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string } | null> {
+  const cfg = getWooConfig()
+  if (!cfg) return null
+  const headers = buildWooHeaders(cfg.key, cfg.secret)
+  const { data: bySku } = await fetchJson<WooProduct[]>(
+    `${cfg.url}/products?sku=${encodeURIComponent(codigo)}&status=publish`, headers, API_TIMEOUT_MS,
+  )
+  let produto = bySku?.[0]
+  if (!produto && /^\d+$/.test(codigo)) {
+    const { data: byId } = await fetchJson<WooProduct>(`${cfg.url}/products/${codigo}`, headers, API_TIMEOUT_MS)
+    if (byId) produto = byId
+  }
+  if (!produto || !isValidWooProduct(produto)) return { disponivel: false }
+  return {
+    disponivel: true,
+    preco: parsePrice(produto.sale_price || produto.price || produto.regular_price),
+    fotoUrl: produto.images?.[0]?.src,
+  }
 }
 
 // ── Função principal exportada ────────────────────────────────────────────────

@@ -28,6 +28,9 @@ import {
 
 const depsFake: DependenciasFunil = {
   buscarCatalogo: async () => [],
+  buscarCategorias: async () => [],
+  buscarProdutosPorCategoria: async () => [],
+  revalidarProduto: async () => ({ disponivel: true }),
   calcularFrete: async () => ({ ok: false }),
   gerarPagamento: async () => null,
   criarPedido: async () => null,

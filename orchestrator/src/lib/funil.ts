@@ -88,6 +88,9 @@ export interface DadosPedido {
   motivoTransferencia?: string
   /** Últimas opções apresentadas — usado para detectar a escolha do cliente na próxima mensagem. */
   opcoesRecomendadas?: ProdutoCatalogo[]
+  /** true assim que as opções acima foram apresentadas — impede reapresentar
+   * o catálogo enquanto o cliente ainda não escolheu (ver etapaRecomendacao). */
+  recomendacaoApresentada?: boolean
   /** true quando o cliente já confirmou o resumo do pedido nesta troca. */
   resumoConfirmado?: boolean
 }
@@ -661,6 +664,13 @@ function detectarProdutoEscolhido(mensagem: string, opcoes?: ProdutoCatalogo[]):
   const porNome = opcoes.find(o => lower.includes(o.nome.toLowerCase()))
   if (porNome) return porNome
 
+  // Código exato como token isolado da mensagem (ex.: "quero o código 002",
+  // "manda o M08") — nunca por substring solta, pra não confundir "0" de
+  // quantidade com o código "010" de outro produto.
+  const tokensMensagem = lower.split(/[^a-z0-9]+/i).filter(Boolean)
+  const porCodigo = opcoes.find(o => o.codigo && tokensMensagem.includes(o.codigo.toLowerCase()))
+  if (porCodigo) return porCodigo
+
   if (PALAVRAS_ESCOLHA_SEGUNDA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[1]) return opcoes[1]
   if (PALAVRAS_ESCOLHA_TERCEIRA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[2]) return opcoes[2]
 
@@ -701,6 +711,17 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
     return { estado: novoEstado, mensagem: `Ótima escolha! O ${escolhido.nome} fica por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer, e pra quando precisa da entrega?` }
   }
 
+  // Opções já foram apresentadas nesta conversa e o cliente ainda não
+  // escolheu (a mensagem não bateu com nenhuma delas acima) — nunca
+  // reapresenta o catálogo do zero; só pergunta objetivamente qual das
+  // opções já mostradas ele quer.
+  if (estado.dados.recomendacaoApresentada && estado.dados.opcoesRecomendadas?.length) {
+    return {
+      estado,
+      mensagem: 'Qual das opções que te mostrei você prefere? Pode me dizer o nome, o código ou o preço.',
+    }
+  }
+
   const produtos = await deps.buscarCatalogo({
     query: [estado.dados.ocasiao, estado.dados.corPreferida].filter(Boolean).join(' ') || 'flores',
     occasion: estado.dados.ocasiao,
@@ -711,7 +732,11 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
   const novoEstado: EstadoConversa = {
     ...estado,
     fase: 'recomendacao',
-    dados: { ...estado.dados, opcoesRecomendadas: rec.principal ? [rec.principal, ...rec.alternativas] : [] },
+    dados: {
+      ...estado.dados,
+      opcoesRecomendadas: rec.principal ? [rec.principal, ...rec.alternativas] : [],
+      recomendacaoApresentada: !!rec.principal,
+    },
   }
   // Uma foto por opção apresentada, amarrada ao código real do produto —
   // nunca reaproveita foto de outro item, nunca envia foto aproximada
@@ -907,7 +932,7 @@ export async function avancarFunil(
       const novoEstado: EstadoConversa = {
         ...estado,
         fase: 'recomendacao',
-        dados: { ...estado.dados, opcoesRecomendadas: [rec.principal, ...rec.alternativas] },
+        dados: { ...estado.dados, opcoesRecomendadas: [rec.principal, ...rec.alternativas], recomendacaoApresentada: true },
       }
       return { estado: novoEstado, mensagem: montarMensagemRecomendacao(rec) }
     }

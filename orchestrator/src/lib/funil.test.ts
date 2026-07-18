@@ -771,6 +771,54 @@ test('seleção por número embutido no nome ("24 rosas") e por preço mencionad
   assert.equal(rPreco.estado.dados.produto?.codigo, '034')
 })
 
+const CATALOGO_ANIVERSARIO: ProdutoCatalogo[] = [
+  { nome: 'Arranjo Mix Flores do Campo', preco: 145, codigo: 'M08', disponivel: true, fotoUrl: 'https://site/M08.jpg' },
+  { nome: 'Arranjo 2 Rosas Nacionais e Junco', preco: 105, codigo: '002', disponivel: true, fotoUrl: 'https://site/002.jpg' },
+  { nome: 'Buquê de Rosas Vermelhas', preco: 140, codigo: '032', disponivel: true, fotoUrl: 'https://site/032.jpg' },
+]
+
+test('recomendação já apresentada: mensagem que não escolhe nenhuma opção NUNCA repete a busca no catálogo (regressão do loop de aniversário)', async () => {
+  let chamadasCatalogo = 0
+  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return CATALOGO_ANIVERSARIO } })
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { ocasiao: 'aniversario', opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'e pra aniversário, tem mais alguma coisa?', 'recomendacao', deps)
+  assert.equal(chamadasCatalogo, 0, 'nao deve buscar o catalogo de novo — opcoes ja foram apresentadas nesta conversa')
+  assert.equal(r.estado.fase, 'recomendacao')
+  assert.match(r.mensagem, /qual das op(c|ç)(o|õ)es/i)
+  assert.doesNotMatch(r.mensagem, /R\$ ?105|R\$ ?145|R\$ ?140/i, 'nao deve reapresentar a lista de produtos/precos')
+})
+
+test('escolha "quero o código 002" após recomendação apresentada avança pro próximo passo, sem repetir o catálogo', async () => {
+  let chamadasCatalogo = 0
+  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return CATALOGO_ANIVERSARIO } })
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quero o código 002', 'compra_produto', deps)
+  assert.equal(chamadasCatalogo, 0)
+  assert.equal(r.estado.dados.produto?.codigo, '002')
+  assert.equal(r.estado.fase, 'produto_selecionado')
+  assert.match(r.mensagem, /quantas unidades/i)
+})
+
+test('escolha "quero o de R$105" após recomendação apresentada identifica o produto pelo preço', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quero o de R$105', 'compra_produto', deps)
+  assert.equal(r.estado.dados.produto?.codigo, '002')
+  assert.equal(r.estado.fase, 'produto_selecionado')
+})
+
 test('pergunta de frete durante a recomendação (produto já escolhido) interrompe as sugestões e pede só o CEP', async () => {
   const deps = depsFake()
   const estado: EstadoConversa = {

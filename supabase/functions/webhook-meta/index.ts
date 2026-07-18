@@ -26,6 +26,7 @@
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
+import { mensagemDuplicada } from './dedup.ts';
 import { dentroDoHorarioComercial, mensagemAvisoForaDoHorario, mensagemConfirmacaoForaDoHorario } from '../_shared/horario-comercial.ts';
 import {
   type EstadoConversa,
@@ -71,7 +72,7 @@ async function buscarConfigDB(chave: string): Promise<string> {
 // fase usa diretamente os valores de Fase (funil.ts). dados/perguntasFeitas
 // do EstadoConversa vão dentro do jsonb pedido_info, já existente.
 
-interface Mensagem { role: 'user' | 'assistant' | 'human'; content: string; ts: string; autor_id?: string; }
+interface Mensagem { role: 'user' | 'assistant' | 'human'; content: string; ts: string; autor_id?: string; mid?: string; }
 
 interface ConversaRow {
   id: string;
@@ -478,17 +479,22 @@ async function iniciarHandoffHumano(
 
 // ── Processar DM — usa o funil determinístico compartilhado ─────────────
 
-async function processarDM(canalId: string, canal: string, mensagemCliente: string): Promise<void> {
+async function processarDM(canalId: string, canal: string, mensagemCliente: string, mid?: string): Promise<void> {
   const igToken = IG_TOKEN || await buscarConfigDB('META_IG_ACCESS_TOKEN');
   if (!igToken) return;
 
   const conversaRow = await buscarOuCriarConversa(canalId, canal);
 
+  if (mensagemDuplicada(conversaRow.historico ?? [], mensagemCliente, mid)) {
+    console.log(`[webhook-meta] mensagem_duplicada_ignorada canal_id=${canalId} canal=${canal} mid=${mid ?? '(sem mid)'}`);
+    return;
+  }
+
   // Handoff humano ativo: só registra a mensagem no histórico para o
   // atendente ver no Inbox Flora — Flora não gera nem envia resposta
   // automática enquanto um humano estiver responsável pela conversa.
   if (conversaRow.modo_atendimento === 'humano') {
-    const novaMsgHumano: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString() };
+    const novaMsgHumano: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString(), mid };
     const historicoHumano = [...(conversaRow.historico ?? []), novaMsgHumano].slice(-20);
     await salvarConversa(conversaRow.id, { historico: historicoHumano });
     console.log(`[webhook-meta] ${canalId} | modo humano ativo — Flora nao responde`);
@@ -517,7 +523,7 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     if (nomeCliente) await salvarConversa(conversaRow.id, { nome_cliente: nomeCliente });
   }
 
-  const novaMsg: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString() };
+  const novaMsg: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString(), mid };
   const historico = [...(conversaRow.historico ?? []), novaMsg].slice(-20);
 
   // Portão de escopo — determinístico, roda antes de qualquer avanço de
@@ -686,7 +692,7 @@ async function validarAssinatura(body: string, signature: string | null): Promis
 
 // ── Extração de eventos ───────────────────────────────────────────────────
 
-interface MetaEvento { canal: 'instagram' | 'facebook'; tipo: 'dm' | 'comentario'; canal_id: string; comment_id?: string; nome: string | null; mensagem: string; post_id?: string; timestamp: string; }
+interface MetaEvento { canal: 'instagram' | 'facebook'; tipo: 'dm' | 'comentario'; canal_id: string; comment_id?: string; nome: string | null; mensagem: string; post_id?: string; timestamp: string; mid?: string; }
 
 function extrairEventos(body: Record<string, unknown>): MetaEvento[] {
   const eventos: MetaEvento[] = [];
@@ -707,7 +713,8 @@ function extrairEventos(body: Record<string, unknown>): MetaEvento[] {
         const pageId   = String(entry['id'] ?? '');
         if (senderId === pageId) continue;
         const canal: 'instagram' | 'facebook' = objectType === 'instagram' ? 'instagram' : 'facebook';
-        eventos.push({ canal, tipo: 'dm', canal_id: senderId, nome: null, mensagem: texto, timestamp: new Date().toISOString() });
+        const mid = (message['mid'] as string | undefined) ?? undefined;
+        eventos.push({ canal, tipo: 'dm', canal_id: senderId, nome: null, mensagem: texto, timestamp: new Date().toISOString(), mid });
       }
     }
 
@@ -846,7 +853,7 @@ Deno.serve(async (req: Request) => {
     eventos.map(async (ev) => {
       if (ev.tipo === 'dm') {
         await Promise.allSettled([
-          processarDM(ev.canal_id, ev.canal, ev.mensagem),
+          processarDM(ev.canal_id, ev.canal, ev.mensagem, ev.mid),
           enviarAoOrquestrador(ev),
         ]);
       } else if (ev.tipo === 'comentario') {

@@ -569,7 +569,7 @@ export async function gerarPagamentoEtapa(dados: DadosPedido, gerar: GeradorPaga
     return { mensagem: mensagemTransferencia(), link: null, paymentId: null }
   }
   return {
-    mensagem: `Segue o link de pagamento: ${resultado.link}\nO link fica válido por algumas horas.`,
+    mensagem: `Segue o link de pagamento: ${resultado.link}\nO pagamento é processado no ambiente seguro do Mercado Pago. O link fica válido por algumas horas.`,
     link: resultado.link,
     paymentId: resultado.paymentId,
   }
@@ -851,7 +851,7 @@ async function gerarPagamentoComPedido(
     return { mensagem: mensagemTransferencia(), link: null, paymentId: null }
   }
   return {
-    mensagem: `Segue o link de pagamento: ${resultado.link}\nO link fica válido por algumas horas.`,
+    mensagem: `Segue o link de pagamento: ${resultado.link}\nO pagamento é processado no ambiente seguro do Mercado Pago. O link fica válido por algumas horas.`,
     link: resultado.link,
     paymentId: resultado.paymentId,
   }

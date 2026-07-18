@@ -25,7 +25,7 @@
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { gerarLinkPagamento } from '../_shared/cielo.ts';
+import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
 import { dentroDoHorarioComercial, mensagemAvisoForaDoHorario, mensagemConfirmacaoForaDoHorario } from '../_shared/horario-comercial.ts';
 import {
   type EstadoConversa,
@@ -194,7 +194,7 @@ async function calcularFreteReal(cep: string): Promise<{ ok: true; valor: number
   }
 }
 
-// ── Pedido (rascunho) e pagamento real (Cielo, via _shared/cielo.ts) ────
+// ── Pedido (rascunho) e pagamento real (Mercado Pago, via _shared/mercadopago.ts) ────
 
 interface DadosClientePedido { nome: string; telefone?: string; canal: string; canalId?: string; }
 
@@ -207,10 +207,14 @@ async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePe
   const enderecoTexto = dados.endereco
     ? [dados.endereco.rua, dados.endereco.numero, dados.endereco.bairro, dados.endereco.cidade].filter(Boolean).join(', ')
     : null;
+  // Gerado aqui (em vez de esperar o default do banco) porque o external_reference
+  // enviado ao Mercado Pago precisa existir já na criação do pedido.
+  const pedidoId = crypto.randomUUID();
   try {
     const { data, error } = await getDb()
       .from('pedidos')
       .insert({
+        id: pedidoId,
         cliente_nome: cliente.nome || 'Cliente',
         cliente_telefone: cliente.telefone ?? '',
         canal: cliente.canal,
@@ -219,7 +223,10 @@ async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePe
         produto: produto.nome,
         produtos: [{ nome: produto.nome, codigo: produto.codigo, preco: produto.preco, quantidade: produto.quantidade ?? 1 }],
         valor: dados.valorTotal,
-        status: 'pendente',
+        valor_frete: dados.valorFrete ?? null,
+        status: 'aguardando_pagamento',
+        provedor_pagamento: 'mercadopago',
+        external_reference: `enemeop-${pedidoId}`,
         horario_entrega: produto.dataEntrega ?? null,
         nome_destinatario: dados.endereco?.nomeDestinatario ?? null,
         endereco_entrega: enderecoTexto,
@@ -239,38 +246,84 @@ async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePe
   }
 }
 
-async function gerarPagamentoReal(pedidoId: string, valorTotal: number): Promise<{ link: string; paymentId: string } | null> {
-  const resultado = await gerarLinkPagamento(WORKSPACE_ID, {
-    numeroPedido: pedidoId,
-    item: { nome: 'Pedido Enemeop Flores', valor: Math.round(valorTotal * 100) },
-    parcelasMax: 3,
-    expiracaoDias: 1,
-  });
-  if (!resultado.criado || !resultado.linkPagamento) return null;
-  const linkFinal = resultado.shortLink ?? resultado.linkPagamento;
-  const linkId = resultado.linkId ?? pedidoId;
-  try {
-    await getDb().from('pedidos').update({ link_pagamento: linkFinal, link_pagamento_id: linkId }).eq('id', pedidoId);
-  } catch (e) {
-    console.error('[webhook-meta] falha ao registrar link de pagamento no pedido:', e);
+/**
+ * Cria (ou reaproveita) a preference de pagamento do pedido no Mercado Pago.
+ * Idempotente: se o pedido já tem mp_preference_id (chamada repetida do
+ * funil pra mesma confirmação), reusa o link salvo em vez de criar uma
+ * preference nova — nunca duas cobranças pro mesmo pedido. Produto e frete
+ * usados no cálculo do total vêm sempre do que já foi persistido no pedido
+ * (nunca de valores repassados pelo cliente).
+ */
+async function gerarPagamentoReal(pedidoId: string, _valorTotal: number): Promise<{ link: string; paymentId: string } | null> {
+  const { data: pedido, error } = await getDb()
+    .from('pedidos')
+    .select('produtos, valor_frete, external_reference, mp_preference_id, link_pagamento')
+    .eq('id', pedidoId)
+    .single();
+  if (error || !pedido) {
+    console.error('[webhook-meta] gerarPagamentoReal: pedido nao encontrado:', error?.message);
+    return null;
   }
-  return { link: linkFinal, paymentId: linkId };
+
+  if (pedido.mp_preference_id && pedido.link_pagamento) {
+    return { link: pedido.link_pagamento as string, paymentId: pedido.mp_preference_id as string };
+  }
+
+  const produtos = (pedido.produtos as Array<{ nome: string; preco: number; quantidade?: number }> | null) ?? [];
+  const itens = produtos
+    .filter(p => p.preco > 0)
+    .map(p => ({ titulo: p.nome, quantidade: p.quantidade ?? 1, precoUnitarioReais: p.preco }));
+  const frete = Number(pedido.valor_frete ?? 0);
+  if (frete > 0) itens.push({ titulo: 'Frete', quantidade: 1, precoUnitarioReais: frete });
+  if (itens.length === 0) {
+    console.error('[webhook-meta] gerarPagamentoReal: pedido sem itens cobraveis, preference nao criada');
+    return null;
+  }
+
+  const externalReference = (pedido.external_reference as string | null) ?? `enemeop-${pedidoId}`;
+  const resultado = await criarPreferenciaMercadoPago(WORKSPACE_ID, {
+    externalReference,
+    itens,
+    notificationUrl: `${SUPABASE_URL}/functions/v1/webhook-mercadopago`,
+    backUrls: {
+      success: 'https://enemeopflores.com.br/pagamento/sucesso',
+      failure: 'https://enemeopflores.com.br/pagamento/falha',
+      pending: 'https://enemeopflores.com.br/pagamento/pendente',
+    },
+    metadata: { pedido_id: pedidoId, workspace_id: WORKSPACE_ID },
+  });
+  if (!resultado.criado || !resultado.initPoint || !resultado.preferenceId) {
+    console.error('[webhook-meta] falha ao criar preference Mercado Pago:', resultado.erro);
+    return null;
+  }
+
+  try {
+    await getDb().from('pedidos').update({
+      mp_preference_id: resultado.preferenceId,
+      external_reference: externalReference,
+      link_pagamento: resultado.initPoint,
+      link_pagamento_id: resultado.preferenceId,
+    }).eq('id', pedidoId);
+  } catch (e) {
+    console.error('[webhook-meta] falha ao registrar preference no pedido:', e);
+  }
+  return { link: resultado.initPoint, paymentId: resultado.preferenceId };
 }
 
 // Formas de pagamento realmente habilitadas agora — checa a mesma
-// credencial (workspace_credentials, tipo='cielo') que gerarLinkPagamento
-// usa de verdade pra gerar o link. Nunca inventa Pix/cartão/dinheiro sem
-// uma integração real configurada por trás.
+// credencial (workspace_credentials, tipo='financeiro', chave='mp_access_token')
+// que gerarPagamentoReal usa de verdade pra criar a preference. Nunca
+// inventa Pix/cartão/dinheiro sem uma integração real configurada por trás.
 async function buscarFormasPagamentoReal(): Promise<string[]> {
   try {
     const { data } = await getDb()
       .from('workspace_credentials')
       .select('chave')
       .eq('workspace_id', WORKSPACE_ID)
-      .eq('tipo', 'cielo')
+      .eq('tipo', 'financeiro')
       .eq('ativo', true);
     const chaves = new Set((data ?? []).map((r: { chave: string }) => r.chave));
-    return chaves.has('client_id') && chaves.has('client_secret')
+    return chaves.has('mp_access_token')
       ? ['Pix', 'cartão de crédito', 'cartão de débito']
       : [];
   } catch {

@@ -1,177 +1,234 @@
 /**
- * webhook-mercadopago — Recebe notificações de pagamento do Mercado Pago
+ * webhook-mercadopago — notificações de pagamento (Checkout Pro).
  *
- * Origem: recuperado da versão implantada no projeto Supabase da Enemeop
- * (gftnjvdvzgjkhwxnxnwl, slug webhook-mercadopago, v8) em 2026-07-10.
- * Nunca esteve versionado em nenhum repositório Git antes desta migração.
+ * Nunca confia em status/valor vindos do corpo/query da notificação: sempre
+ * busca o pagamento real via GET /v1/payments/{id} (ver _shared/mercadopago.ts)
+ * antes de confirmar qualquer coisa. Localiza o pedido por external_reference
+ * (nunca por telefone/canal — funciona pros três canais: whatsapp, instagram,
+ * facebook). Idempotente via mercadopago_eventos(payment_id, status): a
+ * mesma notificação repetida pra um status já processado é ignorada (a
+ * inserção na tabela é a própria trava de concorrência — dois deliveries
+ * simultâneos da mesma notificação nunca processam side effects duas vezes).
  *
- * SANITIZAÇÃO APLICADA: a versão implantada tinha ZAPI_INSTANCE_ID,
- * ZAPI_TOKEN e ZAPI_CLIENT_TOKEN reais como fallback hardcoded — removidos
- * e substituídos por string vazia. A função passa a depender
- * exclusivamente das env vars (ver .env.example). Não confirmado se esta
- * função ainda está em uso (ver docs/MISSING_SOURCE_FUNCTIONS.md) — o
- * projeto usa Cielo como meio de pagamento documentado, não Mercado Pago.
+ * Se o valor aprovado não bater com o valor do pedido, o pagamento NUNCA é
+ * confirmado automaticamente — escala pra atendimento humano.
  *
- * Fluxo:
- *   1. MP envia POST com {type: 'payment', data: {id}}
- *   2. Consulta o pagamento via API
- *   3. Se aprovado: atualiza conversa no Supabase + envia confirmação WhatsApp
+ * Variáveis de ambiente:
+ *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (auto-injetados)
+ *   SAAS_WORKSPACE_ID
+ *   META_IG_ACCESS_TOKEN, META_PAGE_ACCESS_TOKEN, META_INSTAGRAM_ID — só
+ *     usadas pra confirmar pagamento de pedidos vindos de Instagram/Facebook.
+ *     enviarTextoInstagramOuFacebook abaixo é réplica mínima e deliberada
+ *     das mesmas funções em webhook-meta/index.ts — mesmo padrão de
+ *     duplicação documentado em orchestrator/src/lib/cielo.ts. Cada Edge
+ *     Function é publicada isoladamente, então não há import direto entre
+ *     webhook-meta e webhook-mercadopago.
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { buscarPagamentoReal, validarAssinaturaWebhook } from '../_shared/mercadopago.ts';
+import { enviarWhatsApp } from '../_shared/whatsapp.ts';
+import { mapearStatusPagamento, valoresDivergem } from './logica.ts';
 
 const SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
-const WORKSPACE_ID = Deno.env.get('SAAS_WORKSPACE_ID') ?? Deno.env.get('WORKSPACE_NAME') ?? '';
-const ZAPI_INSTANCE = Deno.env.get('ZAPI_INSTANCE_ID') ?? '';
-const ZAPI_TOKEN    = Deno.env.get('ZAPI_TOKEN') ?? '';
-const ZAPI_CLIENT   = Deno.env.get('ZAPI_CLIENT_TOKEN') ?? '';
+const WORKSPACE_ID = Deno.env.get('SAAS_WORKSPACE_ID') ?? '';
+const IG_TOKEN      = Deno.env.get('META_IG_ACCESS_TOKEN') ?? '';
+const PAGE_TOKEN    = Deno.env.get('META_PAGE_ACCESS_TOKEN') ?? '';
 
 function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 }
 
-async function buscarCredencial(workspaceId: string, chave: string): Promise<string> {
+async function buscarConfigDB(chave: string): Promise<string> {
   try {
-    const { data } = await getDb()
-      .from('workspace_credentials')
-      .select('valor')
-      .eq('workspace_id', workspaceId)
-      .eq('tipo', 'financeiro')
-      .eq('chave', chave)
-      .single();
+    const { data } = await getDb().from('funcao_configs').select('valor').eq('chave', chave).single();
     return (data?.valor as string) ?? '';
   } catch { return ''; }
 }
 
-async function enviarTexto(phone: string, message: string): Promise<void> {
-  if (!ZAPI_INSTANCE || !ZAPI_TOKEN || !ZAPI_CLIENT) {
-    console.error('[zapi] credenciais nao configuradas — mensagem nao enviada');
+async function enviarTextoInstagramOuFacebook(canal: string, canalId: string, texto: string): Promise<boolean> {
+  const pageToken = PAGE_TOKEN || await buscarConfigDB('META_PAGE_ACCESS_TOKEN');
+  const igId = Deno.env.get('META_INSTAGRAM_ID') || await buscarConfigDB('META_INSTAGRAM_ID');
+  const isInstagram = canal === 'instagram' && !!igId && !!IG_TOKEN;
+  const endpoint = isInstagram
+    ? `https://graph.instagram.com/v21.0/${igId}/messages`
+    : `https://graph.facebook.com/v21.0/me/messages`;
+  const token = isInstagram ? IG_TOKEN : (pageToken || IG_TOKEN);
+
+  try {
+    const res = await fetch(`${endpoint}?access_token=${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipient: { id: canalId },
+        message: { text: texto },
+        messaging_type: 'RESPONSE',
+      }),
+    });
+    if (!res.ok) {
+      const erroBody = await res.text().catch(() => '');
+      console.error(`[webhook-mp] erro DM status=${res.status} canal=${canal} corpo=${erroBody}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`[webhook-mp] falha DM: ${e}`);
+    return false;
+  }
+}
+
+interface PedidoRow {
+  id: string;
+  canal: string;
+  canal_id: string | null;
+  cliente_telefone: string | null;
+  valor: number;
+  status: string;
+  external_reference: string | null;
+}
+
+async function notificarCliente(pedido: PedidoRow, texto: string): Promise<void> {
+  if (pedido.canal === 'whatsapp') {
+    const numero = pedido.cliente_telefone || pedido.canal_id;
+    const resultado = await enviarWhatsApp(WORKSPACE_ID, numero, texto);
+    if (!resultado.enviado) console.error('[webhook-mp] falha ao notificar cliente via whatsapp:', resultado.erro);
     return;
   }
-  await fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
-    body: JSON.stringify({ phone, message }),
-  }).catch(e => console.error('[zapi] falha:', e));
-}
-
-async function verificarPagamento(paymentId: string, accessToken: string): Promise<{
-  status: string;
-  valor: number;
-  metodo: string;
-  metadata: Record<string, string>;
-} | null> {
-  try {
-    const resp = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-      headers: { 'Authorization': `Bearer ${accessToken}` },
-    });
-    if (!resp.ok) {
-      console.error('[webhook-mp] erro ao consultar pagamento:', resp.status);
-      return null;
-    }
-    const data = await resp.json() as {
-      status: string;
-      transaction_amount: number;
-      payment_type_id: string;
-      metadata?: Record<string, string>;
-    };
-    return {
-      status: data.status,
-      valor: data.transaction_amount,
-      metodo: data.payment_type_id,
-      metadata: data.metadata ?? {},
-    };
-  } catch (e) {
-    console.error('[webhook-mp] erro:', e);
-    return null;
+  if ((pedido.canal === 'instagram' || pedido.canal === 'facebook') && pedido.canal_id) {
+    const ok = await enviarTextoInstagramOuFacebook(pedido.canal, pedido.canal_id, texto);
+    if (!ok) console.error('[webhook-mp] falha ao notificar cliente via', pedido.canal);
+    return;
   }
+  console.error('[webhook-mp] canal desconhecido/sem canal_id, nao foi possivel notificar. pedido=', pedido.id, 'canal=', pedido.canal);
 }
-
-const METODO_LABEL: Record<string, string> = {
-  credit_card: 'cartão de crédito',
-  debit_card:  'cartão de débito',
-  pix:         'PIX',
-  account_money: 'conta Mercado Pago',
-};
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'GET') return new Response('webhook-mercadopago ok', { status: 200 });
   if (req.method !== 'POST') return new Response('ok', { status: 200 });
 
-  let body: Record<string, unknown>;
-  try { body = await req.json(); } catch { return new Response('ok', { status: 200 }); }
+  let body: Record<string, unknown> = {};
+  try { body = await req.json(); } catch { /* alguns formatos do MP vêm só via query string */ }
 
-  const tipo = body['type'] as string | undefined;
-  const paymentId = (body['data'] as Record<string, string> | undefined)?.['id'];
+  const url = new URL(req.url);
+  const dataObj = body['data'] as Record<string, unknown> | undefined;
+  const tipo = (body['type'] as string | undefined) ?? (body['topic'] as string | undefined)
+    ?? url.searchParams.get('type') ?? url.searchParams.get('topic') ?? '';
+  const paymentId = (dataObj?.['id'] as string | undefined)
+    ?? url.searchParams.get('data.id') ?? url.searchParams.get('id') ?? '';
 
-  // MP também envia eventos de outras categorias — ignorar o que não é pagamento
+  // MP também envia eventos de outras categorias (merchant_order etc.) —
+  // ignora o que não é notificação de pagamento.
   if (tipo !== 'payment' || !paymentId) {
-    console.log('[webhook-mp] evento ignorado:', tipo);
+    console.log('[webhook-mp] evento ignorado, tipo=', tipo);
     return new Response('ok', { status: 200 });
   }
 
-  const accessToken = await buscarCredencial(WORKSPACE_ID, 'mp_access_token')
-    || Deno.env.get('MERCADOPAGO_ACCESS_TOKEN') || '';
+  const xSignature = req.headers.get('x-signature');
+  const xRequestId = req.headers.get('x-request-id');
+  const validacao = await validarAssinaturaWebhook(WORKSPACE_ID, xSignature, xRequestId, paymentId);
+  if (validacao === 'invalida') {
+    console.error('[webhook-mp] assinatura invalida, notificacao ignorada. paymentId=', paymentId);
+    return new Response('ok', { status: 200 });
+  }
+  if (validacao === 'sem_segredo_configurado') {
+    console.log('[webhook-mp] mp_webhook_secret nao configurado — seguindo so com a confirmacao via API real. paymentId=', paymentId);
+  }
 
-  if (!accessToken) {
-    console.error('[webhook-mp] access token não configurado');
+  // Nunca confia no status/valor do corpo da notificação — busca o
+  // pagamento real na API do Mercado Pago antes de decidir qualquer coisa.
+  const pagamento = await buscarPagamentoReal(WORKSPACE_ID, paymentId);
+  if (!pagamento) {
+    console.error('[webhook-mp] nao foi possivel confirmar o pagamento na API do Mercado Pago:', paymentId);
     return new Response('ok', { status: 200 });
   }
 
-  const pagamento = await verificarPagamento(paymentId, accessToken);
-  if (!pagamento) return new Response('ok', { status: 200 });
-
-  console.log(`[webhook-mp] payment ${paymentId} status=${pagamento.status} valor=R$${pagamento.valor}`);
-
-  if (pagamento.status !== 'approved') {
-    // Pagamento pendente ou rejeitado — nada a fazer por ora
+  const statusMapeado = mapearStatusPagamento(pagamento.status);
+  if (!statusMapeado) {
+    console.log('[webhook-mp] status sem mapeamento conhecido, ignorado:', pagamento.status);
+    return new Response('ok', { status: 200 });
+  }
+  if (!pagamento.externalReference) {
+    console.error('[webhook-mp] pagamento sem external_reference, impossivel localizar o pedido. paymentId=', paymentId);
     return new Response('ok', { status: 200 });
   }
 
-  // Recupera o telefone do cliente via metadata da preference
-  const phone = pagamento.metadata['phone'] ?? pagamento.metadata['canal_id'] ?? '';
-  const workspaceId = pagamento.metadata['workspace_id'] ?? WORKSPACE_ID;
-  const metodoLabel = METODO_LABEL[pagamento.metodo] ?? pagamento.metodo;
-  const valorFormatado = `R$ ${pagamento.valor.toFixed(2).replace('.', ',')}` ;
-
-  if (!phone) {
-    console.error('[webhook-mp] phone não encontrado nos metadados do pagamento', pagamento.metadata);
-    return new Response('ok', { status: 200 });
-  }
-
-  // Atualiza a conversa no banco
   const db = getDb();
-  const { data: conversa } = await db
-    .from('conversas')
-    .select('id, pedido_info, fase')
-    .eq('canal_id', phone)
-    .eq('canal', 'whatsapp')
-    .single();
 
-  if (conversa) {
-    const pedidoAtualizado = {
-      ...(conversa.pedido_info as Record<string, unknown> ?? {}),
-      pagamento: {
-        status: 'aprovado',
-        valor: pagamento.valor,
-        metodo: pagamento.metodo,
-        payment_id: paymentId,
-        aprovado_em: new Date().toISOString(),
-      },
-    };
+  // Idempotência: o pedido é sempre criado antes da preference (ver
+  // webhook-meta/index.ts, criarPedidoProvisorio -> gerarPagamentoReal), ou
+  // seja, external_reference já existe em `pedidos` bem antes de qualquer
+  // webhook poder chegar aqui. A inserção abaixo é a trava de concorrência:
+  // se essa exata combinação (payment_id, status) já foi registrada — retry
+  // do MP reenviando a mesma notificação —, a violação de unicidade (23505)
+  // interrompe o processamento antes de qualquer side effect duplicado.
+  const { error: eventoError } = await db.from('mercadopago_eventos').insert({
+    payment_id: paymentId,
+    status: pagamento.status,
+    external_reference: pagamento.externalReference,
+    valor: pagamento.valor,
+  });
+  if (eventoError) {
+    if (eventoError.code === '23505') {
+      console.log('[webhook-mp] notificacao duplicada, ja processada:', paymentId, pagamento.status);
+    } else {
+      console.error('[webhook-mp] falha ao registrar evento:', eventoError.message);
+    }
+    return new Response('ok', { status: 200 });
+  }
+
+  const { data: pedido, error: pedidoError } = await db
+    .from('pedidos')
+    .select('id, canal, canal_id, cliente_telefone, valor, status, external_reference')
+    .eq('external_reference', pagamento.externalReference)
+    .maybeSingle();
+
+  if (pedidoError || !pedido) {
+    // Nunca cria um pedido a partir de uma notificação — o pedido tem que
+    // já existir. O evento já foi registrado acima (audit trail); se isso
+    // acontecer é uma anomalia real de dados, não um caso esperado.
+    console.error('[webhook-mp] pedido nao encontrado para external_reference:', pagamento.externalReference);
+    return new Response('ok', { status: 200 });
+  }
+
+  if (pagamento.status === 'approved') {
+    const valorPedido = Number(pedido.valor ?? 0);
+    if (valoresDivergem(valorPedido, pagamento.valor)) {
+      console.error(`[webhook-mp] valor aprovado (R$ ${pagamento.valor}) diverge do valor do pedido (R$ ${valorPedido}) — pagamento NAO confirmado automaticamente, escalando pra humano. pedido=${pedido.id} payment=${paymentId}`);
+      const { error: handoffError } = await db.from('atendimentos_humanos').insert({
+        canal: pedido.canal,
+        canal_cliente_id: pedido.canal_id ?? pedido.cliente_telefone ?? 'desconhecido',
+        telefone: pedido.cliente_telefone,
+        origem_handoff: 'pagamento',
+        motivo_transferencia: `Pagamento aprovado (${paymentId}) com valor R$ ${pagamento.valor} divergente do pedido R$ ${valorPedido}`,
+        dados_pedido: { pedido_id: pedido.id, payment_id: paymentId, valor_aprovado: pagamento.valor, valor_pedido: valorPedido },
+      });
+      if (handoffError) console.error('[webhook-mp] falha ao criar handoff de divergencia de valor:', handoffError.message);
+      return new Response('ok', { status: 200 });
+    }
+
+    await db.from('pedidos').update({
+      status: 'pago',
+      mp_payment_id: paymentId,
+      pago_em: new Date().toISOString(),
+    }).eq('id', pedido.id);
+
     await db.from('conversas').update({
-      pedido_info: pedidoAtualizado,
       fase: 'concluido',
       atualizado_em: new Date().toISOString(),
-    }).eq('id', conversa.id);
+    }).eq('canal', pedido.canal).eq('canal_id', pedido.canal_id);
+
+    const valorFormatado = `R$ ${pagamento.valor.toFixed(2).replace('.', ',')}`;
+    const texto = `Recebemos o seu pagamento de ${valorFormatado}. Seu pedido está confirmado e vamos preparar tudo com muito carinho. Em breve entraremos em contato com as informações de entrega.`;
+    await notificarCliente(pedido as PedidoRow, texto);
+
+    console.log(`[webhook-mp] pagamento aprovado e confirmado. pedido=${pedido.id} payment=${paymentId} valor=${valorFormatado}`);
+    return new Response('ok', { status: 200 });
   }
 
-  // Envia confirmação pelo WhatsApp
-  const mensagem = `Recebemos o seu pagamento de ${valorFormatado} via ${metodoLabel}. Seu pedido esta confirmado e vamos preparar tudo com muito carinho. Em breve entraremos em contato com as informacoes de rastreio.`;
-  await enviarTexto(phone, mensagem);
-
-  console.log(`[webhook-mp] pagamento confirmado para ${phone} | ${valorFormatado} via ${metodoLabel}`);
-
+  // pending/in_process/authorized/rejected/cancelled/refunded/charged_back
+  // — só atualiza o status do pedido, sem confirmação nem notificação.
+  await db.from('pedidos').update({ status: statusMapeado, mp_payment_id: paymentId }).eq('id', pedido.id);
+  console.log(`[webhook-mp] pedido ${pedido.id} atualizado para status=${statusMapeado} (mp status=${pagamento.status})`);
   return new Response('ok', { status: 200 });
 });

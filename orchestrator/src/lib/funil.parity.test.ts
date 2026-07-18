@@ -65,6 +65,7 @@ test('nucleo Deno (_shared/funil.ts) produz exatamente os mesmos resultados que 
     calcularFrete: async () => ({ ok: true as const, valor: 22.5 }),
     gerarPagamento: async (pedidoId: string) => ({ link: `https://pag/${pedidoId}`, paymentId: pedidoId }),
     criarPedido: async () => ({ pedidoId: 'pedido_x' }),
+    buscarFormasPagamento: async () => ['Pix'],
   }
 
   const rNode = await nucleoNode.avancarFunil(estadoNode, 'Quero flores para minha mãe', 'recomendacao', deps)

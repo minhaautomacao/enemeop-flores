@@ -643,23 +643,69 @@ export interface DependenciasFunil {
   gerarPagamento: (pedidoId: string, valorTotal: number) => Promise<{ link: string; paymentId: string } | null>
   /** Cria o registro do pedido (rascunho, ainda sem pagamento) e devolve o id. */
   criarPedido: CriadorPedido
+  /** Formas de pagamento realmente habilitadas na configuração/integração de
+   * produção agora — [] quando não há como confirmar (nunca inventa Pix/
+   * cartão/dinheiro sem uma fonte real por trás). */
+  buscarFormasPagamento: () => Promise<string[]>
 }
 
 export interface ResultadoEtapa {
   estado: EstadoConversa
   mensagem: string
   fotoUrl?: string | null
+  /** Uma foto por produto apresentado (recomendação com 2-3 opções) — cada
+   * uma amarrada ao código/ID do produto real, nunca por posição. Quando
+   * presente, tem prioridade sobre `fotoUrl` no envio. */
+  fotos?: { codigo?: string; nome: string; url: string }[]
 }
 
-const PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO = ['primeira opção', 'primeira opcao', 'esse mesmo', 'esse aí', 'esse ai', 'esse mesmo aí', 'fico com esse', 'quero esse', 'vou querer esse']
+const PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO = ['primeira opção', 'primeira opcao', 'a primeira', 'o primeiro', 'esse mesmo', 'esse aí', 'esse ai', 'esse mesmo aí', 'fico com esse', 'quero esse', 'vou querer esse']
+const PALAVRAS_ESCOLHA_SEGUNDA_OPCAO = ['segunda opção', 'segunda opcao', 'a segunda', 'o segundo']
+const PALAVRAS_ESCOLHA_TERCEIRA_OPCAO = ['terceira opção', 'terceira opcao', 'a terceira', 'o terceiro']
 const PALAVRAS_CONFIRMACAO = ['sim', 'confirmo', 'confirmado', 'pode gerar', 'isso mesmo', 'pode confirmar', 'tá certo', 'ta certo', 'correto', 'perfeito']
 const PALAVRAS_NEGACAO = ['não', 'nao', 'errado', 'quero mudar', 'na verdade']
 
+/** Extrai números (inteiros ou decimais com vírgula) de um texto — usado
+ * pra casar "no valor de 560" com o preço de uma opção, ou "24 rosas" com
+ * um número embutido no nome de uma opção. */
+function extrairNumeros(texto: string): number[] {
+  return (texto.match(/\d+(?:[.,]\d+)?/g) ?? []).map(n => parseFloat(n.replace(',', '.')))
+}
+
+/**
+ * Identifica qual produto já apresentado o cliente está se referindo —
+ * nunca por posição fixa (índice 0): tenta, em ordem, nome completo,
+ * ordinal ("a segunda"), preço mencionado ("no valor de 560"), número
+ * embutido no nome ("24 rosas" -> "Buquê de 24 Rosas"), "mais barato"/
+ * "mais caro", e só por último a frase ambígua de "esse mesmo" (índice 0,
+ * único caso em que a posição é usada, por falta de outro sinal).
+ */
 function detectarProdutoEscolhido(mensagem: string, opcoes?: ProdutoCatalogo[]): ProdutoCatalogo | null {
   if (!opcoes || opcoes.length === 0) return null
   const lower = mensagem.toLowerCase()
+  const normalizado = normalizar(mensagem)
+
   const porNome = opcoes.find(o => lower.includes(o.nome.toLowerCase()))
   if (porNome) return porNome
+
+  if (PALAVRAS_ESCOLHA_SEGUNDA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[1]) return opcoes[1]
+  if (PALAVRAS_ESCOLHA_TERCEIRA_OPCAO.some(p => normalizado.includes(normalizar(p))) && opcoes[2]) return opcoes[2]
+
+  const numerosMensagem = extrairNumeros(mensagem)
+  if (numerosMensagem.length > 0) {
+    const porPreco = opcoes.find(o => o.preco != null && numerosMensagem.some(n => Math.round(n) === Math.round(o.preco!)))
+    if (porPreco) return porPreco
+    const porNumeroNoNome = opcoes.find(o => extrairNumeros(o.nome).some(nn => numerosMensagem.includes(nn)))
+    if (porNumeroNoNome) return porNumeroNoNome
+  }
+
+  if (/mais barat/.test(normalizado)) {
+    return opcoes.reduce<ProdutoCatalogo | null>((min, o) => (o.preco != null && (min?.preco == null || o.preco < min.preco) ? o : min), null)
+  }
+  if (/mais car[oa]/.test(normalizado)) {
+    return opcoes.reduce<ProdutoCatalogo | null>((max, o) => (o.preco != null && (max?.preco == null || o.preco > max.preco) ? o : max), null)
+  }
+
   if (PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO.some(p => lower.includes(p))) return opcoes[0]
   return null
 }
@@ -694,7 +740,14 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
     fase: 'recomendacao',
     dados: { ...estado.dados, opcoesRecomendadas: rec.principal ? [rec.principal, ...rec.alternativas] : [] },
   }
-  return { estado: novoEstado, mensagem: montarMensagemRecomendacao(rec, estado.dados.ocasiao) }
+  // Uma foto por opção apresentada, amarrada ao código real do produto —
+  // nunca reaproveita foto de outro item, nunca envia foto aproximada
+  // quando o produto não tem uma.
+  const todasAsOpcoes = rec.principal ? [rec.principal, ...rec.alternativas] : []
+  const fotos = todasAsOpcoes
+    .filter((p): p is ProdutoCatalogo & { fotoUrl: string } => !!p.fotoUrl)
+    .map(p => ({ codigo: p.codigo, nome: p.nome, url: p.fotoUrl }))
+  return { estado: novoEstado, mensagem: montarMensagemRecomendacao(rec, estado.dados.ocasiao), fotos: fotos.length > 0 ? fotos : undefined }
 }
 
 function etapaConfirmacaoDetalhesProduto(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
@@ -857,7 +910,12 @@ export async function avancarFunil(
 
   // Pedido de foto pode acontecer em qualquer fase após haver produto(s) em jogo.
   if (intencao === 'foto_produto') {
+    // Nunca por posição fixa: primeiro o produto já formalmente escolhido,
+    // depois tenta identificar a QUAL das opções apresentadas a mensagem se
+    // refere (nome, número, preço) — só cai pra primeira opção como último
+    // recurso, quando não há nenhum outro sinal.
     const alvo = estado.dados.produto
+      ?? detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
       ?? estado.dados.opcoesRecomendadas?.[0]
       ?? undefined
     const resp = responderPedidoDeFoto(alvo ? { nome: alvo.nome, preco: alvo.preco, fotoUrl: alvo.fotoUrl, disponivel: true } : undefined)
@@ -883,6 +941,45 @@ export async function avancarFunil(
     return {
       estado,
       mensagem: `No momento não temos ${termoDisponibilidade} disponível. Posso te mostrar outras opções que temos hoje, ou me conta uma preferência (cor, estilo, ocasião) que eu busco algo parecido.`,
+    }
+  }
+
+  // Pergunta direta de frete: interrompe as sugestões sem apagar o produto
+  // já escolhido nem os dados coletados. Nunca estima — só cota de verdade,
+  // e só quando já sabe o quê (produto) e pra onde (CEP) entregar; se faltar
+  // uma das duas coisas, pede só o que falta. Reaproveita o CEP/bairro já
+  // informado na qualificação (`bairroOuCep`) em vez de perguntar de novo.
+  if (intencao === 'frete') {
+    if (!estado.dados.produto) {
+      return { estado, mensagem: 'Claro! Antes de calcular o frete, me conta qual produto você tem em mente — aí eu já cotamos certinho.' }
+    }
+    const cepConhecido = estado.dados.endereco?.cep
+      ?? (estado.dados.bairroOuCep && /\d{5}-?\d{3}/.test(estado.dados.bairroOuCep) ? estado.dados.bairroOuCep : undefined)
+    if (!cepConhecido) {
+      return { estado, mensagem: 'Claro! Pra calcular o frete, me passa o CEP de entrega.' }
+    }
+    const estadoComCep: EstadoConversa = {
+      ...estado,
+      dados: { ...estado.dados, endereco: { ...(estado.dados.endereco ?? { cep: '' }), cep: cepConhecido } },
+    }
+    return etapaCalculoFrete(estadoComCep, deps)
+  }
+
+  // Pergunta direta de forma de pagamento: responde com o que está
+  // realmente habilitado na integração de produção agora — nunca inventa
+  // Pix/cartão/dinheiro. Não apaga produto/endereço já coletados nem gera
+  // link (isso só acontece depois do resumo confirmado, no fluxo normal).
+  if (intencao === 'pagamento') {
+    const formas = await deps.buscarFormasPagamento()
+    if (formas.length === 0) {
+      return {
+        estado,
+        mensagem: 'No momento não consigo confirmar automaticamente as formas de pagamento disponíveis — vou validar isso com nossa equipe antes de fecharmos o pedido.',
+      }
+    }
+    return {
+      estado,
+      mensagem: `Aceitamos ${formas.join(', ')}, por um link de pagamento seguro depois que confirmarmos produto, entrega e total.`,
     }
   }
 

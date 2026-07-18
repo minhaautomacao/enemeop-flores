@@ -31,6 +31,7 @@ const depsFake: DependenciasFunil = {
   calcularFrete: async () => ({ ok: false }),
   gerarPagamento: async () => null,
   criarPedido: async () => null,
+  buscarFormasPagamento: async () => [],
 };
 
 // Réplica fiel da decisão em processarDM (webhook-meta/index.ts) — sem I/O.

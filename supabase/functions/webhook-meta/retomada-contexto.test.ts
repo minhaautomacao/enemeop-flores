@@ -37,6 +37,7 @@ const depsFake: DependenciasFunil = {
   calcularFrete: async () => ({ ok: true, valor: 22.5 }),
   gerarPagamento: async (pedidoId: string) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
   criarPedido: async () => ({ pedidoId: 'pedido_x' }),
+  buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'],
 };
 
 interface Mensagem { role: 'user' | 'assistant'; content: string; ts: string }

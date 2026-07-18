@@ -257,12 +257,34 @@ async function gerarPagamentoReal(pedidoId: string, valorTotal: number): Promise
   return { link: linkFinal, paymentId: linkId };
 }
 
+// Formas de pagamento realmente habilitadas agora — checa a mesma
+// credencial (workspace_credentials, tipo='cielo') que gerarLinkPagamento
+// usa de verdade pra gerar o link. Nunca inventa Pix/cartão/dinheiro sem
+// uma integração real configurada por trás.
+async function buscarFormasPagamentoReal(): Promise<string[]> {
+  try {
+    const { data } = await getDb()
+      .from('workspace_credentials')
+      .select('chave')
+      .eq('workspace_id', WORKSPACE_ID)
+      .eq('tipo', 'cielo')
+      .eq('ativo', true);
+    const chaves = new Set((data ?? []).map((r: { chave: string }) => r.chave));
+    return chaves.has('client_id') && chaves.has('client_secret')
+      ? ['Pix', 'cartão de crédito', 'cartão de débito']
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFunil {
   return {
     buscarCatalogo: buscarCatalogoReal,
     calcularFrete: calcularFreteReal,
     gerarPagamento: gerarPagamentoReal,
     criarPedido: (dados) => criarPedidoProvisorio(dados, cliente),
+    buscarFormasPagamento: buscarFormasPagamentoReal,
   };
 }
 
@@ -452,6 +474,7 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
 
   let respostaFinal: string;
   let fotoUrl: string | null | undefined;
+  let fotos: { codigo?: string; nome: string; url: string }[] | undefined;
 
   if (intencaoInterrompeFluxo(intencao)) {
     if (intencao === 'assunto_fora_escopo') {
@@ -493,6 +516,7 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
         const saudacaoNome = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ` : '';
         respostaFinal = `${avisoHorario}${saudacaoNome}${resultado.mensagem}`;
         fotoUrl = resultado.fotoUrl;
+        fotos = resultado.fotos;
       }
     }
   }
@@ -508,8 +532,25 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
 
   console.log(`[webhook-meta] ${canalId} | fase: ${conversaRow.fase}→${estado.fase} | resposta: ${respostaFinal.slice(0, 60)}`);
 
-  // ── Envio — foto primeiro (se houver), depois o texto (ver seção 6) ────
-  if (fotoUrl) {
+  // ── Envio — foto(s) primeiro (se houver), depois o texto (ver seção 6) ──
+  // Cada foto é amarrada ao código/nome real do produto (nunca por posição,
+  // nunca reaproveitada de outro item) — registra no log qual ID/SKU e URL
+  // foram efetivamente enviados, pra auditoria.
+  if (fotos && fotos.length > 0) {
+    let algumaFalhou = false;
+    for (const foto of fotos) {
+      console.log(`[webhook-meta] enviando foto produto codigo=${foto.codigo ?? '(sem codigo)'} nome="${foto.nome}" url=${foto.url}`);
+      const enviado = await enviarFotoInstagramOuFacebook(canal, canalId, foto.url);
+      if (!enviado) { algumaFalhou = true; break; }
+    }
+    if (!algumaFalhou) {
+      await enviarTextoInstagramOuFacebook(canal, canalId, respostaFinal);
+    } else {
+      const mensagemFalha = await iniciarHandoffHumano(conversaRow, canal, canalId, 'limite_tecnico', 'falha ao enviar mídia do produto');
+      await enviarTextoInstagramOuFacebook(canal, canalId, mensagemFalha);
+    }
+  } else if (fotoUrl) {
+    console.log(`[webhook-meta] enviando foto avulsa url=${fotoUrl}`);
     const enviado = await enviarFotoInstagramOuFacebook(canal, canalId, fotoUrl);
     if (enviado) {
       await enviarTextoInstagramOuFacebook(canal, canalId, respostaFinal);

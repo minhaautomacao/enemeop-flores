@@ -576,6 +576,7 @@ function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
     calcularFrete: async () => ({ ok: true, valor: 22.5 }),
     gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
     criarPedido: async () => ({ pedidoId: 'pedido_fake_001' }),
+    buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'],
     ...overrides,
   }
 }
@@ -644,7 +645,9 @@ test('dispatcher: fluxo feliz completo do inicio ate pedido_criado', async () =>
   assert.match(rFrete.mensagem, /Resumo do seu pedido/)
 
   // 6) confirmação -> cria pedido, gera pagamento
-  const rConfirma = await avancarFunil(estado, 'Sim, pode confirmar', 'pagamento', deps)
+  // intencao real que classificarIntencao produziria pra essa mensagem
+  // nessa fase (nao ha PALAVRAS_PAGAMENTO em "sim, pode confirmar")
+  const rConfirma = await avancarFunil(estado, 'Sim, pode confirmar', 'compra_produto', deps)
   estado = rConfirma.estado
   assert.equal(estado.fase, 'aguardando_pagamento')
   assert.equal(estado.dados.pedidoId, 'pedido_fake_001')
@@ -689,7 +692,8 @@ test('dispatcher: falha ao gerar pagamento -> transfere para humano', async () =
     dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' }, valorFrete: 22.5, valorTotal: 162.5 },
     perguntasFeitas: [],
   }
-  const r = await avancarFunil(estado, 'sim, confirmo', 'pagamento', deps)
+  // intencao real que classificarIntencao produziria (sem PALAVRAS_PAGAMENTO em "sim, confirmo")
+  const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
   assert.equal(r.estado.fase, 'transferido_humano')
   assert.match(r.mensagem, /nossa equipe/)
 })
@@ -705,4 +709,186 @@ test('dispatcher: pedido de foto funciona em qualquer fase com produto em jogo',
   assert.equal(r.fotoUrl, 'https://site/rosas.jpg')
   // Foto não muda a fase do funil.
   assert.equal(r.estado.fase, 'aguardando_endereco')
+})
+
+// ── Correção 2026-07-17 (sessão 3): roteamento de frete/pagamento, seleção
+// por ordinal/preço/número, foto amarrada ao produto certo ─────────────────
+// Reproduz o bug real da conversa 2543dfb8: cliente pediu foto do "Buquê de
+// 24 rosas" e recebeu a foto do primeiro item da lista; perguntou frete e
+// pagamento e recebeu a mesma mensagem de recomendação repetida.
+
+const CATALOGO_ROSAS: ProdutoCatalogo[] = [
+  { nome: 'Buquê de Rosas Vermelhas', preco: 140, codigo: '032', disponivel: true, fotoUrl: 'https://site/032.jpg' },
+  { nome: 'Buquê de 12 Rosas Vermelhas', preco: 280, codigo: '033', disponivel: true, fotoUrl: 'https://site/033.jpg' },
+  { nome: 'Buquê de 24 Rosas Vermelhas', preco: 560, codigo: '034', disponivel: true, fotoUrl: 'https://site/034.jpg' },
+]
+
+test('busca "girassol" retorna somente produtos relacionados injetados pelo catalogo real', async () => {
+  const deps = depsFake({
+    buscarCatalogo: async (params) => {
+      assert.equal(params.query, 'girassol')
+      return [{ nome: 'Arranjo Girassol em Vaso', preco: 120, codigo: '010', disponivel: true }]
+    },
+  })
+  const r = await avancarFunil({ fase: 'inicio', dados: {}, perguntasFeitas: [] }, 'Tem girassol?', 'disponibilidade', deps)
+  assert.equal(r.estado.dados.opcoesRecomendadas?.length, 1)
+  assert.equal(r.estado.dados.opcoesRecomendadas?.[0].codigo, '010')
+})
+
+test('busca "lírios" retorna somente produtos relacionados, nunca um produto sem relação com o termo', async () => {
+  const deps = depsFake({ buscarCatalogo: async (params) => (params.query === 'lirios' ? [{ nome: 'Buquê de Lírios Brancos', preco: 165, codigo: '021', disponivel: true }] : []) })
+  const r = await avancarFunil({ fase: 'inicio', dados: {}, perguntasFeitas: [] }, 'Tem lírios', 'disponibilidade', deps)
+  assert.equal(r.estado.dados.opcoesRecomendadas?.[0]?.codigo, '021')
+})
+
+test('foto enviada na recomendação pertence exatamente ao código do produto apresentado — duas opções nunca trocam fotos', async () => {
+  const deps = depsFake({ buscarCatalogo: async () => CATALOGO_ROSAS })
+  const estado: EstadoConversa = { fase: 'recomendacao', dados: { ocasiao: 'aniversario' }, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'quero ver as opções', 'recomendacao', deps)
+  assert.equal(r.fotos?.length, 3)
+  for (const p of CATALOGO_ROSAS) {
+    const fotoDoProduto: { codigo?: string; nome: string; url: string } | undefined = r.fotos?.find(f => f.codigo === p.codigo)
+    assert.equal(fotoDoProduto?.url, p.fotoUrl, `foto do produto ${p.codigo} deve ser exatamente a dele, nunca de outro`)
+  }
+})
+
+test('seleção "a segunda" preserva o produto correto por código, não por nome/posição ambígua', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = { fase: 'recomendacao', dados: { opcoesRecomendadas: CATALOGO_ROSAS }, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'quero a segunda', 'compra_produto', deps)
+  assert.equal(r.estado.dados.produto?.codigo, '033')
+  assert.equal(r.estado.fase, 'produto_selecionado')
+})
+
+test('seleção por número embutido no nome ("24 rosas") e por preço mencionado ("no valor de 560") acham o produto certo', async () => {
+  const deps = depsFake()
+  const estadoBase: EstadoConversa = { fase: 'recomendacao', dados: { opcoesRecomendadas: CATALOGO_ROSAS }, perguntasFeitas: [] }
+
+  const rNumero = await avancarFunil(estadoBase, 'Quero a foto de 24 rosa', 'foto_produto', deps)
+  assert.equal(rNumero.fotoUrl, 'https://site/034.jpg', 'deve identificar o produto de 24 rosas pelo número, nao mandar a primeira foto da lista')
+
+  const rPreco = await avancarFunil(estadoBase, 'No valor de 560,00', 'compra_produto', deps)
+  assert.equal(rPreco.estado.dados.produto?.codigo, '034')
+})
+
+test('pergunta de frete durante a recomendação (produto já escolhido) interrompe as sugestões e pede só o CEP', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { produto: { nome: 'Buquê de 24 Rosas Vermelhas', preco: 560, codigo: '034' }, opcoesRecomendadas: CATALOGO_ROSAS },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Qual o valor do frete', 'frete', deps)
+  assert.doesNotMatch(r.mensagem, /Buquê de Rosas Vermelhas.*R\$ 140/i, 'nao deve voltar a mostrar as sugestoes')
+  assert.match(r.mensagem, /CEP/i)
+  assert.equal(r.estado.dados.produto?.codigo, '034', 'produto escolhido deve ser preservado')
+})
+
+test('pergunta de frete com CEP já conhecido executa a cotação real imediatamente e nunca estima', async () => {
+  const deps = depsFake({ calcularFrete: async (cep) => { assert.equal(cep, '01040010'); return { ok: true, valor: 40.13 } } })
+  const estado: EstadoConversa = {
+    fase: 'produto_selecionado',
+    dados: { produto: { nome: 'Buquê de 24 Rosas Vermelhas', preco: 560, codigo: '034', quantidade: 1 }, bairroOuCep: '01040010' },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Qual o valor do frete', 'frete', deps)
+  assert.equal(r.estado.fase, 'aguardando_confirmacao')
+  assert.equal(r.estado.dados.valorFrete, 40.13)
+  assert.equal(r.estado.dados.valorTotal, 560 + 40.13, 'total deve usar o retorno real da cotação')
+  assert.match(r.mensagem, /40,13/)
+})
+
+test('pergunta de pagamento em qualquer fase recebe resposta real baseada na configuração, nunca inventa formas', async () => {
+  const deps = depsFake({ buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'] })
+  const estado: EstadoConversa = { fase: 'produto_selecionado', dados: { produto: { nome: 'Buquê de Rosas', preco: 140 } }, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'Quais formas de pagamento vocês aceitam?', 'pagamento', deps)
+  assert.match(r.mensagem, /Pix/)
+  assert.match(r.mensagem, /cartão de crédito/)
+  assert.equal(r.estado.dados.produto?.nome, 'Buquê de Rosas', 'pergunta incidental nao apaga o produto ja escolhido')
+})
+
+test('pergunta de pagamento sem integração configurada admite a limitação honestamente, sem inventar Pix/cartão/dinheiro', async () => {
+  const deps = depsFake({ buscarFormasPagamento: async () => [] })
+  const r = await avancarFunil({ fase: 'inicio', dados: {}, perguntasFeitas: [] }, 'Quais formas de pagamento?', 'pagamento', deps)
+  assert.doesNotMatch(r.mensagem, /pix|cart[ãa]o|dinheiro/i)
+  assert.match(r.mensagem, /não consigo confirmar|validar.*equipe/i)
+})
+
+test('regressão completa 2026-07-17: qualificação -> 2 opções com fotos corretas -> "a segunda" -> frete -> pagamento -> confirmação -> pagamento gerado, sem nunca voltar às sugestões', async () => {
+  const CATALOGO_2: ProdutoCatalogo[] = [
+    { nome: 'Arranjo Alegre Colorido', preco: 130, codigo: '050', disponivel: true, fotoUrl: 'https://site/050.jpg' },
+    { nome: 'Arranjo Elegante Branco', preco: 190, codigo: '051', disponivel: true, fotoUrl: 'https://site/051.jpg' },
+  ]
+  const deps = depsFake({
+    buscarCatalogo: async () => CATALOGO_2,
+    calcularFrete: async () => ({ ok: true, valor: 18 }),
+    buscarFormasPagamento: async () => ['Pix', 'cartão de crédito'],
+    gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
+    criarPedido: async () => ({ pedidoId: 'pedido_regressao_001' }),
+  })
+  let estado = estadoInicial()
+
+  // 1) "Quero flores para aniversário."
+  let r = await avancarFunil(estado, 'Quero flores para aniversário', classificarIntencao('Quero flores para aniversário', estado.fase), deps)
+  estado = r.estado
+  assert.equal(estado.dados.ocasiao, 'aniversario')
+
+  // 2-3) Flora pergunta preferência/orçamento; cliente informa os dados restantes.
+  let guard = 0
+  while ((estado.fase === 'qualificacao' || estado.fase === 'inicio') && guard < 6) {
+    r = await avancarFunil(estado, 'tanto faz, pode ser qualquer uma, uns R$150', classificarIntencao('tanto faz', estado.fase), deps)
+    estado = r.estado
+    guard++
+  }
+  assert.equal(estado.fase, 'recomendacao')
+
+  // 4) Flora apresenta duas opções reais, cada uma com sua foto correta.
+  assert.equal(r.fotos?.length, 2)
+  assert.equal(r.fotos?.find(f => f.codigo === '050')?.url, 'https://site/050.jpg')
+  assert.equal(r.fotos?.find(f => f.codigo === '051')?.url, 'https://site/051.jpg')
+
+  // 5) Cliente escolhe "a segunda".
+  r = await avancarFunil(estado, 'quero a segunda', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.dados.produto?.codigo, '051')
+  assert.equal(estado.fase, 'produto_selecionado')
+
+  // Confirma quantidade/data pra poder cotar frete de verdade.
+  r = await avancarFunil(estado, '1 unidade, entrega amanhã', 'compra_produto', deps)
+  estado = r.estado
+
+  // 6) "Qual o valor do frete?"
+  r = await avancarFunil(estado, 'Qual o valor do frete?', 'frete', deps)
+  estado = r.estado
+  // 7) Sem CEP ainda -> Flora pede só o CEP, sem apagar o produto.
+  assert.match(r.mensagem, /CEP/i)
+  assert.equal(estado.dados.produto?.codigo, '051')
+
+  // Cliente informa o CEP (etapaEndereco registra o CEP e passa pra
+  // calculando_frete; a cotação real acontece na virada seguinte, mesmo
+  // comportamento já coberto por "dispatcher: fluxo feliz completo").
+  r = await avancarFunil(estado, 'CEP 01040-010', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'calculando_frete')
+  r = await avancarFunil(estado, '', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'aguardando_confirmacao')
+  assert.equal(estado.dados.valorFrete, 18)
+
+  // 8) "Quais formas de pagamento?"
+  r = await avancarFunil(estado, 'Quais formas de pagamento vocês têm?', 'pagamento', deps)
+  // 9) Flora responde com as opções reais, sem voltar às sugestões nem gerar link ainda.
+  assert.match(r.mensagem, /Pix/)
+  assert.equal(r.estado.dados.pedidoId, undefined, 'pagamento nao pode ser gerado antes do resumo confirmado')
+  estado = r.estado
+
+  // 10) Cliente confirma.
+  r = await avancarFunil(estado, 'Sim, confirmo', 'compra_produto', deps)
+  estado = r.estado
+
+  // 11) Flora apresenta resumo, gera pagamento e avança — sem voltar às sugestões.
+  assert.equal(estado.fase, 'aguardando_pagamento')
+  assert.equal(estado.dados.pedidoId, 'pedido_regressao_001')
+  assert.match(estado.dados.linkPagamento!, /pagamento\.exemplo\/pedido_regressao_001/)
+  assert.doesNotMatch(r.mensagem, /Arranjo Alegre Colorido.*R\$ 130/i)
 })

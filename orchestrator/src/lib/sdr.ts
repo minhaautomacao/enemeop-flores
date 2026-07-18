@@ -170,6 +170,14 @@ async function buscarCatalogoParaFunil(params: {
 // ── Dependências reais do funil (frete, pagamento, pedido) — ver seção 3 ───
 // dos adaptadores em lib/frete.ts, lib/pagamento.ts e lib/pedido.ts.
 
+/** Formas de pagamento realmente habilitadas agora — checa a mesma
+ * configuração que lib/cielo.ts usa de verdade pra gerar o link (nunca
+ * inventa Pix/cartão/dinheiro sem uma integração real configurada). */
+async function buscarFormasPagamentoReal(): Promise<string[]> {
+  const configurado = !!process.env.CIELO_CLIENT_ID && !!process.env.CIELO_CLIENT_SECRET
+  return configurado ? ['Pix', 'cartão de crédito', 'cartão de débito'] : []
+}
+
 function construirDependenciasFunil(opts: {
   estado: EstadoConversa
   cliente: { nome: string; telefone?: string; canal: CanalAtendimento; canalId?: string }
@@ -180,6 +188,7 @@ function construirDependenciasFunil(opts: {
     calcularFrete: (cep: string) => calcularFreteReal(cep, valorProduto),
     gerarPagamento: gerarPagamentoReal,
     criarPedido: (dados) => criarPedidoProvisorio(dados, opts.cliente),
+    buscarFormasPagamento: buscarFormasPagamentoReal,
   }
 }
 

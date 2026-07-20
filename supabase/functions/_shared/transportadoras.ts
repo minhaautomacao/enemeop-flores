@@ -13,8 +13,9 @@
 import { buscarTodasCredenciais } from './credentials.ts';
 import { calcularFreteMelhorEnvio } from './melhor-envio.ts';
 import { calcularFreteLalamove } from './lalamove.ts';
+import { MARKUP_FRETE_REAIS, selecionarMelhor, type OpcaoFrete, type OpcaoFreteComMarkup } from './frete-selecao.ts';
 
-export const MARKUP_FRETE_REAIS = 15;
+export { MARKUP_FRETE_REAIS, type OpcaoFrete, type OpcaoFreteComMarkup };
 
 export interface DadosFrete {
   cep_origem: string;
@@ -24,17 +25,6 @@ export interface DadosFrete {
   largura_cm: number;
   altura_cm: number;
   comprimento_cm: number;
-}
-
-export interface OpcaoFrete {
-  transportadora: string;
-  servico?: string;
-  preco: number;
-  prazo_dias: number;
-}
-
-export interface OpcaoFreteComMarkup extends OpcaoFrete {
-  preco_cliente: number; // preco + MARKUP_FRETE_REAIS
 }
 
 export interface ResultadoFrete {
@@ -51,28 +41,6 @@ export interface OpcoesExtras {
   lng_destino?: string;
   endereco_origem?: string;
   endereco_destino?: string;
-}
-
-/**
- * Seleciona a melhor opção de frete:
- * - Prioridade 1: entrega no mesmo dia (prazo_dias = 0), menor preço
- * - Prioridade 2: qualquer prazo, menor preço
- * Adiciona markup de R$15 no preço final ao cliente.
- */
-function selecionarMelhor(opcoes: OpcaoFrete[]): OpcaoFreteComMarkup | null {
-  if (opcoes.length === 0) return null;
-
-  // Prefere entrega no mesmo dia (prazo = 0)
-  const mesmodia = opcoes.filter((o) => o.prazo_dias === 0);
-  const candidatos = mesmodia.length > 0 ? mesmodia : opcoes;
-
-  // Ordenar: menor preço, desempate por maior rapidez (menor prazo)
-  const melhor = candidatos.sort((a, b) => {
-    if (a.preco !== b.preco) return a.preco - b.preco;
-    return a.prazo_dias - b.prazo_dias;
-  })[0];
-
-  return { ...melhor, preco_cliente: melhor.preco + MARKUP_FRETE_REAIS };
 }
 
 /**

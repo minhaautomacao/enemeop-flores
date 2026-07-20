@@ -34,6 +34,8 @@ export async function calcularFreteMelhorEnvio(
         quantity: 1,
       }],
     }),
+    // Nunca trava silenciosamente esperando o Melhor Envio.
+    signal: AbortSignal.timeout(8_000),
   });
 
   if (!resp.ok) throw new Error(`Melhor Envio HTTP ${resp.status}`);

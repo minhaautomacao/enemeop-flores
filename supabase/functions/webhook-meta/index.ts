@@ -156,19 +156,29 @@ async function buscarCatalogoReal(params: { query: string; occasion?: string; bu
 
 // ── Frete real (agente-logistica — mesma Edge Function do WhatsApp) ──────
 
+// Timeout evita travamento silencioso: sem isso, uma chamada pendurada em
+// agente-logistica (geocodificação/Lalamove fora do ar) deixava o cliente
+// esperando indefinidamente, sem nunca cair no tratamento de falha.
+const TIMEOUT_FRETE_MS = 12_000;
+
 async function calcularFreteReal(cep: string): Promise<{ ok: true; valor: number } | { ok: false }> {
   try {
     const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_KEY}` },
       body: JSON.stringify({ endereco: { cep }, workspace_id: WORKSPACE_ID }),
+      signal: AbortSignal.timeout(TIMEOUT_FRETE_MS),
     });
-    if (!res.ok) return { ok: false };
+    if (!res.ok) {
+      console.error(`[webhook-meta] falha ao calcular frete real: status=${res.status} cep=${cep}`);
+      return { ok: false };
+    }
     const data = await res.json() as { disponivel?: boolean; preco_cliente?: number };
     if (!data.disponivel || data.preco_cliente == null) return { ok: false };
     return { ok: true, valor: data.preco_cliente };
   } catch (e) {
-    console.error('[webhook-meta] falha ao calcular frete real:', e);
+    const motivo = e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : String(e);
+    console.error(`[webhook-meta] falha ao calcular frete real: ${motivo} cep=${cep}`);
     return { ok: false };
   }
 }

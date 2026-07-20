@@ -10,6 +10,8 @@ import { callClaude } from '../_shared/anthropic.ts';
 import { getSupabaseAdmin } from '../_shared/supabase.ts';
 import { logEvento } from '../_shared/logger.ts';
 import type { OrquestradorPayload } from '../_shared/types.ts';
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
+import { maiorIntencao, montarAtualizacaoLead } from '../_shared/leads-idempotencia.ts';
 
 const SUPABASE_URL   = Deno.env.get('SUPABASE_URL') ?? '';
 const SERVICE_KEY    = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -51,6 +53,30 @@ async function dispararLeadQualificado(params: {
   } catch (e) {
     console.error(`[captacao-leads] erro ao disparar lead-qualificado: ${e}`);
   }
+}
+
+// Identidade idempotente do lead — nunca cria um novo registro para o
+// mesmo workspace+canal+canal_id (correção 2026-07-20: cada mensagem do
+// mesmo cliente virava um lead novo, pois nenhum chamador passa lead_id;
+// 13 leads foram criados numa única conversa de teste). workspace_id não é
+// coluna própria da tabela — vive em metadata (jsonb), daí o filtro
+// "metadata->>workspace_id".
+async function encontrarLeadExistente(
+  sb: SupabaseClient,
+  workspaceId: string,
+  canal: string,
+  canalId: string,
+): Promise<string | null> {
+  const { data } = await sb
+    .from('leads')
+    .select('id')
+    .eq('canal', canal)
+    .eq('canal_id', canalId)
+    .eq('metadata->>workspace_id', workspaceId)
+    .order('criado_em', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data as { id: string } | null)?.id ?? null;
 }
 
 const SYSTEM_PROMPT = `Você é o agente de Captação de Leads da floricultura Enemeop Flores.
@@ -105,7 +131,10 @@ Deno.serve(async (req: Request) => {
     const intencao = intencoesValidas.includes(r.intencao) ? r.intencao : 'desconhecida';
 
     const statusValidos = ['novo', 'em_atendimento', 'proposta_enviada', 'aguardando_pagamento', 'convertido', 'perdido', 'inativo'];
-    const status = statusValidos.includes(r.status) ? r.status : 'novo';
+    // null quando a IA não deu um status confiável — nunca regride um lead
+    // existente de volta pra 'novo' só porque uma mensagem seguinte falhou
+    // na classificação (ver uso abaixo: só sobrescreve em UPDATE quando presente).
+    const statusExtraido: string | null = statusValidos.includes(r.status) ? r.status : null;
 
     // Telefone: prioridade ao extraído pela IA, fallback no canal_id (WhatsApp) ou payload
     const telefone = r.telefone
@@ -113,24 +142,25 @@ Deno.serve(async (req: Request) => {
       ?? (payload?.telefone as string | undefined)
       ?? null;
 
+    const canal = (payload?.canal as string) ?? 'outro';
+    const canalId = payload?.canal_id as string | undefined;
+
     let leadId = payload?.lead_id as string | undefined;
+    if (!leadId && canalId) {
+      leadId = (await encontrarLeadExistente(sb, workspace_id ?? '', canal, canalId)) ?? undefined;
+    }
 
     if (leadId) {
+      const { data: leadAtual } = await sb.from('leads').select('intencao').eq('id', leadId).single();
+      const intencaoFinal = maiorIntencao((leadAtual as { intencao?: string } | null)?.intencao, intencao);
+
       await sb.from('leads').update({
-        intencao,
-        status,
-        notas: r.notas ?? null,
-        ...(r.nome      && { nome: r.nome }),
-        ...(telefone    && { telefone }),
-        ...(r.email     && { email: r.email }),
-        ...(r.endereco  && { endereco: r.endereco }),
-        ...(r.bairro    && { bairro: r.bairro }),
-        ...(r.cidade    && { cidade: r.cidade }),
-        ...(r.cep       && { cep: r.cep }),
+        ...montarAtualizacaoLead({ notas: r.notas, nome: r.nome, telefone, email: r.email, endereco: r.endereco, bairro: r.bairro, cidade: r.cidade, cep: r.cep, status: statusExtraido }, intencaoFinal),
         atualizado_em: new Date().toISOString(),
       }).eq('id', leadId);
+
+      console.log(`[captacao-leads] lead_reutilizado workspace=${workspace_id ?? '(nenhum)'} canal=${canal}`);
     } else {
-      const canal = (payload?.canal as string) ?? 'outro';
       const { data: novoLead } = await sb.from('leads').insert({
         canal,
         nome:             r.nome ?? (payload?.nome as string | undefined) ?? null,
@@ -141,16 +171,17 @@ Deno.serve(async (req: Request) => {
         cidade:           r.cidade ?? null,
         cep:              r.cep ?? null,
         mensagem_inicial: (payload?.mensagem as string | undefined) ?? null,
-        canal_id:         (payload?.canal_id as string | undefined) ?? null,
+        canal_id:         canalId ?? null,
         utm_source:       (payload?.utm_source as string | undefined) ?? canal,
         historico_canal:  (payload?.historico_canal as string | undefined) ?? null,
         notas:            r.notas ?? null,
         intencao,
-        status,
+        status: statusExtraido ?? 'novo',
         metadata:         { task_id, workspace_id, payload_original: payload },
       }).select('id').single();
 
       leadId = novoLead?.id;
+      console.log(`[captacao-leads] lead_criado workspace=${workspace_id ?? '(nenhum)'} canal=${canal}`);
     }
 
     // Dispara lead-qualificado → orquestrador → whatsapp-sdr (apenas para canais com telefone)

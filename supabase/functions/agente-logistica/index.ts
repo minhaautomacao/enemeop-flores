@@ -59,6 +59,7 @@ async function geocodificarEndereco(
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': 'EnemeOpFlores/1.0 (minhaautomacao10@gmail.com)' },
+        signal: AbortSignal.timeout(8_000),
       });
       const data = await res.json() as Array<{ lat: string; lon: string }>;
       if (data?.[0]?.lat) {

@@ -58,6 +58,9 @@ async function cotarServico(
       'Market': 'BR',
     },
     body: bodyStr,
+    // Nunca trava silenciosamente esperando a Lalamove — sem timeout,
+    // uma chamada pendurada deixava o cliente esperando indefinidamente.
+    signal: AbortSignal.timeout(8_000),
   });
 
   if (!resp.ok) {

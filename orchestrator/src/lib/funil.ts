@@ -24,6 +24,7 @@ export type Fase =
   | 'produto_selecionado'
   | 'aguardando_endereco'
   | 'calculando_frete'
+  | 'endereco_completo'
   | 'aguardando_confirmacao'
   | 'aguardando_pagamento'
   | 'pagamento_confirmado'
@@ -77,6 +78,8 @@ export interface EnderecoEntrega {
 
 export interface DadosPedido {
   ocasiao?: string
+  /** Tipo de produto citado pelo cliente (ramalhete, buquê, arranjo, orquídea, presente...) — satisfaz a qualificação tanto quanto a ocasião (ver Parte B.4: "ocasião OU tipo de produto"). */
+  tipoProduto?: string
   destinatario?: string
   orcamento?: number
   dataEntrega?: string
@@ -240,7 +243,7 @@ function contemSinalComercial(mensagem: string): boolean {
 
 const FASES_COMPRA_EM_ANDAMENTO: Fase[] = [
   'produto_selecionado', 'aguardando_endereco', 'calculando_frete',
-  'aguardando_confirmacao', 'aguardando_pagamento',
+  'endereco_completo', 'aguardando_confirmacao', 'aguardando_pagamento',
 ]
 
 // Saudação "pura": a mensagem inteira (sem outro conteúdo) é só um
@@ -368,12 +371,28 @@ export function montarMensagemAguardandoPagamento(dados: DadosPedido): string {
 
 // ── Etapa 1 — Qualificação (uma pergunta por vez, sem repetir) ───────────
 
+// Orçamento nunca é perguntado (removido do fluxo automático — a Flora
+// mostra o catálogo real com preços reais em vez de filtrar por faixa).
+// Data de entrega e CEP não são coletados aqui: são perguntados só depois
+// da escolha do produto (ver etapaConfirmacaoDetalhesProduto/etapaEndereco),
+// para nunca pedir CEP antes do cliente saber o que vai comprar. Destinatário
+// (nome de quem recebe) também não é pré-qualificação — é coletado junto do
+// endereço completo, depois da cotação real (ver CAMPOS_ENDERECO_COMPLETO).
+// Único gate antes de mostrar categorias/produtos: entender ocasião OU tipo
+// de produto (ver Parte B.4) — qualquer um dos dois já é suficiente.
 const CAMPOS_QUALIFICACAO: { campo: keyof DadosPedido; pergunta: string }[] = [
   { campo: 'ocasiao', pergunta: 'Pra qual ocasião é o presente?' },
-  { campo: 'destinatario', pergunta: 'É pra quem? (esposa, mãe, amigo...)' },
-  { campo: 'orcamento', pergunta: 'Você tem uma faixa de orçamento em mente?' },
-  { campo: 'dataEntrega', pergunta: 'Pra quando você precisa da entrega?' },
-  { campo: 'bairroOuCep', pergunta: 'Qual o bairro ou CEP de entrega?' },
+]
+
+const TIPOS_PRODUTO: { termo: string; regex: RegExp }[] = [
+  { termo: 'ramalhete', regex: /ramalhete/ },
+  { termo: 'buquê', regex: /buqu[eê]/ },
+  { termo: 'arranjo', regex: /arranjo/ },
+  { termo: 'orquídea', regex: /orqu[ií]de/ },
+  { termo: 'presente', regex: /presente/ },
+  { termo: 'cesta', regex: /cesta/ },
+  { termo: 'coroa', regex: /coroa/ },
+  { termo: 'planta', regex: /planta/ },
 ]
 
 /** Extrai dados de qualificação da mensagem, sem sobrescrever o que já foi coletado. */
@@ -388,6 +407,11 @@ export function extrairDadosQualificacao(mensagem: string, dadosAtuais: DadosPed
     else if (/anivers|parabéns|parabens/.test(lower)) dados.ocasiao = 'aniversario'
     else if (/luto|faleciment|condolênc|condolenc|pêsames|pesames/.test(lower)) dados.ocasiao = 'luto'
     else if (/corporativ|escritório|escritorio/.test(lower)) dados.ocasiao = 'corporativo'
+  }
+
+  if (!dados.tipoProduto) {
+    const encontrado = TIPOS_PRODUTO.find(t => t.regex.test(lower))
+    if (encontrado) dados.tipoProduto = encontrado.termo
   }
 
   if (dados.orcamento == null) {
@@ -415,10 +439,11 @@ export function extrairDadosQualificacao(mensagem: string, dadosAtuais: DadosPed
   return dados
 }
 
-/** Retorna a próxima pergunta de qualificação a fazer, ou null se já há dados suficientes. Nunca repete uma pergunta já feita. */
+/** Retorna a próxima pergunta de qualificação a fazer, ou null se já há dados suficientes (ocasião OU tipo de produto). Nunca repete uma pergunta já feita. */
 export function proximaPerguntaQualificacao(dados: DadosPedido, perguntasFeitas: string[]): { campo: string; pergunta: string } | null {
   for (const { campo, pergunta } of CAMPOS_QUALIFICACAO) {
-    if (dados[campo] == null && !perguntasFeitas.includes(campo)) {
+    const satisfeito = campo === 'ocasiao' ? (dados.ocasiao != null || dados.tipoProduto != null) : dados[campo] != null
+    if (!satisfeito && !perguntasFeitas.includes(campo)) {
       return { campo, pergunta }
     }
   }
@@ -460,17 +485,18 @@ function formatarPreco(preco?: number): string {
   return preco != null ? `R$ ${preco.toFixed(2).replace('.', ',')}` : 'consultar'
 }
 
+// Catálogo primeiro em texto — nunca despeja link/foto automaticamente
+// (ver Parte C/E da correção de 2026-07-20): apenas código, nome e preço
+// reais, compactos. Foto só é enviada sob pedido explícito do cliente
+// (ver responderPedidoDeFoto / bloco foto_produto em avancarFunil).
 export function montarMensagemRecomendacao(rec: Recomendacao, ocasiao?: string): string {
   if (!rec.principal) {
     return 'No momento não encontrei opções disponíveis para o que você pediu. Me conta melhor o que você tem em mente (cor, estilo, ocasião) que eu vejo outras alternativas.'
   }
-  const p = rec.principal
-  let msg = `Para ${ocasiao ?? 'essa ocasião'}, recomendo o ${p.nome}${p.descricao ? ` — ${p.descricao}` : ''}. Está disponível por ${formatarPreco(p.preco)}.${p.url ? ` Link: ${p.url}` : ''}`
-  if (rec.alternativas.length > 0) {
-    const alts = rec.alternativas.map(a => `${a.nome} (${formatarPreco(a.preco)})`).join(', ')
-    msg += ` Também tenho estas opções: ${alts}.`
-  }
-  return msg
+  const opcoes = [rec.principal, ...rec.alternativas]
+  const linhas = opcoes.map(p => `${p.codigo ? `${p.codigo} — ` : ''}${p.nome} — ${formatarPreco(p.preco)}`)
+  const abertura = ocasiao ? `Para ${ocasiao}, encontrei estas opções:` : 'Encontrei estas opções:'
+  return `${abertura}\n${linhas.join('\n')}\n\nQual te interessa? Pode me dizer o nome, o código, ou pedir a foto de alguma delas.`
 }
 
 // ── Etapa 3 — Envio de foto real ──────────────────────────────────────────
@@ -528,15 +554,16 @@ export async function calcularFreteEtapa(cep: string, calcular: CalculadorFrete)
 
 export function montarResumoPedido(dados: DadosPedido): string {
   const p = dados.produto
+  const subtotal = p?.preco != null ? p.preco * (p.quantidade ?? 1) : null
   const linhas = [
     'Resumo do seu pedido:',
-    p ? `- Produto: ${p.nome}${p.quantidade ? ` x${p.quantidade}` : ''}${p.tamanho ? ` (${p.tamanho})` : ''}${p.cor ? ` — cor ${p.cor}` : ''}` : null,
-    p?.preco != null ? `- Valor do produto: ${formatarPreco(p.preco)}` : null,
-    dados.valorFrete != null ? `- Frete: ${formatarPreco(dados.valorFrete)}` : null,
-    dados.valorTotal != null ? `- Total: ${formatarPreco(dados.valorTotal)}` : null,
-    dados.endereco ? `- Entrega: ${[dados.endereco.rua, dados.endereco.numero, dados.endereco.bairro, dados.endereco.cidade].filter(Boolean).join(', ')}` : null,
+    p ? `- Produto: ${p.codigo ? `${p.codigo} — ` : ''}${p.nome}${p.quantidade ? ` x${p.quantidade}` : ''}${p.tamanho ? ` (${p.tamanho})` : ''}${p.cor ? ` — cor ${p.cor}` : ''}` : null,
     p?.dataEntrega ? `- Data: ${p.dataEntrega}` : null,
     dados.endereco?.nomeDestinatario ? `- Destinatário: ${dados.endereco.nomeDestinatario}` : null,
+    dados.endereco ? `- Entrega: ${[dados.endereco.rua, dados.endereco.numero, dados.endereco.bairro, dados.endereco.cidade].filter(Boolean).join(', ')}` : null,
+    subtotal != null ? `- Subtotal: ${formatarPreco(subtotal)}` : null,
+    dados.valorFrete != null ? `- Frete: ${formatarPreco(dados.valorFrete)}` : null,
+    dados.valorTotal != null ? `- Total: ${formatarPreco(dados.valorTotal)}` : null,
     p?.mensagemCartao ? `- Mensagem do cartão: "${p.mensagemCartao}"` : null,
     '',
     'Posso confirmar e gerar o pagamento?',
@@ -659,7 +686,12 @@ export interface ResultadoEtapa {
   fotos?: { codigo?: string; nome: string; url: string }[]
 }
 
-const PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO = ['primeira opção', 'primeira opcao', 'a primeira', 'o primeiro', 'esse mesmo', 'esse aí', 'esse ai', 'esse mesmo aí', 'fico com esse', 'quero esse', 'vou querer esse']
+// "quero ele"/"quero ela" incluídos aqui (regressão real observada
+// 2026-07-20): referência inequívoca à recomendação principal quando ela
+// está claramente destacada — nunca por posição quando há dúvida real
+// entre várias opções (ver detectarProdutoEscolhido: código/nome/preço
+// sempre têm prioridade sobre esta lista).
+const PALAVRAS_ESCOLHA_PRIMEIRA_OPCAO = ['primeira opção', 'primeira opcao', 'a primeira', 'o primeiro', 'esse mesmo', 'esse aí', 'esse ai', 'esse mesmo aí', 'fico com esse', 'quero esse', 'vou querer esse', 'quero ele', 'quero ela', 'vou querer ele', 'vou querer ela']
 const PALAVRAS_ESCOLHA_SEGUNDA_OPCAO = ['segunda opção', 'segunda opcao', 'a segunda', 'o segundo']
 const PALAVRAS_ESCOLHA_TERCEIRA_OPCAO = ['terceira opção', 'terceira opcao', 'a terceira', 'o terceiro']
 const PALAVRAS_CONFIRMACAO = ['sim', 'confirmo', 'confirmado', 'pode gerar', 'isso mesmo', 'pode confirmar', 'tá certo', 'ta certo', 'correto', 'perfeito']
@@ -693,8 +725,12 @@ function detectarProdutoEscolhido(mensagem: string, opcoes?: ProdutoCatalogo[]):
   const lower = mensagem.toLowerCase()
   const normalizado = normalizar(mensagem)
 
-  const porNome = opcoes.find(o => lower.includes(o.nome.toLowerCase()))
-  if (porNome) return { produto: porNome }
+  // Nome inequívoco seleciona direto; nome que bate em mais de uma opção
+  // (nunca escolhe pelo primeiro que achar) pede desambiguação — mesma
+  // regra do código comercial duplicado, abaixo.
+  const porNome = opcoes.filter(o => lower.includes(o.nome.toLowerCase()))
+  if (porNome.length === 1) return { produto: porNome[0] }
+  if (porNome.length > 1) return { produto: null, opcoesConflitantes: porNome }
 
   // Código exato como token isolado da mensagem (ex.: "quero o código 002",
   // "manda o M08") — nunca por substring solta, pra não confundir "0" de
@@ -729,9 +765,12 @@ function detectarProdutoEscolhido(mensagem: string, opcoes?: ProdutoCatalogo[]):
 }
 
 /** Mensagem quando o código informado é usado por mais de uma opção apresentada — nunca escolhe sozinho, sempre pede um sinal inequívoco. */
+// Usada tanto para código comercial duplicado quanto para nome que bate em
+// mais de uma opção apresentada — nunca escolhe sozinho em nenhum dos dois
+// casos, sempre pede um sinal inequívoco.
 function montarMensagemCodigoAmbiguo(opcoesConflitantes: ProdutoCatalogo[]): string {
   const lista = opcoesConflitantes.map(o => `${o.nome} (${formatarPreco(o.preco)})`).join(' | ')
-  return `Encontrei mais de uma opção com esse código: ${lista}. Pode me dizer o nome, o preço ou a posição (primeira, segunda...) de qual delas você quer?`
+  return `Encontrei mais de uma opção que combina com o que você disse: ${lista}. Pode me dizer o nome completo, o código, o preço ou a posição (primeira, segunda...) de qual delas você quer?`
 }
 
 function pareceConfirmacao(mensagem: string): boolean {
@@ -801,13 +840,11 @@ async function iniciarRecomendacaoPorCategoria(
       produtosApresentadosCodigos: [...new Set([...jaMostrados, ...novosCodigos])],
     },
   }
-  const fotos = opcoes
-    .filter((p): p is ProdutoCatalogo & { fotoUrl: string } => !!p.fotoUrl)
-    .map(p => ({ codigo: p.codigo, nome: p.nome, url: p.fotoUrl }))
+  // Catálogo primeiro em texto — sem foto/link automático (ver Parte C/E).
+  const linhas = opcoes.map(p => `${p.codigo ? `${p.codigo} — ` : ''}${p.nome} — ${formatarPreco(p.preco)}`)
   return {
     estado: novoEstado,
-    mensagem: `Na categoria ${categoria.nome}, encontrei:\n${montarMensagemRecomendacao(rec)}`,
-    fotos: fotos.length > 0 ? fotos : undefined,
+    mensagem: `Na categoria ${categoria.nome}, encontrei:\n${linhas.join('\n')}\n\nQual te interessa? Pode me dizer o nome, o código, ou pedir a foto de alguma delas.`,
   }
 }
 
@@ -897,17 +934,14 @@ async function apresentarPaginaCatalogoCompleto(
       produtosApresentadosCodigos: [...jaMostrados, ...novosCodigos],
     },
   }
-  const lista = pagina.map(p => `- ${p.nome} (${formatarPreco(p.preco)})`).join('\n')
+  // Catálogo primeiro em texto — sem foto/link automático (ver Parte C/E).
+  const lista = pagina.map(p => `${p.codigo ? `${p.codigo} — ` : ''}${p.nome} — ${formatarPreco(p.preco)}`).join('\n')
   const pergunta = temMaisNestaCategoria
     ? `Quer ver mais opções de ${categoria.nome}, ou já posso passar pra outra categoria?`
     : 'Quer ver a próxima categoria?'
-  const fotos = pagina
-    .filter((p): p is ProdutoCatalogo & { fotoUrl: string } => !!p.fotoUrl)
-    .map(p => ({ codigo: p.codigo, nome: p.nome, url: p.fotoUrl }))
   return {
     estado: novoEstado,
     mensagem: `${categoria.nome}:\n${lista}\n\n${pergunta}`,
-    fotos: fotos.length > 0 ? fotos : undefined,
   }
 }
 
@@ -922,7 +956,7 @@ async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: st
       fase: 'produto_selecionado',
       dados: { ...estado.dados, produto: { nome: escolhido.nome, preco: escolhido.preco, codigo: escolhido.codigo, idExterno: escolhido.idExterno, url: escolhido.url, origem: escolhido.origem, fotoUrl: escolhido.fotoUrl } },
     }
-    return { estado: novoEstado, mensagem: `Ótima escolha! O ${escolhido.nome} fica por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer, e pra quando precisa da entrega?` }
+    return { estado: novoEstado, mensagem: `Você escolheu ${escolhido.codigo ? `${escolhido.codigo} — ` : ''}${escolhido.nome}, por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer?` }
   }
   if (pareceConfirmacao(mensagemCliente)) {
     const categorias = await deps.buscarCategorias()
@@ -947,7 +981,7 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
       fase: 'produto_selecionado',
       dados: { ...estado.dados, produto: { nome: escolhido.nome, preco: escolhido.preco, codigo: escolhido.codigo, idExterno: escolhido.idExterno, url: escolhido.url, origem: escolhido.origem, fotoUrl: escolhido.fotoUrl } },
     }
-    return { estado: novoEstado, mensagem: `Ótima escolha! O ${escolhido.nome} fica por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer, e pra quando precisa da entrega?` }
+    return { estado: novoEstado, mensagem: `Você escolheu ${escolhido.codigo ? `${escolhido.codigo} — ` : ''}${escolhido.nome}, por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer?` }
   }
 
   // Opções já foram apresentadas nesta conversa e o cliente ainda não
@@ -962,7 +996,7 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
   }
 
   const produtos = await deps.buscarCatalogo({
-    query: [estado.dados.ocasiao, estado.dados.corPreferida].filter(Boolean).join(' ') || 'flores',
+    query: [estado.dados.tipoProduto, estado.dados.ocasiao, estado.dados.corPreferida].filter(Boolean).join(' ') || 'flores',
     occasion: estado.dados.ocasiao,
     budget: estado.dados.orcamento,
     color: estado.dados.corPreferida,
@@ -977,14 +1011,9 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
       recomendacaoApresentada: !!rec.principal,
     },
   }
-  // Uma foto por opção apresentada, amarrada ao código real do produto —
-  // nunca reaproveita foto de outro item, nunca envia foto aproximada
-  // quando o produto não tem uma.
-  const todasAsOpcoes = rec.principal ? [rec.principal, ...rec.alternativas] : []
-  const fotos = todasAsOpcoes
-    .filter((p): p is ProdutoCatalogo & { fotoUrl: string } => !!p.fotoUrl)
-    .map(p => ({ codigo: p.codigo, nome: p.nome, url: p.fotoUrl }))
-  return { estado: novoEstado, mensagem: montarMensagemRecomendacao(rec, estado.dados.ocasiao), fotos: fotos.length > 0 ? fotos : undefined }
+  // Catálogo primeiro em texto — sem foto/link automático (ver Parte C/E).
+  // Foto só é enviada sob pedido explícito (ver bloco foto_produto abaixo).
+  return { estado: novoEstado, mensagem: montarMensagemRecomendacao(rec, estado.dados.ocasiao) }
 }
 
 function etapaConfirmacaoDetalhesProduto(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
@@ -1007,25 +1036,30 @@ function etapaConfirmacaoDetalhesProduto(estado: EstadoConversa, mensagemCliente
 
   return {
     estado: { ...estadoAtualizado, fase: 'aguardando_endereco' },
-    mensagem: 'Perfeito! Agora me passa o CEP e o endereço completo de entrega, com o nome de quem vai receber.',
+    // Só o CEP aqui — endereço completo e destinatário são coletados depois
+    // da cotação real de frete (ver etapaEnderecoCompleto/Parte G).
+    mensagem: 'Qual é o CEP da entrega para eu calcular o frete?',
   }
 }
 
-function etapaEndereco(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
+// Só pede o CEP nesta etapa — nunca endereço completo/destinatário na mesma
+// frase (ver Parte G). Endereço completo é coletado depois da cotação real,
+// em etapaEnderecoCompleto.
+async function etapaEndereco(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
   const cepMatch = mensagemCliente.match(/\d{5}-?\d{3}/)
   const endereco = { ...(estado.dados.endereco ?? { cep: '' }) }
   if (cepMatch) endereco.cep = cepMatch[0]
-  if (!endereco.nomeDestinatario) {
-    const nomeMatch = mensagemCliente.match(/(?:é para|entregar para|destinatári[oa][:\s]+)\s*([A-ZÁÉÍÓÚÂÊÎÔÛÃÕ][a-záéíóúâêîôûãõ]+)/i)
-    if (nomeMatch) endereco.nomeDestinatario = nomeMatch[1]
-  }
   const estadoAtualizado: EstadoConversa = { ...estado, dados: { ...estado.dados, endereco } }
 
   if (!endereco.cep) {
-    return { estado: estadoAtualizado, mensagem: 'Preciso do CEP de entrega pra calcular o frete.' }
+    return { estado: estadoAtualizado, mensagem: 'Qual é o CEP da entrega para eu calcular o frete?' }
   }
 
-  return { estado: { ...estadoAtualizado, fase: 'calculando_frete' }, mensagem: `Calculando o frete para ${endereco.cep}, um momento...` }
+  // Cota o frete na mesma interação — nunca deixa o cliente esperando uma
+  // segunda mensagem só para receber o resultado (bug real corrigido
+  // 2026-07-20: a fase virava 'calculando_frete' e só respondia "um
+  // momento", travando até chegar outra mensagem do cliente).
+  return etapaCalculoFrete({ ...estadoAtualizado, fase: 'calculando_frete' }, deps)
 }
 
 async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil): Promise<ResultadoEtapa> {
@@ -1035,20 +1069,91 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
   }
   const resultado = await calcularFreteEtapa(cep, deps.calcularFrete)
   if (resultado.falhou) {
-    return { estado: transferirParaHumano(estado, `Falha no cálculo de frete para CEP ${cep}`), mensagem: resultado.mensagem }
+    // Falha real (timeout, integração fora do ar, endereço não localizado)
+    // nunca inventa valor nem avança para pagamento. Também nunca transfere
+    // pra humano de imediato por uma falha transitória — fica em
+    // 'aguardando_endereco' pra permitir uma nova tentativa controlada (o
+    // cliente reenvia o CEP, ou a própria integração já pode ter se
+    // recuperado). O chamador (webhook-meta) é responsável por logar o erro
+    // técnico sanitizado antes de devolver { ok: false } aqui.
+    return {
+      estado: { ...estado, fase: 'aguardando_endereco' },
+      mensagem: 'No momento não consegui calcular o frete para esse CEP. Pode confirmar o CEP novamente, ou tentar de novo em alguns instantes?',
+    }
   }
   const precoProduto = estado.dados.produto?.preco ?? 0
   const quantidade = estado.dados.produto?.quantidade ?? 1
   const valorFrete = resultado.valor ?? 0
-  const valorTotal = precoProduto * quantidade + valorFrete
+  const subtotal = precoProduto * quantidade
+  const valorTotal = subtotal + valorFrete
   const dados = { ...estado.dados, valorFrete, valorTotal }
-  const novoEstado: EstadoConversa = { ...estado, fase: 'aguardando_confirmacao', dados }
-  return { estado: novoEstado, mensagem: `${resultado.mensagem}\n\n${montarResumoPedido(dados)}` }
+  const primeiraPergunta = CAMPOS_ENDERECO_COMPLETO[0]
+  const novoEstado: EstadoConversa = { ...estado, fase: 'endereco_completo', dados }
+  return {
+    estado: novoEstado,
+    mensagem: `${resultado.mensagem} Subtotal: ${formatarPreco(subtotal)}. Total: ${formatarPreco(valorTotal)}.\n\n${primeiraPergunta.pergunta}`,
+  }
+}
+
+// ── Etapa 5b — Endereço completo e destinatário (só depois da cotação real) ──
+
+const CAMPOS_ENDERECO_COMPLETO: { campo: keyof EnderecoEntrega; pergunta: string }[] = [
+  { campo: 'nomeDestinatario', pergunta: 'Qual o nome de quem vai receber?' },
+  { campo: 'rua', pergunta: 'Qual a rua ou avenida da entrega?' },
+  { campo: 'numero', pergunta: 'Qual o número?' },
+  { campo: 'bairro', pergunta: 'Qual o bairro?' },
+  { campo: 'cidade', pergunta: 'Qual a cidade?' },
+]
+
+/** true quando todos os campos mínimos de endereço estão presentes — complemento/referência são opcionais. */
+function enderecoCompletoValido(endereco?: EnderecoEntrega): boolean {
+  if (!endereco) return false
+  return CAMPOS_ENDERECO_COMPLETO.every(({ campo }) => !!endereco[campo])
+}
+
+/** Coleta nome do destinatário e endereço completo, um campo por vez, sem repetir pergunta já respondida — nunca sobrescreve um valor já válido com uma mensagem vazia/incompleta. */
+function etapaEnderecoCompleto(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
+  const endereco: EnderecoEntrega = { ...(estado.dados.endereco ?? { cep: '' }) }
+  const respondendo = CAMPOS_ENDERECO_COMPLETO.find(({ campo }) => !endereco[campo])
+  const valor = mensagemCliente.trim()
+  if (respondendo && valor) {
+    endereco[respondendo.campo] = valor
+  }
+  const dadosAtualizados = { ...estado.dados, endereco }
+  const estadoAtualizado: EstadoConversa = { ...estado, dados: dadosAtualizados }
+
+  const proximo = CAMPOS_ENDERECO_COMPLETO.find(({ campo }) => !endereco[campo])
+  if (proximo) {
+    return { estado: { ...estadoAtualizado, fase: 'endereco_completo' }, mensagem: proximo.pergunta }
+  }
+
+  return {
+    estado: { ...estadoAtualizado, fase: 'aguardando_confirmacao' },
+    mensagem: montarResumoPedido(dadosAtualizados),
+  }
 }
 
 async function etapaConfirmacao(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
   if (!pareceConfirmacao(mensagemCliente)) {
     return { estado, mensagem: `Sem problemas — me avisa quando quiser confirmar.\n\n${montarResumoPedido(estado.dados)}` }
+  }
+
+  // Guarda defensiva: nunca gera link de pagamento faltando produto,
+  // quantidade, data, cotação real de frete ou endereço/destinatário
+  // completos — mesmo que um estado inconsistente (migração, bug antigo)
+  // tenha chegado até aqui sem passar pelas etapas normais.
+  const dadosIncompletos =
+    !estado.dados.produto?.nome ||
+    !estado.dados.produto?.quantidade ||
+    !estado.dados.produto?.dataEntrega ||
+    estado.dados.valorFrete == null ||
+    estado.dados.valorTotal == null ||
+    !enderecoCompletoValido(estado.dados.endereco)
+  if (dadosIncompletos) {
+    return {
+      estado: { ...estado, fase: 'endereco_completo' },
+      mensagem: 'Antes de confirmar, preciso terminar de coletar os dados da entrega.\n\n' + (CAMPOS_ENDERECO_COMPLETO.find(({ campo }) => !estado.dados.endereco?.[campo])?.pergunta ?? 'Qual o nome de quem vai receber?'),
+    }
   }
 
   // Revalida preço/estoque/nome/foto direto na fonte, sempre pelo ID técnico
@@ -1176,20 +1281,18 @@ export async function avancarFunil(
 
   // Pedido de foto pode acontecer em qualquer fase após haver produto(s) em jogo.
   if (intencao === 'foto_produto') {
-    // Nunca por posição fixa: primeiro o produto já formalmente escolhido,
-    // depois tenta identificar a QUAL das opções apresentadas a mensagem se
-    // refere (nome, número, preço) — só cai pra primeira opção como último
-    // recurso, quando não há nenhum outro sinal. Código duplicado entre
-    // opções nunca escolhe sozinho — pede desambiguação, mesma regra da
-    // seleção de compra.
-    let alvo = estado.dados.produto
-    if (!alvo) {
-      const { produto, opcoesConflitantes } = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
-      if (opcoesConflitantes) {
-        return { estado, mensagem: montarMensagemCodigoAmbiguo(opcoesConflitantes) }
-      }
-      alvo = produto ?? estado.dados.opcoesRecomendadas?.[0] ?? undefined
+    // Resolve exatamente qual produto foi pedido, nesta ordem: código/nome
+    // citados na própria mensagem (mesmo que um produto já esteja
+    // selecionado — o cliente pode estar pedindo a foto de OUTRA opção
+    // apresentada antes), depois o produto já formalmente escolhido, e só
+    // por último a recomendação principal, quando inequívoca. Código
+    // duplicado entre opções nunca escolhe sozinho — pede desambiguação,
+    // mesma regra da seleção de compra.
+    const { produto: detectado, opcoesConflitantes } = detectarProdutoEscolhido(mensagemCliente, estado.dados.opcoesRecomendadas)
+    if (opcoesConflitantes) {
+      return { estado, mensagem: montarMensagemCodigoAmbiguo(opcoesConflitantes) }
     }
+    const alvo = detectado ?? estado.dados.produto ?? estado.dados.opcoesRecomendadas?.[0] ?? undefined
     const resp = responderPedidoDeFoto(alvo ? { nome: alvo.nome, preco: alvo.preco, fotoUrl: alvo.fotoUrl, disponivel: true } : undefined)
     return { estado, mensagem: resp.mensagem, fotoUrl: resp.fotoUrl }
   }
@@ -1276,9 +1379,11 @@ export async function avancarFunil(
     case 'produto_selecionado':
       return etapaConfirmacaoDetalhesProduto(estado, mensagemCliente)
     case 'aguardando_endereco':
-      return etapaEndereco(estado, mensagemCliente)
+      return etapaEndereco(estado, mensagemCliente, deps)
     case 'calculando_frete':
       return etapaCalculoFrete(estado, deps)
+    case 'endereco_completo':
+      return etapaEnderecoCompleto(estado, mensagemCliente)
     case 'aguardando_confirmacao':
       return etapaConfirmacao(estado, mensagemCliente, deps)
     case 'aguardando_pagamento':

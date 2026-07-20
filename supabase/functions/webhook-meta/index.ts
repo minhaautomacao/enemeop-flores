@@ -89,6 +89,17 @@ interface ConversaRow {
   motivo_handoff?: string | null;
   handoff_em?: string | null;
   atendente_id?: string | null;
+  assumido_em?: string | null;
+}
+
+// Handoff humano só bloqueia a Flora enquanto realmente estiver em espera ou
+// em atendimento — 'concluida', 'devolvido_flora', 'cancelado',
+// 'flora_atendendo' ou status nulo/inconsistente com modo_atendimento='humano'
+// são estado fantasma (ex.: rota de conclusão que não devolveu
+// modo_atendimento) e nunca devem travar o cliente indefinidamente.
+function handoffRealmenteAtivo(row: ConversaRow): boolean {
+  return row.modo_atendimento === 'humano' &&
+    (row.status_atendimento === 'aguardando_humano' || row.status_atendimento === 'humano_atendendo');
 }
 
 async function buscarNomeCliente(canalId: string): Promise<string | null> {
@@ -464,11 +475,23 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
   // atendente ver no Inbox Flora — Flora não gera nem envia resposta
   // automática enquanto um humano estiver responsável pela conversa.
   if (conversaRow.modo_atendimento === 'humano') {
-    const novaMsgHumano: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString(), mid };
-    const historicoHumano = [...(conversaRow.historico ?? []), novaMsgHumano].slice(-20);
-    await salvarConversa(conversaRow.id, { historico: historicoHumano });
-    console.log(`[webhook-meta] ${canalId} | modo humano ativo — Flora nao responde`);
-    return;
+    if (handoffRealmenteAtivo(conversaRow)) {
+      const novaMsgHumano: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString(), mid };
+      const historicoHumano = [...(conversaRow.historico ?? []), novaMsgHumano].slice(-20);
+      await salvarConversa(conversaRow.id, { historico: historicoHumano });
+      console.log(`[webhook-meta] ${canalId} | modo humano ativo — Flora nao responde`);
+      return;
+    }
+
+    // modo_atendimento='humano' sem handoff realmente ativo — estado
+    // fantasma (ticket concluído/devolvido/cancelado ou status
+    // nulo/inconsistente). Repara antes de processar a nova mensagem, para
+    // o cliente nunca ficar preso indefinidamente; histórico é preservado.
+    console.log(`[webhook-meta] handoff_fantasma_reparado canal_id=${canalId} canal=${canal} status_atendimento=${conversaRow.status_atendimento ?? '(nulo)'}`);
+    await salvarConversa(conversaRow.id, { modo_atendimento: 'flora', atendente_id: null, assumido_em: null } as Partial<ConversaRow>);
+    conversaRow.modo_atendimento = 'flora';
+    conversaRow.atendente_id = null;
+    conversaRow.assumido_em = null;
   }
 
   let estado = estadoDaConversa(conversaRow);

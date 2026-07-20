@@ -6,7 +6,7 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
   const { data, error } = await (supabase as any).from('conversas')
-    .update({ status_atendimento: 'concluida', atualizado_em: new Date().toISOString() } as any)
+    .update({ modo_atendimento: 'flora', status_atendimento: 'concluida', atendente_id: null, assumido_em: null, atualizado_em: new Date().toISOString() } as any)
     .eq('id', params.id).eq('atendente_id', user.id).select('id').single();
   if (error || !data) return NextResponse.json({ error: 'Somente o atendente responsável pode concluir esta conversa' }, { status: 403 });
 

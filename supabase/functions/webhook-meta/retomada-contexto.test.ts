@@ -52,6 +52,17 @@ interface ConversaFake {
   perguntasFeitas: string[];
   historico: Mensagem[];
   modo_atendimento: string;
+  status_atendimento?: string | null;
+  atendente_id?: string | null;
+  assumido_em?: string | null;
+}
+
+/** Réplica de handoffRealmenteAtivo (index.ts): só bloqueia a Flora quando
+ * modo_atendimento='humano' E status_atendimento indica espera/atendimento
+ * genuíno — qualquer outro status com modo_atendimento='humano' é fantasma. */
+function handoffRealmenteAtivoSimulado(conversa: ConversaFake): boolean {
+  return conversa.modo_atendimento === 'humano' &&
+    (conversa.status_atendimento === 'aguardando_humano' || conversa.status_atendimento === 'humano_atendendo');
 }
 
 type OrigemHandoff = 'cliente_solicitou' | 'flora_sem_confianca' | 'limite_tecnico';
@@ -75,6 +86,7 @@ function criarOuReusarAtendimento(atendimentos: AtendimentoFake[], conversaId: s
  * marcação de modo_atendimento='humano'. */
 function iniciarHandoffSimulado(conversa: ConversaFake, atendimentos: AtendimentoFake[], origem: OrigemHandoff): string {
   conversa.modo_atendimento = 'humano';
+  conversa.status_atendimento = 'aguardando_humano';
   const base = origem === 'limite_tecnico' ? mensagemTransferenciaLimitacaoTecnica() : mensagemTransferencia();
   const codigo = criarOuReusarAtendimento(atendimentos, conversa.id, origem);
   return `${base} Seu código de atendimento é ${codigo}.`;
@@ -90,8 +102,16 @@ async function processarMensagemSimulada(
   mensagemCliente: string,
 ): Promise<{ resposta: string | null; estado: EstadoConversa }> {
   if (conversa.modo_atendimento === 'humano') {
-    conversa.historico.push({ role: 'user', content: mensagemCliente, ts: new Date().toISOString() });
-    return { resposta: null, estado: { fase: conversa.fase, dados: conversa.dados, perguntasFeitas: conversa.perguntasFeitas } };
+    if (handoffRealmenteAtivoSimulado(conversa)) {
+      conversa.historico.push({ role: 'user', content: mensagemCliente, ts: new Date().toISOString() });
+      return { resposta: null, estado: { fase: conversa.fase, dados: conversa.dados, perguntasFeitas: conversa.perguntasFeitas } };
+    }
+    // Estado fantasma (status_atendimento concluída/devolvido/cancelado/nulo
+    // com modo_atendimento='humano') — repara antes de continuar, histórico
+    // preservado, sem apagar nada.
+    conversa.modo_atendimento = 'flora';
+    conversa.atendente_id = null;
+    conversa.assumido_em = null;
   }
 
   let estado: EstadoConversa = { fase: conversa.fase, dados: conversa.dados, perguntasFeitas: conversa.perguntasFeitas };
@@ -164,7 +184,7 @@ test('cenario 1 — fase transferido_humano orfa (sem handoff ativo) + "Tem gira
   assert.match(resposta ?? '', /Buquê de Rosas/, 'deve consultar o catalogo real, nao so devolver texto fixo');
 });
 
-test('cenario 2 — handoff realmente ativo: Flora nao responde, so registra a mensagem do cliente no historico', async () => {
+test('cenario 2 — modo humano + status humano_atendendo: Flora nao responde, so registra a mensagem do cliente no historico', async () => {
   const conversaEmHumano: ConversaFake = {
     id: 'c-humano-ativo',
     fase: 'transferido_humano',
@@ -172,6 +192,8 @@ test('cenario 2 — handoff realmente ativo: Flora nao responde, so registra a m
     perguntasFeitas: [],
     historico: [{ role: 'assistant', content: 'Vou te transferir para nossa equipe! Seu código de atendimento é TCK001.', ts: '2026-07-17T18:00:00Z' }],
     modo_atendimento: 'humano',
+    status_atendimento: 'humano_atendendo',
+    atendente_id: 'atendente-1',
   };
   const atendimentos: AtendimentoFake[] = [{ conversaId: 'c-humano-ativo', codigo: 'TCK001', status: 'em_atendimento', origem: 'cliente_solicitou' }];
 
@@ -180,6 +202,90 @@ test('cenario 2 — handoff realmente ativo: Flora nao responde, so registra a m
   assert.equal(resposta, null, 'Flora nao deve gerar nenhuma resposta automatica em modo humano');
   assert.equal(atendimentos.length, 1, 'nao deve criar novo ticket enquanto o atendimento humano esta ativo');
   assert.equal(conversaEmHumano.historico[conversaEmHumano.historico.length - 1].role, 'user');
+  assert.equal(conversaEmHumano.modo_atendimento, 'humano', 'nao deve reparar um handoff genuinamente ativo');
+  assert.equal(conversaEmHumano.atendente_id, 'atendente-1', 'atendente responsavel nao deve ser limpo enquanto ativo');
+});
+
+test('cenario 2b — modo humano + status aguardando_humano: Flora nao responde (ticket ainda nao assumido)', async () => {
+  const conversaAguardando: ConversaFake = {
+    id: 'c-aguardando',
+    fase: 'transferido_humano',
+    dados: { motivoTransferencia: 'atendimento_humano: "quero falar com um atendente"' },
+    perguntasFeitas: [],
+    historico: [{ role: 'assistant', content: 'Vou te transferir para nossa equipe! Seu código de atendimento é TCK002.', ts: '2026-07-18T19:34:08Z' }],
+    modo_atendimento: 'humano',
+    status_atendimento: 'aguardando_humano',
+  };
+  const atendimentos: AtendimentoFake[] = [{ conversaId: 'c-aguardando', codigo: 'TCK002', status: 'aguardando_humano', origem: 'flora_sem_confianca' }];
+
+  const { resposta } = await processarMensagemSimulada(conversaAguardando, atendimentos, 'Alguém aí?');
+
+  assert.equal(resposta, null, 'Flora nao deve responder enquanto o ticket estiver genuinamente aguardando_humano');
+  assert.equal(atendimentos.length, 1, 'nao deve criar novo ticket');
+  assert.equal(conversaAguardando.modo_atendimento, 'humano', 'ticket aguardando_humano real nunca deve ser reparado automaticamente');
+});
+
+test('cenario 2c — modo humano + status concluida: estado fantasma e reparado, Flora retoma', async () => {
+  const conversaConcluidaFantasma: ConversaFake = {
+    id: 'c-concluida-fantasma',
+    fase: 'transferido_humano',
+    dados: { motivoTransferencia: 'atendimento_humano: "quero falar com um atendente"' },
+    perguntasFeitas: [],
+    historico: [{ role: 'assistant', content: 'Vou te transferir para nossa equipe! Seu código de atendimento é TCK003.', ts: '2026-07-15T10:00:00Z' }],
+    modo_atendimento: 'humano', // rota de conclusao nao devolveu para 'flora' (bug corrigido)
+    status_atendimento: 'concluida',
+    atendente_id: 'atendente-2',
+  };
+  const atendimentos: AtendimentoFake[] = [{ conversaId: 'c-concluida-fantasma', codigo: 'TCK003', status: 'concluido', origem: 'cliente_solicitou' }];
+
+  const { resposta, estado } = await processarMensagemSimulada(conversaConcluidaFantasma, atendimentos, 'Tem girassol pra hoje');
+
+  assert.doesNotMatch(resposta ?? '', /vou te transferir|nossa equipe/i, 'nao deve repetir a transferencia fantasma');
+  assert.notEqual(estado.fase, 'transferido_humano', 'a fase orfa deve ser reparada');
+  assert.equal(conversaConcluidaFantasma.modo_atendimento, 'flora', 'deve devolver a conversa para a Flora');
+  assert.equal(conversaConcluidaFantasma.atendente_id, null, 'atendente_id deve ser limpo no reparo');
+  assert.equal(atendimentos.length, 1, 'nao deve criar novo ticket so por reparar o estado fantasma');
+});
+
+test('cenario 2d — modo humano + status devolvido_flora: estado fantasma e reparado, Flora retoma', async () => {
+  const conversaDevolvidaFantasma: ConversaFake = {
+    id: 'c-devolvida-fantasma',
+    fase: 'transferido_humano',
+    dados: { motivoTransferencia: 'atendimento_humano: "quero falar com um atendente"' },
+    perguntasFeitas: [],
+    historico: [],
+    modo_atendimento: 'humano',
+    status_atendimento: 'devolvido_flora',
+    atendente_id: 'atendente-3',
+    assumido_em: '2026-07-10T00:00:00Z',
+  };
+  const atendimentos: AtendimentoFake[] = [{ conversaId: 'c-devolvida-fantasma', codigo: 'TCK004', status: 'devolvido_flora', origem: 'cliente_solicitou' }];
+
+  const { resposta, estado } = await processarMensagemSimulada(conversaDevolvidaFantasma, atendimentos, 'Tem lírios');
+
+  assert.doesNotMatch(resposta ?? '', /vou te transferir|nossa equipe/i);
+  assert.notEqual(estado.fase, 'transferido_humano');
+  assert.equal(conversaDevolvidaFantasma.modo_atendimento, 'flora');
+  assert.equal(conversaDevolvidaFantasma.atendente_id, null);
+  assert.equal(conversaDevolvidaFantasma.assumido_em, null);
+});
+
+test('cenario 2e — modo humano + status_atendimento nulo/inconsistente: estado fantasma e reparado, Flora retoma', async () => {
+  const conversaInconsistente: ConversaFake = {
+    id: 'c-inconsistente',
+    fase: 'transferido_humano',
+    dados: { motivoTransferencia: 'Falha ao gerar link de pagamento' },
+    perguntasFeitas: [],
+    historico: [],
+    modo_atendimento: 'humano',
+    status_atendimento: undefined, // nunca setado / registro corrompido
+  };
+
+  const { resposta, estado } = await processarMensagemSimulada(conversaInconsistente, [], 'Quero fazer um novo pedido');
+
+  assert.doesNotMatch(resposta ?? '', /vou te transferir|nossa equipe/i);
+  assert.notEqual(estado.fase, 'transferido_humano');
+  assert.equal(conversaInconsistente.modo_atendimento, 'flora', 'status nulo com modo humano deve ser tratado como fantasma, nunca travar o cliente');
 });
 
 test('cenario 3 — criacao do handoff: uma unica mensagem de transicao, com o codigo do ticket recem-criado', async () => {

@@ -1,10 +1,10 @@
 // Origem: recuperado da versão implantada no projeto Supabase da Fábrica
 // (ebeapnydeiwuewxatuuw, slug conversas-enemeop, v5) em 2026-07-10.
 // Nunca esteve versionado em nenhum repositório Git antes desta migração.
-// Sem alteração de lógica — só reposicionamento de repositório.
 
 import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { factorySecretValido } from '../_shared/auth-crm.ts';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -20,6 +20,13 @@ const sb = createClient(
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: CORS });
+  }
+
+  if (!(await factorySecretValido(req))) {
+    return new Response(JSON.stringify({ error: 'não autorizado' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json', ...CORS },
+    });
   }
 
   const url = new URL(req.url);

@@ -9,9 +9,18 @@ export const metadata: Metadata = { title: 'Clientes / CRM' };
 const FUNCTIONS_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
 
 async function getLeads(): Promise<Lead[]> {
+  const factorySecret = process.env.FACTORY_SECRET;
+  if (!factorySecret) {
+    console.error('[dashboard/leads] FACTORY_SECRET não configurado no servidor — lista vazia');
+    return [];
+  }
+
   const url = `${FUNCTIONS_URL}/functions/v1/leads-enemeop?limit=100`;
   try {
-    const res = await fetch(url, { next: { revalidate: 15 } });
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${factorySecret}` },
+      next: { revalidate: 15 },
+    });
     if (!res.ok) return [];
     const json = await res.json();
     return json.leads ?? [];

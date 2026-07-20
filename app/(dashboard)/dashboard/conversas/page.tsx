@@ -47,10 +47,19 @@ interface Conversa {
 // conversas-enemeop foi migrada para enemeop-flores/supabase/functions/ —
 // pendente de deploy no projeto Enemeop (ver docs/DEPLOYMENT.md).
 async function getConversas(): Promise<Conversa[]> {
+  const factorySecret = process.env.FACTORY_SECRET;
+  if (!factorySecret) {
+    console.error('[dashboard/conversas] FACTORY_SECRET não configurado no servidor — lista vazia');
+    return [];
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
   const url = `${supabaseUrl}/functions/v1/conversas-enemeop?limit=100`;
   try {
-    const res = await fetch(url, { next: { revalidate: 10 } });
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${factorySecret}` },
+      next: { revalidate: 10 },
+    });
     if (!res.ok) return [];
     const json = await res.json();
     return json.conversas ?? [];

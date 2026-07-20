@@ -1,9 +1,17 @@
 import { getSupabaseAdmin } from '../_shared/supabase.ts';
+import { factorySecretValido } from '../_shared/auth-crm.ts';
 
 // Retorna leads do Instagram da Enemeop Flores para o dashboard
-// Sem auth — URL é o segredo (internal API)
+// Protegido por Authorization: Bearer <FACTORY_SECRET>
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204 });
+
+  if (!(await factorySecretValido(req))) {
+    return new Response(JSON.stringify({ erro: 'não autorizado' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
 
   const url = new URL(req.url);
   const limit = Number(url.searchParams.get('limit') ?? '50');

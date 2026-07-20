@@ -3,16 +3,19 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { EnumeopLogo } from '@/components/enemeop-logo'
+import { useAlertaNovoPedido } from '../../use-alerta-pedido'
 
 type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue'
 
 interface Pedido {
   id: string
+  numero: number
   produto: string
   cliente: string
   horario: string
   status: StatusPedido
   prioridade?: boolean
+  novo?: boolean
 }
 
 const STATUS_CONFIG: Record<StatusPedido, { label: string; classes: string; dot: string }> = {
@@ -28,6 +31,7 @@ export default function StatusPage() {
   const [hora, setHora] = useState('')
   const [data, setData] = useState('')
   const [pedidos, setPedidos] = useState<Pedido[]>([])
+  const { registrar } = useAlertaNovoPedido()
 
   useEffect(() => {
     const tick = () => {
@@ -47,19 +51,27 @@ export default function StatusPage() {
         const res = await fetch('/api/producao/pedidos', { cache: 'no-store' })
         const json = await res.json()
         if (!res.ok) throw new Error(json.error ?? 'erro')
-        setPedidos((json.pedidos ?? []).map((p: Record<string, unknown>, i: number) => ({
-          id: `#${String(p.numero ?? i + 1).padStart(4, '0')}`,
-          produto: String(p.produto ?? 'Pedido sem produto'),
-          cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
-          horario: p.data_entrega ? new Date(String(p.data_entrega)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : new Date(String(p.criado_em)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-          status: String(p.status ?? 'novo') as StatusPedido,
-          prioridade: false,
-        })))
+        const bruto: Record<string, unknown>[] = json.pedidos ?? []
+        const { novos } = registrar(bruto.map((p) => Number(p.numero_pedido)).filter((n) => Number.isFinite(n)))
+        setPedidos(bruto.map((p) => {
+          const numero = Number(p.numero_pedido)
+          return {
+            id: `#${String(numero).padStart(4, '0')}`,
+            numero,
+            produto: String(p.produto ?? 'Pedido sem produto'),
+            cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
+            horario: p.data_agendada ? new Date(String(p.data_agendada)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : new Date(String(p.criado_em)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+            status: String(p.status_producao ?? 'novo') as StatusPedido,
+            prioridade: false,
+            novo: novos.includes(numero),
+          }
+        }))
       } catch { setPedidos([]) }
     }
     carregarPedidos()
     const r = setInterval(carregarPedidos, 30000)
     return () => clearInterval(r)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const ativos   = pedidos
@@ -115,7 +127,7 @@ export default function StatusPage() {
             return (
               <div
                 key={p.id}
-                className={`flex items-center justify-between gap-4 rounded-2xl border px-6 py-5 ${cfg.classes} ${p.prioridade ? 'ring-1 ring-gold/40' : ''}`}
+                className={`flex items-center justify-between gap-4 rounded-2xl border px-6 py-5 ${cfg.classes} ${p.prioridade ? 'ring-1 ring-gold/40' : ''} ${p.novo ? 'ring-2 ring-status-success/60' : ''}`}
               >
                 {/* Esquerda */}
                 <div className="flex items-center gap-4 min-w-0">
@@ -123,6 +135,11 @@ export default function StatusPage() {
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-mono text-base font-bold">{p.id}</span>
+                      {p.novo && (
+                        <span className="rounded-full border border-status-success/50 bg-status-success/10 px-2 py-0.5 text-[10px] font-bold text-status-success uppercase tracking-widest">
+                          NOVO
+                        </span>
+                      )}
                       {p.prioridade && (
                         <span className="rounded-full border border-gold/50 bg-gold/10 px-2 py-0.5 text-[10px] font-bold text-gold uppercase tracking-widest">
                           URGENTE

@@ -29,12 +29,23 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 import { buscarPagamentoReal, validarAssinaturaWebhook } from '../_shared/mercadopago.ts';
 import { enviarWhatsApp } from '../_shared/whatsapp.ts';
 import { mapearStatusPagamento, valoresDivergem } from './logica.ts';
+import { buscarTodasCredenciais } from '../_shared/credentials.ts';
+import { criarEntregaLalamove } from '../_shared/lalamove-orders.ts';
+import { decidirAcaoLogistica, statusLogisticaReivindicavel } from '../_shared/logistica-decisao.ts';
+import { cotacaoExpirada } from '../_shared/lalamove-config.ts';
 
 const SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
 const WORKSPACE_ID = Deno.env.get('SAAS_WORKSPACE_ID') ?? '';
 const IG_TOKEN      = Deno.env.get('META_IG_ACCESS_TOKEN') ?? '';
 const PAGE_TOKEN    = Deno.env.get('META_PAGE_ACCESS_TOKEN') ?? '';
+const FACTORY_SECRET = Deno.env.get('FACTORY_SECRET') ?? '';
+// Telefone oficial da loja, exigido pela Lalamove como contato do
+// remetente. Nunca inventado — sem essa secret, a entrega real fica
+// bloqueada (status_logistica='erro_logistica'), mas a cotação e o
+// pagamento continuam funcionando normalmente (ver Parte A.5).
+const STORE_PHONE   = Deno.env.get('STORE_PHONE') ?? '';
+const STORE_NOME    = 'Enemeop Flores';
 
 function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
@@ -86,6 +97,153 @@ interface PedidoRow {
   valor: number;
   status: string;
   external_reference: string | null;
+  nome_destinatario: string | null;
+  telefone_destinatario: string | null;
+  lalamove_quotation_id: string | null;
+  lalamove_order_id: string | null;
+  lalamove_stop_id_origem: string | null;
+  lalamove_stop_id_destino: string | null;
+  frete_expires_at: string | null;
+  frete_destino: { cep?: string } | null;
+  status_logistica: string | null;
+  logistica_tentativas: number | null;
+}
+
+type Db = ReturnType<typeof getDb>;
+
+async function marcarErroLogistica(db: Db, pedidoId: string, tentativas: number, motivoSanitizado: string): Promise<void> {
+  console.error(`[webhook-mp] falha ao criar entrega real: ${motivoSanitizado} pedido=${pedidoId}`);
+  await db.from('pedidos').update({
+    status_logistica: 'erro_logistica',
+    logistica_resposta: { erro: motivoSanitizado },
+    logistica_tentativas: tentativas + 1,
+  }).eq('id', pedidoId);
+}
+
+/** Re-cota o frete (mesmo caminho real usado durante a conversa) quando a cotação persistida no pedido já expirou — nunca cria a entrega com um quotationId vencido (ver Parte E.5/H.2). */
+async function reconsultarFrete(cepDestino: string): Promise<{ quotationId: string; expiresAt: string | null; stopIdOrigem?: string; stopIdDestino?: string } | null> {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${FACTORY_SECRET}` },
+      body: JSON.stringify({ endereco: { cep: cepDestino }, workspace_id: WORKSPACE_ID }),
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      disponivel?: boolean;
+      cotacao?: { quotationId?: string; expiresAt?: string | null; stopIdOrigem?: string; stopIdDestino?: string };
+    };
+    if (!data.disponivel || !data.cotacao?.quotationId) return null;
+    return {
+      quotationId: data.cotacao.quotationId,
+      expiresAt: data.cotacao.expiresAt ?? null,
+      stopIdOrigem: data.cotacao.stopIdOrigem,
+      stopIdDestino: data.cotacao.stopIdDestino,
+    };
+  } catch (e) {
+    console.error('[webhook-mp] falha ao re-cotar frete antes da entrega:', e);
+    return null;
+  }
+}
+
+/**
+ * Cria a entrega real na Lalamove depois de um pagamento aprovado e
+ * reconciliado. Idempotente (claim atômico via UPDATE condicional — nunca
+ * cria duas entregas pro mesmo pedido, mesmo com o webhook do MP repetindo
+ * a notificação). Falha nunca reverte o pagamento nem cobra de novo — só
+ * deixa o pedido em 'erro_logistica' com alerta pra revisão/retry manual.
+ */
+async function processarLogisticaAposPagamento(db: Db, pedido: PedidoRow): Promise<void> {
+  const decisao = decidirAcaoLogistica(pedido, !!STORE_PHONE);
+  if (decisao.acao === 'pular') return;
+
+  if (decisao.acao === 'bloquear') {
+    await marcarErroLogistica(db, pedido.id, pedido.logistica_tentativas ?? 0, 'STORE_PHONE nao configurado — corrida nao pode ser criada sem inventar um telefone da loja');
+    return;
+  }
+
+  if (!statusLogisticaReivindicavel(pedido.status_logistica)) return;
+  const { data: claim } = await db.from('pedidos')
+    .update({ status_logistica: 'pendente' })
+    .eq('id', pedido.id)
+    .or('status_logistica.is.null,status_logistica.eq.erro_logistica')
+    .select('id')
+    .maybeSingle();
+  if (!claim) {
+    // Outra execução concorrente já reivindicou — nunca cria uma segunda entrega.
+    console.log(`[webhook-mp] claim de logistica nao obtido (corrida concorrente ou ja criada). pedido=${pedido.id}`);
+    return;
+  }
+
+  const tentativas = pedido.logistica_tentativas ?? 0;
+
+  let quotationId = pedido.lalamove_quotation_id;
+  let expiresAt = pedido.frete_expires_at;
+  let stopIdOrigem = pedido.lalamove_stop_id_origem;
+  let stopIdDestino = pedido.lalamove_stop_id_destino;
+
+  if (!quotationId || !stopIdOrigem || !stopIdDestino || cotacaoExpirada(expiresAt)) {
+    const cepDestino = pedido.frete_destino?.cep;
+    if (!cepDestino) {
+      await marcarErroLogistica(db, pedido.id, tentativas, 'sem CEP de destino persistido para re-cotar o frete');
+      return;
+    }
+    const nova = await reconsultarFrete(cepDestino);
+    if (!nova || !nova.stopIdOrigem || !nova.stopIdDestino) {
+      await marcarErroLogistica(db, pedido.id, tentativas, 'falha ao re-cotar frete antes de criar a entrega');
+      return;
+    }
+    quotationId = nova.quotationId;
+    expiresAt = nova.expiresAt;
+    stopIdOrigem = nova.stopIdOrigem;
+    stopIdDestino = nova.stopIdDestino;
+    await db.from('pedidos').update({
+      lalamove_quotation_id: quotationId,
+      frete_expires_at: expiresAt,
+      lalamove_stop_id_origem: stopIdOrigem,
+      lalamove_stop_id_destino: stopIdDestino,
+    }).eq('id', pedido.id);
+  }
+
+  if (!pedido.nome_destinatario || !pedido.telefone_destinatario) {
+    await marcarErroLogistica(db, pedido.id, tentativas, 'destinatario incompleto (nome/telefone ausente)');
+    return;
+  }
+
+  const creds = await buscarTodasCredenciais(WORKSPACE_ID, 'logistica');
+  const apiKey = creds['lalamove_key'] || Deno.env.get('LALAMOVE_API_KEY') || '';
+  const apiSecret = creds['lalamove_secret'] || Deno.env.get('LALAMOVE_API_SECRET') || '';
+  if (!apiKey || !apiSecret) {
+    await marcarErroLogistica(db, pedido.id, tentativas, 'credenciais Lalamove nao configuradas');
+    return;
+  }
+
+  const resultado = await criarEntregaLalamove(apiKey, apiSecret, {
+    quotationId: quotationId!,
+    expiresAt,
+    remetente: { stopId: stopIdOrigem!, nome: STORE_NOME, telefone: STORE_PHONE },
+    destinatario: { stopId: stopIdDestino!, nome: pedido.nome_destinatario, telefone: pedido.telefone_destinatario },
+    pedidoId: pedido.id,
+  });
+
+  if (!resultado.ok) {
+    const motivo = resultado.motivo === 'cotacao_expirada' ? 'cotacao expirada mesmo apos re-cotar' : resultado.erroSanitizado;
+    await marcarErroLogistica(db, pedido.id, tentativas, motivo);
+    return;
+  }
+
+  await db.from('pedidos').update({
+    status_logistica: 'criada',
+    lalamove_order_id: resultado.orderId,
+    logistica_criado_em: new Date().toISOString(),
+    logistica_resposta: {
+      orderId: resultado.orderId, status: resultado.status,
+      shareLink: resultado.shareLink, precoTotal: resultado.precoTotal, moeda: resultado.moeda,
+    },
+    logistica_tentativas: tentativas + 1,
+  }).eq('id', pedido.id);
+  console.log(`[webhook-mp] entrega real criada com sucesso. pedido=${pedido.id}`);
 }
 
 async function notificarCliente(pedido: PedidoRow, texto: string): Promise<void> {
@@ -179,7 +337,10 @@ Deno.serve(async (req: Request) => {
 
   const { data: pedido, error: pedidoError } = await db
     .from('pedidos')
-    .select('id, canal, canal_id, cliente_telefone, valor, status, external_reference')
+    .select(`id, canal, canal_id, cliente_telefone, valor, status, external_reference,
+      nome_destinatario, telefone_destinatario, lalamove_quotation_id, lalamove_order_id,
+      lalamove_stop_id_origem, lalamove_stop_id_destino, frete_expires_at, frete_destino,
+      status_logistica, logistica_tentativas`)
     .eq('external_reference', pagamento.externalReference)
     .maybeSingle();
 
@@ -223,6 +384,13 @@ Deno.serve(async (req: Request) => {
     await notificarCliente(pedido as PedidoRow, texto);
 
     console.log(`[webhook-mp] pagamento aprovado e confirmado. pedido=${pedido.id} payment=${paymentId} valor=${valorFormatado}`);
+
+    // Nunca fecha silenciosamente sem iniciar o operacional (Parte G.6):
+    // pagamento confirmado aciona a criação real da entrega. Falha aqui
+    // nunca desfaz o pagamento — só deixa o pedido em erro_logistica pra
+    // revisão/retry (ver processarLogisticaAposPagamento).
+    await processarLogisticaAposPagamento(db, { ...(pedido as PedidoRow), status: 'pago' });
+
     return new Response('ok', { status: 200 });
   }
 

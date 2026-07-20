@@ -35,6 +35,8 @@ import {
   type ProdutoCatalogo,
   type DependenciasFunil,
   type Fase,
+  type ResultadoFrete,
+  type FreteDetalhes,
   estadoInicial,
   classificarIntencao,
   intencaoInterrompeFluxo,
@@ -159,13 +161,39 @@ async function buscarCatalogoReal(params: { query: string; occasion?: string; bu
 // Timeout evita travamento silencioso: sem isso, uma chamada pendurada em
 // agente-logistica (geocodificação/Lalamove fora do ar) deixava o cliente
 // esperando indefinidamente, sem nunca cair no tratamento de falha.
-const TIMEOUT_FRETE_MS = 12_000;
+// Orçamento generoso: agente-logistica agora encadeia ViaCEP (5s) +
+// Nominatim (8s) + até 1 consulta a /v3/cities (5s) + até 2 cotações
+// Lalamove (7s cada) no pior caso frio — nunca deve travar silenciosamente
+// mesmo nesse cenário, então o timeout cobre a soma com folga.
+const TIMEOUT_FRETE_MS = 25_000;
 
-async function calcularFreteReal(cep: string): Promise<{ ok: true; valor: number } | { ok: false }> {
+interface RespostaAgenteLogistica {
+  disponivel?: boolean;
+  preco_real?: number;
+  preco_cliente?: number;
+  transportadora?: string;
+  servico?: string;
+  cotacao?: {
+    quotationId?: string;
+    moeda?: string;
+    expiresAt?: string | null;
+    ambiente?: string;
+    mercado?: string;
+    cotado_em: string;
+    origem: { lat: string; lng: string; endereco: string };
+    destino: { lat: string; lng: string; endereco: string; cep: string };
+    stopIdOrigem?: string;
+    stopIdDestino?: string;
+  };
+}
+
+async function calcularFreteReal(cep: string): Promise<ResultadoFrete> {
   try {
     const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_KEY}` },
+      // agente-logistica exige o segredo interno do orquestrador (não é
+      // autenticação de usuário Supabase) — ver _shared/auth-crm.ts.
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${FACTORY_SECRET}` },
       body: JSON.stringify({ endereco: { cep }, workspace_id: WORKSPACE_ID }),
       signal: AbortSignal.timeout(TIMEOUT_FRETE_MS),
     });
@@ -173,9 +201,26 @@ async function calcularFreteReal(cep: string): Promise<{ ok: true; valor: number
       console.error(`[webhook-meta] falha ao calcular frete real: status=${res.status} cep=${cep}`);
       return { ok: false };
     }
-    const data = await res.json() as { disponivel?: boolean; preco_cliente?: number };
+    const data = await res.json() as RespostaAgenteLogistica;
     if (!data.disponivel || data.preco_cliente == null) return { ok: false };
-    return { ok: true, valor: data.preco_cliente };
+
+    const detalhes: FreteDetalhes = {
+      transportadora: data.transportadora,
+      servico: data.servico,
+      precoReal: data.preco_real,
+      markup: data.preco_real != null ? data.preco_cliente - data.preco_real : undefined,
+      quotationId: data.cotacao?.quotationId,
+      moeda: data.cotacao?.moeda,
+      expiresAt: data.cotacao?.expiresAt,
+      ambiente: data.cotacao?.ambiente,
+      mercado: data.cotacao?.mercado,
+      cotadoEm: data.cotacao?.cotado_em,
+      origem: data.cotacao?.origem,
+      destino: data.cotacao?.destino,
+      stopIdOrigem: data.cotacao?.stopIdOrigem,
+      stopIdDestino: data.cotacao?.stopIdDestino,
+    };
+    return { ok: true, valor: data.preco_cliente, detalhes };
   } catch (e) {
     const motivo = e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : String(e);
     console.error(`[webhook-meta] falha ao calcular frete real: ${motivo} cep=${cep}`);
@@ -218,9 +263,28 @@ async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePe
         external_reference: `enemeop-${pedidoId}`,
         horario_entrega: produto.dataEntrega ?? null,
         nome_destinatario: dados.endereco?.nomeDestinatario ?? null,
+        telefone_destinatario: dados.endereco?.telefoneDestinatario ?? null,
         endereco_entrega: enderecoTexto,
         bairro: dados.endereco?.bairro ?? null,
+        mensagem_cartao: produto.mensagemCartao ?? null,
         workspace_id: WORKSPACE_ID,
+        // Cotação real usada para valor_frete — nunca o preço real "puro" da
+        // Lalamove (que fica em frete_preco_real, sem markup) é confundido
+        // com o valor cobrado do cliente (valor_frete, com markup).
+        lalamove_quotation_id: dados.freteDetalhes?.quotationId ?? null,
+        frete_transportadora: dados.freteDetalhes?.transportadora ?? null,
+        frete_servico: dados.freteDetalhes?.servico ?? null,
+        frete_preco_real: dados.freteDetalhes?.precoReal ?? null,
+        frete_markup: dados.freteDetalhes?.markup ?? null,
+        frete_moeda: dados.freteDetalhes?.moeda ?? null,
+        frete_expires_at: dados.freteDetalhes?.expiresAt ?? null,
+        frete_cotado_em: dados.freteDetalhes?.cotadoEm ?? null,
+        frete_ambiente: dados.freteDetalhes?.ambiente ?? null,
+        frete_mercado: dados.freteDetalhes?.mercado ?? null,
+        frete_origem: dados.freteDetalhes?.origem ?? null,
+        frete_destino: dados.freteDetalhes?.destino ?? null,
+        lalamove_stop_id_origem: dados.freteDetalhes?.stopIdOrigem ?? null,
+        lalamove_stop_id_destino: dados.freteDetalhes?.stopIdDestino ?? null,
       })
       .select('id')
       .single();

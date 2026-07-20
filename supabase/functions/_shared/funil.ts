@@ -102,6 +102,26 @@ export interface EnderecoEntrega {
   telefoneDestinatario?: string
 }
 
+/** Dados completos da cotação real de frete — persistidos no pedido pra nunca confundir preço real, markup e preço cobrado, e pra nunca criar uma entrega com uma cotação vencida (ver Parte E/H). */
+export interface FreteDetalhes {
+  transportadora?: string
+  servico?: string
+  quotationId?: string
+  /** Preço real da transportadora, sem markup — nunca confundir com valorFrete (que já inclui o markup cobrado do cliente). */
+  precoReal?: number
+  markup?: number
+  moeda?: string
+  expiresAt?: string | null
+  ambiente?: string
+  mercado?: string
+  cotadoEm?: string
+  origem?: { lat: string; lng: string; endereco: string }
+  destino?: { lat: string; lng: string; endereco: string; cep: string }
+  /** stopIds retornados pela cotação — reaproveitados na criação da entrega real só enquanto a cotação não estiver expirada (ver Parte H.2). */
+  stopIdOrigem?: string
+  stopIdDestino?: string
+}
+
 export interface DadosPedido {
   ocasiao?: string
   /** Tipo de produto citado pelo cliente (ramalhete, buquê, arranjo, orquídea, presente...) — satisfaz a qualificação tanto quanto a ocasião (ver Parte B.4: "ocasião OU tipo de produto"). */
@@ -115,6 +135,8 @@ export interface DadosPedido {
   endereco?: EnderecoEntrega
   valorFrete?: number
   valorTotal?: number
+  /** Detalhes da cotação real usada pra calcular valorFrete — nunca inclui o valor com markup (isso é valorFrete/valorTotal). */
+  freteDetalhes?: FreteDetalhes
   linkPagamento?: string
   paymentId?: string
   pagamentoConfirmado?: boolean
@@ -555,13 +577,14 @@ export function produtoTemDadosMinimos(produto?: ProdutoSelecionado): boolean {
 
 // ── Etapa 5 — Frete (nunca estimado — vem do agente logístico ou falha) ──
 
-export type ResultadoFrete = { ok: true; valor: number } | { ok: false }
+export type ResultadoFrete = { ok: true; valor: number; detalhes?: FreteDetalhes } | { ok: false }
 export type CalculadorFrete = (cep: string) => Promise<ResultadoFrete>
 
 export interface RespostaFrete {
   mensagem: string
   valor: number | null
   falhou: boolean
+  detalhes?: FreteDetalhes
 }
 
 export async function calcularFreteEtapa(cep: string, calcular: CalculadorFrete): Promise<RespostaFrete> {
@@ -573,6 +596,7 @@ export async function calcularFreteEtapa(cep: string, calcular: CalculadorFrete)
     mensagem: `O frete para ${cep} fica em ${formatarPreco(resultado.valor)}.`,
     valor: resultado.valor,
     falhou: false,
+    detalhes: resultado.detalhes,
   }
 }
 
@@ -1112,7 +1136,7 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
   const valorFrete = resultado.valor ?? 0
   const subtotal = precoProduto * quantidade
   const valorTotal = subtotal + valorFrete
-  const dados = { ...estado.dados, valorFrete, valorTotal }
+  const dados = { ...estado.dados, valorFrete, valorTotal, freteDetalhes: resultado.detalhes }
   const primeiraPergunta = CAMPOS_ENDERECO_COMPLETO[0]
   const novoEstado: EstadoConversa = { ...estado, fase: 'endereco_completo', dados }
   return {
@@ -1125,6 +1149,7 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
 
 const CAMPOS_ENDERECO_COMPLETO: { campo: keyof EnderecoEntrega; pergunta: string }[] = [
   { campo: 'nomeDestinatario', pergunta: 'Qual o nome de quem vai receber?' },
+  { campo: 'telefoneDestinatario', pergunta: 'Qual o telefone de quem vai receber (com DDD)?' },
   { campo: 'rua', pergunta: 'Qual a rua ou avenida da entrega?' },
   { campo: 'numero', pergunta: 'Qual o número?' },
   { campo: 'bairro', pergunta: 'Qual o bairro?' },

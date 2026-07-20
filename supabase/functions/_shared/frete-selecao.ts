@@ -14,6 +14,14 @@ export interface OpcaoFrete {
   servico?: string;
   preco: number;
   prazo_dias: number;
+  /** Campos de rastreio da cotação real (só preenchidos pela Lalamove hoje) — usados para persistência (ver Parte E), nunca para a seleção pura abaixo. */
+  quotationId?: string;
+  moeda?: string;
+  expiresAt?: string | null;
+  distanciaMetros?: number | null;
+  ambiente?: string;
+  mercado?: string;
+  stops?: Array<{ stopId: string; lat: string; lng: string; address: string }>;
 }
 
 export interface OpcaoFreteComMarkup extends OpcaoFrete {
@@ -38,5 +46,8 @@ export function selecionarMelhor(opcoes: OpcaoFrete[]): OpcaoFreteComMarkup | nu
     return a.prazo_dias - b.prazo_dias;
   })[0];
 
-  return { ...melhor, preco_cliente: melhor.preco + MARKUP_FRETE_REAIS };
+  // Arredonda pra 2 casas — sem isso, preco_cliente carrega erro de ponto
+  // flutuante (ex.: 44.629999999999995) que nunca deve aparecer num valor
+  // cobrado do cliente nem persistido em pedidos.valor.
+  return { ...melhor, preco_cliente: Math.round((melhor.preco + MARKUP_FRETE_REAIS) * 100) / 100 };
 }

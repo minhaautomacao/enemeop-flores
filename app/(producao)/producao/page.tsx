@@ -4,13 +4,17 @@ import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
 import { EnumeopLogo } from '@/components/enemeop-logo'
 import { Truck } from 'lucide-react'
+import { useAlertaNovoPedido } from '../use-alerta-pedido'
 
 type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue'
+
+const INTERVALO_ATUALIZACAO_MS = 15_000
 
 interface Pedido {
   id: string
   seq: number
   produto: string
+  codigo: string
   foto_url: string
   preco: number
   cliente: string
@@ -19,8 +23,10 @@ interface Pedido {
   bairro: string
   canal: string
   status: StatusPedido
+  statusLogistica: string | null
   prioridade?: boolean
   transportadora: string
+  novo?: boolean
 }
 
 const COLUNAS: { key: StatusPedido; label: string; cor: string; fundo: string }[] = [
@@ -36,35 +42,44 @@ export default function ProducaoPage() {
   const [ultimo, setUltimo] = useState('')
   const [pedidos, setPedidos] = useState<Pedido[]>([])
   const [carregando, setCarregando] = useState(true)
+  const { registrar } = useAlertaNovoPedido()
 
   const carregarPedidos = useCallback(async () => {
-    setCarregando(true)
     try {
       const res = await fetch('/api/producao/pedidos', { cache: 'no-store' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error ?? 'erro ao carregar pedidos')
-      const montados: Pedido[] = (json.pedidos ?? []).map((p: Record<string, unknown>, i: number) => ({
-        id: String(p.id),
-        seq: Number(p.numero ?? i + 1),
-        produto: String(p.produto ?? 'Pedido sem produto'),
-        foto_url: String(p.foto_url ?? ''),
-        preco: Number(p.valor ?? 0),
-        cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
-        telefone: String(p.cliente_telefone ?? ''),
-        horario: p.data_entrega ? new Date(String(p.data_entrega)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : new Date(String(p.criado_em)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-        bairro: String(p.bairro ?? ''),
-        canal: String(p.canal ?? ''),
-        status: String(p.status ?? 'novo') as StatusPedido,
-        prioridade: false,
-        transportadora: 'A definir',
-      }))
+      const bruto: Record<string, unknown>[] = json.pedidos ?? []
+      const { novos } = registrar(bruto.map((p) => Number(p.numero_pedido)).filter((n) => Number.isFinite(n)))
+      const montados: Pedido[] = bruto.map((p) => {
+        const produtos = (p.produtos as Array<{ codigo?: string }> | null) ?? []
+        const numero = Number(p.numero_pedido)
+        return {
+          id: String(p.id),
+          seq: numero,
+          produto: String(p.produto ?? 'Pedido sem produto'),
+          codigo: produtos[0]?.codigo ?? '',
+          foto_url: '',
+          preco: Number(p.valor ?? 0),
+          cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
+          telefone: String(p.cliente_telefone ?? ''),
+          horario: p.data_agendada ? new Date(String(p.data_agendada)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : new Date(String(p.criado_em)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          bairro: String(p.bairro ?? ''),
+          canal: String(p.canal ?? ''),
+          status: String(p.status_producao ?? 'novo') as StatusPedido,
+          statusLogistica: (p.status_logistica as string | null) ?? null,
+          prioridade: false,
+          transportadora: String(p.frete_transportadora ?? 'A definir'),
+          novo: novos.includes(numero),
+        }
+      })
       setPedidos(montados)
     } catch {
       setPedidos([])
     } finally {
       setCarregando(false)
     }
-  }, [])
+  }, [registrar])
 
   useEffect(() => {
     carregarPedidos()
@@ -72,9 +87,14 @@ export default function ProducaoPage() {
     tick()
     const t = setInterval(tick, 1000)
     setUltimo(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
-    const r = setInterval(() => setUltimo(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })), 30000)
+    const atualizar = () => {
+      carregarPedidos()
+      setUltimo(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+    }
+    const r = setInterval(atualizar, INTERVALO_ATUALIZACAO_MS)
     return () => { clearInterval(t); clearInterval(r) }
-  }, [carregarPedidos])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const porStatus = (s: StatusPedido) => pedidos.filter(p => p.status === s)
   const ativos = pedidos.filter(p => !['saiu','entregue'].includes(p.status)).length
@@ -137,9 +157,14 @@ export default function ProducaoPage() {
                     <div
                       key={p.seq}
                       className={`rounded-xl border overflow-hidden ${
-                        p.prioridade ? 'border-amber-500/50 ring-1 ring-amber-500/20' : 'border-white/10'
+                        p.novo ? 'border-green-500/60 ring-2 ring-green-500/30' : p.prioridade ? 'border-amber-500/50 ring-1 ring-amber-500/20' : 'border-white/10'
                       }`}
                     >
+                      {p.novo && (
+                        <div className="px-3 py-1 bg-green-500/20 border-b border-green-500/30 text-[10px] font-black text-green-400 uppercase tracking-widest">
+                          Novo pedido
+                        </div>
+                      )}
                       {/* Topo: foto + número grande + nome do produto */}
                       <div className={`flex gap-3 p-3 ${p.prioridade ? 'bg-amber-500/10' : 'bg-white/5'}`}>
 

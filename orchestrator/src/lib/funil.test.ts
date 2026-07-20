@@ -139,7 +139,7 @@ test('8. Flora monta resumo completo do pedido antes de pedir confirmacao', () =
     produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'hoje até 18h' },
     valorFrete: 22.5,
     valorTotal: 162.5,
-    endereco: { cep: '04204-030', rua: 'Rua Costa Aguiar', numero: '1184', bairro: 'Ipiranga', cidade: 'São Paulo', nomeDestinatario: 'Camila' },
+    endereco: { cep: '04204-030', rua: 'Rua Costa Aguiar', numero: '1184', bairro: 'Ipiranga', cidade: 'São Paulo', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000' },
   })
   assert.match(resumo, /Buquê de Rosas/)
   assert.match(resumo, /162,50/)
@@ -663,7 +663,7 @@ test('dispatcher: fluxo feliz completo do inicio ate pedido_criado', async () =>
 
   // 5) destinatário e endereço completo, um campo por vez (nunca tudo na mesma frase)
   let rEnderecoCompleto = rEndereco
-  for (const resposta of ['Camila', 'Rua das Flores', '123', 'Ipiranga', 'São Paulo']) {
+  for (const resposta of ['Camila', '11999990000', 'Rua das Flores', '123', 'Ipiranga', 'São Paulo']) {
     rEnderecoCompleto = await avancarFunil(estado, resposta, 'compra_produto', deps)
     estado = rEnderecoCompleto.estado
   }
@@ -729,7 +729,7 @@ test('dispatcher: falha ao gerar pagamento -> transfere para humano', async () =
       produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' },
       valorFrete: 22.5,
       valorTotal: 162.5,
-      endereco: { cep: '04204-030', nomeDestinatario: 'Camila', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' },
+      endereco: { cep: '04204-030', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' },
     },
     perguntasFeitas: [],
   }
@@ -969,7 +969,7 @@ test('regressão completa 2026-07-17: qualificação -> 2 opções com fotos cor
   assert.equal(estado.dados.valorFrete, 18)
 
   // Destinatário e endereço completo, um campo por vez.
-  for (const resposta of ['Camila', 'Rua das Flores', '123', 'Ipiranga', 'São Paulo']) {
+  for (const resposta of ['Camila', '11999990000', 'Rua das Flores', '123', 'Ipiranga', 'São Paulo']) {
     r = await avancarFunil(estado, resposta, 'compra_produto', deps)
     estado = r.estado
   }
@@ -1099,7 +1099,7 @@ test('revalidação antes do pedido: produto que saiu de disponibilidade nunca c
   })
   const estado: EstadoConversa = {
     fase: 'aguardando_confirmacao',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' } },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' } },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1117,7 +1117,7 @@ test('revalidação antes do pedido: preço mudou -> avisa o novo total e não c
   })
   const estado: EstadoConversa = {
     fase: 'aguardando_confirmacao',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' } },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' } },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1131,7 +1131,7 @@ test('revalidação antes do pedido: preço e disponibilidade confirmados na fon
   const deps = depsFake({ revalidarProduto: async () => ({ disponivel: true, preco: 140 }) })
   const estado: EstadoConversa = {
     fase: 'aguardando_confirmacao',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' } },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' } },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1168,7 +1168,7 @@ test('continuidade completa: categoria -> produto por código -> quantidade/data
   assert.equal(estado.fase, 'endereco_completo')
   assert.equal(estado.dados.valorFrete, 18)
 
-  for (const resposta of ['Camila', 'Rua das Flores', '123', 'Ipiranga', 'São Paulo']) {
+  for (const resposta of ['Camila', '11999990000', 'Rua das Flores', '123', 'Ipiranga', 'São Paulo']) {
     r = await avancarFunil(estado, resposta, 'compra_produto', deps)
     estado = r.estado
   }
@@ -1191,7 +1191,7 @@ test('revalidação antes do pedido chama revalidarProduto com o ID técnico (id
     fase: 'aguardando_confirmacao',
     dados: {
       produto: { nome: '002 - Arranjo A', preco: 105, codigo: '002', idExterno: '100', quantidade: 1, dataEntrega: 'hoje' },
-      valorTotal: 127.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' },
+      valorTotal: 127.5, valorFrete: 22.5, endereco: { cep: '01000-000', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo' },
     },
     perguntasFeitas: [],
   }
@@ -1380,7 +1380,7 @@ test('23. dados completos (produto, quantidade, data, frete, destinatário, ende
     dados: {
       produto: { nome: 'Arranjo 2 Rosas', preco: 105, quantidade: 1, dataEntrega: 'hoje', idExterno: '3656' },
       valorFrete: 40.13, valorTotal: 145.13,
-      endereco: { cep: '01040-010', rua: 'Rua X', numero: '10', bairro: 'Centro', cidade: 'São Paulo', nomeDestinatario: 'Camila' },
+      endereco: { cep: '01040-010', rua: 'Rua X', numero: '10', bairro: 'Centro', cidade: 'São Paulo', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000' },
     },
     perguntasFeitas: [],
   }

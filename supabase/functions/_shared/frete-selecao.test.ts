@@ -34,3 +34,10 @@ test('preco_cliente sempre soma exatamente o markup fixo, nunca um valor estimad
   const melhor = selecionarMelhor(opcoes);
   assert.equal(melhor?.preco_cliente, 25 + MARKUP_FRETE_REAIS);
 });
+
+test('preco_cliente nunca carrega erro de ponto flutuante — sempre arredondado a 2 casas', () => {
+  const opcoes: OpcaoFrete[] = [{ transportadora: 'Lalamove', preco: 29.63, prazo_dias: 0 }];
+  const melhor = selecionarMelhor(opcoes);
+  assert.equal(melhor?.preco_cliente, 44.63);
+  assert.equal(Number.isInteger(melhor!.preco_cliente * 100), true);
+});

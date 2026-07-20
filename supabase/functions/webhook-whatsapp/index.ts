@@ -45,6 +45,7 @@ const FASE_LIVRE_PARA_FUNIL: Record<string, Fase> = {
 };
 
 const SERVICE_KEY   = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const FACTORY_SECRET = Deno.env.get('FACTORY_SECRET') ?? '';
 const SUPABASE_URL  = Deno.env.get('SUPABASE_URL') ?? '';
 const WORKSPACE_ID  = Deno.env.get('SAAS_WORKSPACE_ID') ?? Deno.env.get('WORKSPACE_NAME') ?? '';
 const ZAPI_INSTANCE = Deno.env.get('ZAPI_INSTANCE_ID') ?? '';
@@ -495,8 +496,11 @@ async function cotarFrete(endereco: EnderecoEntrega): Promise<Record<string, unk
   try {
     const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_KEY}` },
+      // agente-logistica exige o segredo interno do orquestrador (não é
+      // autenticação de usuário Supabase) — ver _shared/auth-crm.ts.
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${FACTORY_SECRET}` },
       body: JSON.stringify({ endereco, workspace_id: WORKSPACE_ID }),
+      signal: AbortSignal.timeout(25_000),
     });
     return await res.json() as Record<string, unknown>;
   } catch (e) {

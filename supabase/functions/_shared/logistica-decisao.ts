@@ -15,6 +15,12 @@
  *                        foi criada (timeout/falha de rede depois de enviar a
  *                        requisição, ou resposta 2xx sem orderId). Nunca
  *                        retry automático — só revisão humana.
+ *   'agendada'         — pagamento aprovado fora do horário comercial (Parte
+ *                        5): nunca chama o motorista na hora, fica agendado
+ *                        pra logistica_executar_em (próximo horário
+ *                        comercial). Reivindicável como null/'erro_logistica'
+ *                        — só o job agendado (logistica-agendada-processar)
+ *                        deve chegar aqui antes do horário chegar.
  */
 
 // Depois desse tempo sem resolução, um claim 'pendente' deixa de ser
@@ -73,5 +79,5 @@ export function decidirAcaoLogistica(
  * 'revisao_logistica'.
  */
 export function statusLogisticaReivindicavel(statusAtual: string | null): boolean {
-  return statusAtual === null || statusAtual === 'erro_logistica';
+  return statusAtual === null || statusAtual === 'erro_logistica' || statusAtual === 'agendada';
 }

@@ -30,8 +30,47 @@ export function dentroDoHorarioComercial(agora: Date = new Date()): boolean {
   return eDiaUtil ? (horaLocal >= 9 && horaLocal < 19) : (horaLocal >= 10 && horaLocal < 18);
 }
 
+const DIAS_SEMANA_PT = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+
+/**
+ * Próximo instante, a partir de `agora`, em que a loja está dentro do
+ * horário comercial (ver dentroDoHorarioComercial acima — mesma fonte
+ * única de verdade pros dois cálculos). Nunca varre mais que 8 dias
+ * (proteção contra config quebrada gerando um loop longo demais).
+ */
+export function proximaAberturaComercial(agora: Date = new Date()): Date {
+  let candidato = new Date(agora);
+  const limite = new Date(agora.getTime() + 8 * 24 * 60 * 60_000);
+  while (candidato < limite) {
+    if (dentroDoHorarioComercial(candidato)) return candidato;
+    candidato = new Date(candidato.getTime() + 5 * 60_000);
+  }
+  return candidato;
+}
+
+/**
+ * Texto pronto pra funil.ts usar quando precisa ajustar "hoje" pra "o
+ * próximo dia útil" (Parte 4) — calculado aqui (fonte única do horário) e
+ * injetado como string simples em avancarFunil, que nunca calcula horário
+ * sozinho (é puro/zero-imports, ver cabeçalho de funil.ts).
+ */
+export function textoProximaAberturaComercial(agora: Date = new Date()): string {
+  const proxima = proximaAberturaComercial(agora);
+  const horaLocal = (proxima.getUTCHours() - 3 + 24) % 24;
+  const horaTexto = `${String(horaLocal).padStart(2, '0')}h`;
+  const mesmoDia = proxima.toDateString() === agora.toDateString();
+  if (mesmoDia) return `ainda hoje, a partir das ${horaTexto}`;
+  const amanha = new Date(agora.getTime() + 24 * 60 * 60_000).toDateString() === proxima.toDateString();
+  const diaSemana = DIAS_SEMANA_PT[proxima.getUTCDay()];
+  return amanha ? `amanhã (${diaSemana}), a partir das ${horaTexto}` : `${diaSemana}, a partir das ${horaTexto}`;
+}
+
 // Mensagens fixas usadas pelo webhook-meta quando fora do horário comercial.
 // Extraídas aqui (em vez de strings soltas no handler) para serem testáveis.
+//
+// @deprecated substituídas pelo fluxo com opt-in de funil.ts
+// (mensagemAvisoForaDoHorarioComOpcao/mensagemAguardandoRespostaForaDoHorario,
+// Parte 4) — mantidas só enquanto código antigo ainda as referenciar.
 
 export function mensagemAvisoForaDoHorario(): string {
   return 'Estamos fora do horário da loja agora, mas posso já ir adiantando seu atendimento por aqui. ';

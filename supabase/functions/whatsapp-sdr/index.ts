@@ -11,7 +11,10 @@
  *   - Agente não consegue avançar na venda após várias trocas
  *   - payload.forcar_handoff = true
  *
- * Horário comercial: 08:00–18:00 BRT (seg–sáb)
+ * Horário comercial: seg-sex 09:00–19:00, sáb/dom/feriados 10:00–18:00 (BRT)
+ * — fonte única em ../_shared/horario-comercial.ts, mesma usada por
+ * webhook-meta e webhook-whatsapp (antes desta correção, este arquivo tinha
+ * uma cópia local incorreta: seg-sáb 09-19h, dom/feriados 10-14h).
  * Fora do horário: avisa cliente e agenda retorno no próximo dia útil.
  */
 
@@ -21,23 +24,8 @@ import { logEvento } from '../_shared/logger.ts';
 import { enviarWhatsApp } from '../_shared/whatsapp.ts';
 import { enviarDMInstagram } from '../_shared/instagram.ts';
 import { montarRegistroHandoff } from '../_shared/handoff-whatsapp-sdr.ts';
+import { dentroDoHorarioComercial as eHorarioComercial } from '../_shared/horario-comercial.ts';
 import type { OrquestradorPayload } from '../_shared/types.ts';
-
-// Feriados nacionais fixos (MM-DD)
-const FERIADOS = new Set([
-  '01-01','04-21','05-01','09-07','10-12','11-02','11-15','11-20','12-25',
-]);
-
-// Seg–Sáb: 09–19h | Dom e feriados: 10–14h (BRT = UTC-3)
-function eHorarioComercial(): boolean {
-  const agora = new Date();
-  const horaBRT = (agora.getUTCHours() - 3 + 24) % 24;
-  const diaSemana = agora.getUTCDay();
-  const mmdd = `${String(agora.getUTCMonth() + 1).padStart(2,'0')}-${String(agora.getUTCDate()).padStart(2,'0')}`;
-  const eFeriado = FERIADOS.has(mmdd);
-  if (diaSemana === 0 || eFeriado) return horaBRT >= 10 && horaBRT < 14;
-  return horaBRT >= 9 && horaBRT < 19;
-}
 
 const SYSTEM_PROMPT = `Você é o SDR da floricultura Enemeop Flores.
 Seu papel: redigir mensagens e decidir o próximo passo no atendimento via WhatsApp/Instagram.

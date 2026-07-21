@@ -28,6 +28,7 @@ export interface PedidoParaEntrega extends PedidoParaLogistica {
   lalamove_stop_id_destino: string | null;
   frete_expires_at: string | null;
   frete_destino: { cep?: string } | null;
+  frete_preco_real: number | null;
   logistica_tentativas: number | null;
 }
 
@@ -37,6 +38,11 @@ export interface ConfigLogisticaProcessamento {
   workspaceId: string;
   storePhone: string;
   storeNome: string;
+  // Quanto o preço operacional (Lalamove) pode subir, em reais, entre a
+  // cotação original (cobrada do cliente) e uma re-cotação pós-expiração,
+  // antes de exigir revisão humana em vez de a loja absorver a diferença
+  // automaticamente (Parte 3 — ordem financeiramente segura).
+  limiteAumentoOperacionalReais: number;
 }
 
 export type ResultadoProcessamentoLogistica =
@@ -72,7 +78,7 @@ async function marcarRevisaoLogistica(db: Db, pedidoId: string, tentativas: numb
 async function reconsultarFrete(
   config: ConfigLogisticaProcessamento,
   cepDestino: string,
-): Promise<{ quotationId: string; expiresAt: string | null; stopIdOrigem?: string; stopIdDestino?: string } | null> {
+): Promise<{ quotationId: string; expiresAt: string | null; stopIdOrigem?: string; stopIdDestino?: string; precoReal: number | null } | null> {
   try {
     const res = await fetch(`${config.supabaseUrl}/functions/v1/agente-logistica`, {
       method: 'POST',
@@ -83,6 +89,7 @@ async function reconsultarFrete(
     if (!res.ok) return null;
     const data = await res.json() as {
       disponivel?: boolean;
+      preco_real?: number;
       cotacao?: { quotationId?: string; expiresAt?: string | null; stopIdOrigem?: string; stopIdDestino?: string };
     };
     if (!data.disponivel || !data.cotacao?.quotationId) return null;
@@ -91,6 +98,7 @@ async function reconsultarFrete(
       expiresAt: data.cotacao.expiresAt ?? null,
       stopIdOrigem: data.cotacao.stopIdOrigem,
       stopIdDestino: data.cotacao.stopIdDestino,
+      precoReal: data.preco_real ?? null,
     };
   } catch (e) {
     console.error('[logistica] falha ao re-cotar frete antes da entrega:', e);
@@ -134,7 +142,7 @@ export async function processarLogisticaAposPagamento(
   const { data: claim } = await db.from('pedidos')
     .update({ status_logistica: 'pendente', logistica_pendente_desde: new Date().toISOString() })
     .eq('id', pedido.id)
-    .or('status_logistica.is.null,status_logistica.eq.erro_logistica')
+    .or('status_logistica.is.null,status_logistica.eq.erro_logistica,status_logistica.eq.agendada')
     .select('id')
     .maybeSingle();
   if (!claim) {
@@ -149,6 +157,11 @@ export async function processarLogisticaAposPagamento(
   let expiresAt = pedido.frete_expires_at;
   let stopIdOrigem = pedido.lalamove_stop_id_origem;
   let stopIdDestino = pedido.lalamove_stop_id_destino;
+  // Preço operacional (Lalamove) que efetivamente será usado pra criar a
+  // corrida — registrado separado do preço cotado ao cliente (frete_preco_real,
+  // travado desde o checkout e nunca cobrado de novo), pra nunca confundir
+  // os dois quando a cotação expira e precisa ser refeita (Parte 3).
+  let precoOperacionalFinal = pedido.frete_preco_real;
 
   if (!quotationId || !stopIdOrigem || !stopIdDestino || cotacaoExpirada(expiresAt)) {
     const cepDestino = pedido.frete_destino?.cep;
@@ -161,10 +174,26 @@ export async function processarLogisticaAposPagamento(
       await marcarErroLogistica(db, pedido.id, tentativas, 'falha ao re-cotar frete antes de criar a entrega');
       return { status: 'erro_logistica', motivo: 'falha_recotacao' };
     }
+
+    // Nunca cobra o cliente de novo pela diferença — a loja absorve um
+    // aumento operacional dentro do limite configurado; acima disso, nunca
+    // decide sozinho, vai pra revisão humana (Parte 3).
+    if (nova.precoReal != null && pedido.frete_preco_real != null) {
+      const aumento = nova.precoReal - pedido.frete_preco_real;
+      if (aumento > config.limiteAumentoOperacionalReais) {
+        await marcarRevisaoLogistica(
+          db, pedido.id, tentativas,
+          `recotacao com aumento operacional acima do limite (aumento=${aumento.toFixed(2)}, limite=${config.limiteAumentoOperacionalReais})`,
+        );
+        return { status: 'revisao_logistica', motivo: 'aumento_operacional_acima_do_limite' };
+      }
+    }
+
     quotationId = nova.quotationId;
     expiresAt = nova.expiresAt;
     stopIdOrigem = nova.stopIdOrigem;
     stopIdDestino = nova.stopIdDestino;
+    precoOperacionalFinal = nova.precoReal ?? pedido.frete_preco_real;
     await db.from('pedidos').update({
       lalamove_quotation_id: quotationId,
       frete_expires_at: expiresAt,
@@ -208,6 +237,7 @@ export async function processarLogisticaAposPagamento(
     status_logistica: 'criada',
     lalamove_order_id: resultado.orderId,
     logistica_criado_em: new Date().toISOString(),
+    frete_preco_operacional_final: precoOperacionalFinal,
     logistica_resposta: {
       orderId: resultado.orderId, status: resultado.status,
       shareLink: resultado.shareLink, precoTotal: resultado.precoTotal, moeda: resultado.moeda,
@@ -220,4 +250,4 @@ export async function processarLogisticaAposPagamento(
 
 export const SELECT_PEDIDO_PARA_LOGISTICA = `id, status, nome_destinatario, telefone_destinatario,
   lalamove_quotation_id, lalamove_order_id, lalamove_stop_id_origem, lalamove_stop_id_destino,
-  frete_expires_at, frete_destino, status_logistica, logistica_pendente_desde, logistica_tentativas`;
+  frete_expires_at, frete_destino, frete_preco_real, status_logistica, logistica_pendente_desde, logistica_tentativas`;

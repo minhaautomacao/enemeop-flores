@@ -58,9 +58,15 @@ test('pendente sem timestamp de claim (dado corrompido/antigo) e tratado como am
   assert.deepEqual(d, { acao: 'marcar_ambiguo_por_timeout' });
 });
 
-test('statusLogisticaReivindicavel: null e erro_logistica sao reivindicaveis', () => {
+test('statusLogisticaReivindicavel: null, erro_logistica e agendada sao reivindicaveis', () => {
   assert.equal(statusLogisticaReivindicavel(null), true);
   assert.equal(statusLogisticaReivindicavel('erro_logistica'), true);
+  assert.equal(statusLogisticaReivindicavel('agendada'), true);
+});
+
+test('pedido agendado (pagamento fora do horario) permite a tentativa do job agendado', () => {
+  const d = decidirAcaoLogistica({ status: 'pago', status_logistica: 'agendada', lalamove_order_id: null }, true);
+  assert.deepEqual(d, { acao: 'criar' });
 });
 
 test('statusLogisticaReivindicavel: pendente, criada e revisao_logistica nunca sao reivindicaveis (evita corrida concorrente/ambigua duplicada)', () => {

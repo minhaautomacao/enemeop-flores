@@ -11,21 +11,36 @@
  * Todo este módulo é puro/injetável (sem chamada de rede direta) para
  * ser testável localmente sem depender de Groq, Meta, WhatsApp, Redis,
  * Supabase ou dos agentes de logística/financeiro reais.
+ *
+ * ZERO IMPORTS é uma invariante deliberada (ver _shared/funil.ts): o núcleo
+ * roda como cópia byte-a-byte tanto em Node (orchestrator) quanto em Deno
+ * (Edge Functions). Um `import` relativo com extensão `.js` resolve certo
+ * no Node (tsx/NodeNext) mas quebra no Deno (exige `.ts`) — por isso o
+ * formulário de entrega (Parte 2) é uma SEÇÃO deste arquivo, não um módulo
+ * separado importado. webhook-whatsapp (100% Deno) importa essas funções
+ * direto de _shared/funil.ts, sem esse problema de runtime cruzado.
  */
 
 // ── Fases do funil ────────────────────────────────────────────────────────
 
 export type Fase =
   | 'inicio'
+  | 'aviso_fora_horario'
   | 'qualificacao'
   | 'escolha_categoria'
   | 'catalogo_completo'
   | 'recomendacao'
   | 'produto_selecionado'
+  /** @deprecated substituída por 'aguardando_formulario' (formulário único) — mantida só pra nunca travar uma conversa que ainda esteja nesta fase de antes da migração. */
   | 'aguardando_endereco'
   | 'calculando_frete'
+  /** @deprecated substituída por 'aguardando_formulario'/'confirmando_formulario' — mantida só por compatibilidade com conversas antigas. */
   | 'endereco_completo'
+  /** @deprecated substituída por 'aguardando_aprovacao_frete' — mantida só por compatibilidade com conversas antigas. */
   | 'aguardando_confirmacao'
+  | 'aguardando_formulario'
+  | 'confirmando_formulario'
+  | 'aguardando_aprovacao_frete'
   | 'aguardando_pagamento'
   | 'pagamento_confirmado'
   | 'pedido_criado'
@@ -71,6 +86,7 @@ export interface EnderecoEntrega {
   complemento?: string
   bairro?: string
   cidade?: string
+  uf?: string
   referencia?: string
   nomeDestinatario?: string
   telefoneDestinatario?: string
@@ -131,6 +147,17 @@ export interface DadosPedido {
   catalogoCompletoIndiceCategoria?: number
   /** true quando o cliente já confirmou o resumo do pedido nesta troca. */
   resumoConfirmado?: boolean
+  /** Dados brutos do formulário único de entrega, coletados/validados incrementalmente (ver Parte 2). */
+  formulario?: FormularioEntregaDados
+  /** Nome de quem comprou (formulário) — pode diferir do nome do perfil do canal. */
+  nomeComprador?: string
+  /** true assim que o cliente aceita continuar mesmo fora do horário comercial, para esta jornada — nunca repete o aviso depois disso (ver Parte 4). Limpo a cada reinício de jornada. */
+  aceitouForaDoHorario?: boolean
+  aceitouForaDoHorarioEm?: string
+  /** Texto pronto ("amanhã (terça-feira), a partir das 9h") pra ajustar "hoje" quando dataEntrega é coletada — só usado se aceitouForaDoHorario. */
+  proximoHorarioTexto?: string
+  /** Marca a fronteira de uma nova jornada dentro da mesma conversa — nunca apaga o histórico, só audita quando um reinício aconteceu (ver Parte 1). */
+  jornadaIniciadaEm?: string
 }
 
 export interface EstadoConversa {
@@ -141,6 +168,209 @@ export interface EstadoConversa {
 
 export function estadoInicial(): EstadoConversa {
   return { fase: 'inicio', dados: {}, perguntasFeitas: [] }
+}
+
+// ── Formulário único de entrega (Parte 2) ─────────────────────────────────
+//
+// Substitui a coleta campo-a-campo antiga (CAMPOS_ENDERECO_COMPLETO): pede
+// todos os dados de entrega numa única mensagem, com um parser determinístico
+// (nunca IA generativa — mesma filosofia do resto do arquivo) tolerante a
+// pequenas variações de rótulo. Usado por webhook-meta (via avancarFunil,
+// abaixo) e por webhook-whatsapp (importa estas funções direto de
+// _shared/funil.ts).
+
+export interface FormularioEntregaDados {
+  nomeComprador?: string
+  nomeDestinatario?: string
+  telefoneDestinatario?: string
+  cep?: string
+  rua?: string
+  numero?: string
+  complemento?: string
+  bairro?: string
+  cidade?: string
+  uf?: string
+  dataEntrega?: string
+  periodo?: string
+  mensagemCartao?: string
+}
+
+export const CAMPOS_OBRIGATORIOS_FORMULARIO: (keyof FormularioEntregaDados)[] = [
+  'nomeComprador', 'nomeDestinatario', 'telefoneDestinatario',
+  'cep', 'rua', 'numero', 'bairro', 'cidade', 'uf', 'dataEntrega',
+]
+
+export const CAMPOS_OPCIONAIS_FORMULARIO: (keyof FormularioEntregaDados)[] = [
+  'complemento', 'periodo', 'mensagemCartao',
+]
+
+const ROTULO_EXIBICAO_FORMULARIO: Record<keyof FormularioEntregaDados, string> = {
+  nomeComprador: 'nome de quem está fazendo o pedido',
+  nomeDestinatario: 'nome de quem vai receber',
+  telefoneDestinatario: 'telefone de quem vai receber (com DDD)',
+  cep: 'CEP',
+  rua: 'rua ou avenida',
+  numero: 'número',
+  complemento: 'complemento',
+  bairro: 'bairro',
+  cidade: 'cidade',
+  uf: 'UF',
+  dataEntrega: 'data desejada para entrega',
+  periodo: 'período ou horário preferido',
+  mensagemCartao: 'mensagem para o cartão',
+}
+
+export const TEXTO_FORMULARIO_ENTREGA = `📋 Dados para entrega
+
+Pra agilizar, copie o formulário abaixo, preencha e envie tudo numa única mensagem:
+
+Nome de quem está fazendo o pedido:
+Nome de quem vai receber:
+Telefone de quem vai receber, com DDD:
+CEP:
+Rua ou avenida:
+Número:
+Complemento, se houver:
+Bairro:
+Cidade:
+UF:
+Data desejada para entrega:
+Período ou horário preferido:
+Mensagem para o cartão, se desejar:`
+
+// Rótulos aceitos por campo (já normalizados: sem acento, minúsculo, sem
+// pontuação de marcação). O primeiro de cada lista é o rótulo canônico do
+// formulário — os demais toleram pequenas variações reais de digitação.
+const ROTULOS_ACEITOS_FORMULARIO: Record<keyof FormularioEntregaDados, string[]> = {
+  nomeComprador: [
+    'nome de quem esta fazendo o pedido', 'nome do comprador', 'quem esta fazendo o pedido',
+    'quem esta pedindo', 'remetente', 'seu nome', 'nome de quem pede',
+  ],
+  nomeDestinatario: [
+    'nome de quem vai receber', 'nome do destinatario', 'destinatario', 'quem vai receber',
+  ],
+  telefoneDestinatario: [
+    'telefone de quem vai receber, com ddd', 'telefone de quem vai receber',
+    'telefone do destinatario', 'telefone com ddd', 'telefone',
+  ],
+  cep: ['cep'],
+  rua: ['rua ou avenida', 'rua/avenida', 'rua', 'avenida', 'logradouro', 'endereco'],
+  numero: ['numero', 'nº', 'n°', 'n.'],
+  complemento: ['complemento, se houver', 'complemento'],
+  bairro: ['bairro'],
+  cidade: ['cidade'],
+  uf: ['uf', 'estado'],
+  dataEntrega: ['data desejada para entrega', 'data de entrega', 'data desejada', 'data'],
+  periodo: ['periodo ou horario preferido', 'periodo/horario', 'periodo', 'horario preferido', 'horario'],
+  mensagemCartao: ['mensagem para o cartao, se desejar', 'mensagem para o cartao', 'mensagem do cartao', 'cartao'],
+}
+
+// Ordem de checagem importa: rótulos mais específicos (frases longas) antes
+// dos mais genéricos, pra "nome de quem vai receber" nunca ser confundido
+// com "nome de quem esta fazendo o pedido" só por conterem "nome" em comum.
+const ORDEM_CAMPOS_FORMULARIO: (keyof FormularioEntregaDados)[] = [
+  'telefoneDestinatario', 'nomeDestinatario', 'nomeComprador',
+  'dataEntrega', 'periodo', 'complemento', 'mensagemCartao',
+  'cep', 'rua', 'numero', 'bairro', 'cidade', 'uf',
+]
+
+function normalizarRotuloFormulario(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .replace(/[*_📋💌]/g, '')
+    .trim()
+}
+
+/**
+ * Extrai os campos do formulário a partir de UMA resposta do cliente com
+ * várias linhas "Rótulo: valor". Nunca inventa nada: um campo só aparece no
+ * resultado se houver uma linha reconhecível com um valor não vazio depois
+ * dos dois-pontos.
+ */
+export function extrairFormularioEntrega(texto: string): FormularioEntregaDados {
+  const linhas = texto.split('\n')
+  const dados: FormularioEntregaDados = {}
+
+  for (const linhaBruta of linhas) {
+    const idx = linhaBruta.indexOf(':')
+    if (idx === -1) continue
+    const rotulo = normalizarRotuloFormulario(linhaBruta.slice(0, idx))
+    const valor = linhaBruta.slice(idx + 1).trim()
+    if (!rotulo || !valor) continue
+
+    for (const campo of ORDEM_CAMPOS_FORMULARIO) {
+      if (dados[campo]) continue
+      const candidatos = ROTULOS_ACEITOS_FORMULARIO[campo]
+      const bateu = candidatos.some(r => rotulo === r || rotulo.includes(r))
+      if (bateu) {
+        dados[campo] = valor
+        break
+      }
+    }
+  }
+
+  return dados
+}
+
+/** Campos obrigatórios que ainda faltam — nunca considera opcionais. */
+export function camposFaltandoFormulario(dados: FormularioEntregaDados): (keyof FormularioEntregaDados)[] {
+  return CAMPOS_OBRIGATORIOS_FORMULARIO.filter(c => !dados[c])
+}
+
+export function formularioCompleto(dados: FormularioEntregaDados): boolean {
+  return camposFaltandoFormulario(dados).length === 0
+}
+
+/** Pede só os campos que faltam, numa única mensagem — nunca repete os já preenchidos. */
+export function montarMensagemCamposFaltando(faltando: (keyof FormularioEntregaDados)[]): string {
+  const linhas = faltando.map(c => `${ROTULO_EXIBICAO_FORMULARIO[c].replace(/^./, m => m.toUpperCase())}:`)
+  return `Só faltou completar (pode responder tudo numa mensagem só):\n\n${linhas.join('\n')}`
+}
+
+/** CEP brasileiro: 8 dígitos, com ou sem hífen. */
+export function cepValido(cep: string): boolean {
+  return /^\d{5}-?\d{3}$/.test(cep.trim())
+}
+
+/**
+ * Normaliza um telefone de destinatário digitado em qualquer formato comum
+ * (com/sem DDI, com/sem formatação) para E.164 (+55DDDNUMERO) — formato
+ * exigido pela Lalamove. Nunca inventa dígitos: se não for possível
+ * reconhecer um número BR válido (10 ou 11 dígitos, +/- DDI 55), devolve
+ * null em vez de arriscar um valor incorreto.
+ */
+export function normalizarTelefoneDestinatarioBR(raw: string): string | null {
+  let digitos = raw.replace(/\D/g, '')
+  if (digitos.startsWith('55') && (digitos.length === 12 || digitos.length === 13)) {
+    // já tem DDI
+  } else if (digitos.length === 10 || digitos.length === 11) {
+    digitos = `55${digitos}`
+  } else {
+    return null
+  }
+  if (digitos.length !== 12 && digitos.length !== 13) return null
+  return `+${digitos}`
+}
+
+/** Resumo sanitizado do formulário pra confirmação — nunca mostra o CEP sozinho sem o resto do endereço, nem inventa campo ausente. */
+export function montarResumoFormulario(dados: FormularioEntregaDados): string {
+  const linhas = [
+    'Confere os dados de entrega?',
+    '',
+    dados.nomeComprador ? `- Pedido de: ${dados.nomeComprador}` : null,
+    dados.nomeDestinatario ? `- Destinatário: ${dados.nomeDestinatario}` : null,
+    dados.telefoneDestinatario ? `- Telefone do destinatário: ${dados.telefoneDestinatario}` : null,
+    (dados.rua || dados.numero) ? `- Endereço: ${[dados.rua, dados.numero].filter(Boolean).join(', ')}${dados.complemento ? ` (${dados.complemento})` : ''}` : null,
+    (dados.bairro || dados.cidade || dados.uf) ? `- Bairro/Cidade: ${[dados.bairro, dados.cidade, dados.uf].filter(Boolean).join(', ')}` : null,
+    dados.cep ? `- CEP: ${dados.cep}` : null,
+    dados.dataEntrega ? `- Data: ${dados.dataEntrega}${dados.periodo ? ` (${dados.periodo})` : ''}` : null,
+    dados.mensagemCartao ? `- Mensagem do cartão: "${dados.mensagemCartao}"` : null,
+    '',
+    'Está tudo certo? (responda "sim" para eu calcular o frete)',
+  ].filter((l): l is string => l !== null)
+  return linhas.join('\n')
 }
 
 // ── Classificador de intenção (determinístico, sem LLM) ──────────────────
@@ -265,7 +495,8 @@ function contemSinalComercial(mensagem: string): boolean {
 
 const FASES_COMPRA_EM_ANDAMENTO: Fase[] = [
   'produto_selecionado', 'aguardando_endereco', 'calculando_frete',
-  'endereco_completo', 'aguardando_confirmacao', 'aguardando_pagamento',
+  'endereco_completo', 'aguardando_confirmacao', 'aguardando_formulario',
+  'confirmando_formulario', 'aguardando_aprovacao_frete', 'aguardando_pagamento',
 ]
 
 // Saudação "pura": a mensagem inteira (sem outro conteúdo) é só um
@@ -276,6 +507,57 @@ const REGEX_SAUDACAO_SIMPLES = /^(oi+|ola|bom\s?dia|boa\s?tarde|boa\s?noite|e\s?
 
 export function pareceSaudacaoSimples(mensagem: string): boolean {
   return REGEX_SAUDACAO_SIMPLES.test(normalizar(mensagem))
+}
+
+// ── Reinício seguro de uma nova jornada (Parte 1) ─────────────────────────
+//
+// Caso real observado em monitoramento: uma conversa presa numa fase
+// avançada (endereço/frete) recebeu uma mensagem pedindo pra ver outras
+// opções — o funil reaproveitou CEP e cotação antigos em vez de começar do
+// catálogo. Frases explícitas de continuação/correção NUNCA disparam
+// reinício; só uma intenção comercial nova e inequívoca dispara.
+
+const FRASES_NOVO_PEDIDO = [
+  'novo pedido', 'outro pedido', 'outro produto', 'fazer um novo pedido',
+  'quero ver op', 'mostrar op', 'mostra op', 'outras opcoes', 'outras op', 'ver outras op',
+]
+
+const FRASES_CONTINUACAO = [
+  'continuar', 'pode seguir', 'e o frete', 'segue', 'continua', 'pode continuar', 'prossegue',
+]
+
+/**
+ * true só quando a mensagem, numa fase de compra já avançada, traz uma
+ * intenção comercial claramente NOVA — nunca em resposta a "continuar",
+ * confirmações ("sim"), ou o que parece ser a resposta esperada pela fase
+ * atual (não bate com nenhuma frase de reinício nem gatilho saudação+tipo).
+ */
+export function pareceNovaIntencaoDeCompra(mensagem: string, faseAtual: Fase): boolean {
+  if (!FASES_COMPRA_EM_ANDAMENTO.includes(faseAtual)) return false
+  const n = normalizar(mensagem)
+  if (FRASES_CONTINUACAO.some(p => n.includes(normalizar(p)))) return false
+  if (pareceConfirmacao(mensagem)) return false
+  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p)))) return true
+  const temSaudacao = /^(oi+|ola|bom\s?dia|boa\s?tarde|boa\s?noite|e\s?ai|eae+|opa|hey)\b/.test(n)
+  const temTipoProdutoOuOcasiao = TIPOS_PRODUTO.some(t => t.regex.test(n))
+  return temSaudacao && temTipoProdutoOuOcasiao
+}
+
+/**
+ * Reinicia a jornada: limpa produto, quantidade, data, endereço,
+ * destinatário, cotação/quotationId, frete, total, pedidoId, preference e
+ * formulário do pedido anterior — nunca reaproveita cotação/endereço/
+ * pagamento antigos numa jornada nova. O histórico da conversa (auditoria)
+ * é preservado à parte pelo chamador (webhook-meta/webhook-whatsapp nunca
+ * apagam `historico`); aqui só marcamos a fronteira da nova jornada em
+ * `jornadaIniciadaEm`, pra permitir localizar onde ela começou depois.
+ */
+export function reiniciarJornada(mensagemCliente: string): EstadoConversa {
+  const dados = extrairDadosQualificacao(mensagemCliente, {})
+  return {
+    ...estadoInicial(),
+    dados: { ...dados, jornadaIniciadaEm: new Date().toISOString() },
+  }
 }
 
 // Pergunta direta de disponibilidade por nome de produto — "tem girassol?",
@@ -352,6 +634,21 @@ export function mensagemTransferenciaLimitacaoTecnica(): string {
 
 export function mensagemFinalizacao(): string {
   return 'Pagamento confirmado. Seu pedido foi registrado e será preparado para entrega. Qualquer atualização será enviada por aqui.'
+}
+
+// ── Horário comercial — aviso com opt-in no início de uma jornada (Parte 4) ──
+//
+// Texto exato definido na tarefa. Mostrado só uma vez por jornada (nunca
+// repetido a cada mensagem — ver fase 'aviso_fora_horario'), nunca finaliza
+// dizendo só que está fora do horário, nunca transfere pra humano só por
+// isso, e nunca bloqueia pagamento depois que o cliente aceitou continuar.
+export function mensagemAvisoForaDoHorarioComOpcao(): string {
+  return 'Olá! No momento estamos fora do horário de atendimento. Nosso horário é de segunda a sexta, das 9h às 19h, e aos sábados, domingos e feriados, das 10h às 18h. Se desejar, podemos adiantar seu pedido agora para entrega no próximo dia útil, a partir do horário de funcionamento. Deseja continuar?'
+}
+
+/** Lembrete curto enquanto o cliente ainda não respondeu sim/continuar ao aviso — nunca repete o texto completo do aviso de novo. */
+export function mensagemAguardandoRespostaForaDoHorario(): string {
+  return 'Posso adiantar seu pedido agora mesmo fora do horário — é só confirmar. Deseja continuar?'
 }
 
 /**
@@ -1042,12 +1339,22 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
 
 function etapaConfirmacaoDetalhesProduto(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
   const produto = { ...estado.dados.produto } as ProdutoSelecionado
+  let avisoData = ''
   if (produto.quantidade == null) {
     const qtdMatch = mensagemCliente.match(/\b(\d{1,2})\b/)
     if (qtdMatch) produto.quantidade = parseInt(qtdMatch[1], 10)
   }
   if (!produto.dataEntrega && /hoje|amanh[ãa]|\d{1,2}\/\d{1,2}/i.test(mensagemCliente)) {
-    produto.dataEntrega = mensagemCliente.trim()
+    const pediuHoje = /^\s*hoje\s*[.!]?\s*$/i.test(mensagemCliente.trim()) || /\bhoje\b/i.test(mensagemCliente)
+    // "hoje" pedido numa jornada aceita fora do horário vira o próximo
+    // horário comercial real, comunicado com clareza (Parte 4) — nunca
+    // finge que a entrega vai sair "hoje" fora do expediente da loja.
+    if (pediuHoje && estado.dados.aceitouForaDoHorario && estado.dados.proximoHorarioTexto) {
+      produto.dataEntrega = estado.dados.proximoHorarioTexto
+      avisoData = `Como estamos fora do horário agora, ajustei sua entrega para ${estado.dados.proximoHorarioTexto} — se preferir outra data, é só me avisar. `
+    } else {
+      produto.dataEntrega = mensagemCliente.trim()
+    }
   }
   const estadoAtualizado: EstadoConversa = { ...estado, dados: { ...estado.dados, produto } }
 
@@ -1059,35 +1366,69 @@ function etapaConfirmacaoDetalhesProduto(estado: EstadoConversa, mensagemCliente
   }
 
   return {
-    estado: { ...estadoAtualizado, fase: 'aguardando_endereco' },
-    // Só o CEP aqui — endereço completo e destinatário são coletados depois
-    // da cotação real de frete (ver etapaEnderecoCompleto/Parte G).
-    mensagem: 'Qual é o CEP da entrega para eu calcular o frete?',
+    estado: { ...estadoAtualizado, fase: 'aguardando_formulario' },
+    mensagem: `${avisoData}${TEXTO_FORMULARIO_ENTREGA}`,
   }
 }
 
-// Só pede o CEP nesta etapa — nunca endereço completo/destinatário na mesma
-// frase (ver Parte G). Endereço completo é coletado depois da cotação real,
-// em etapaEnderecoCompleto.
-async function etapaEndereco(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
-  const cepMatch = mensagemCliente.match(/\d{5}-?\d{3}/)
-  const endereco = { ...(estado.dados.endereco ?? { cep: '' }) }
-  if (cepMatch) endereco.cep = cepMatch[0]
-  const estadoAtualizado: EstadoConversa = { ...estado, dados: { ...estado.dados, endereco } }
+// ── Etapa 5b — Formulário único de entrega (Parte 2/3) ────────────────────
+//
+// Substitui a coleta campo-a-campo antiga: o formulário completo (incluindo
+// CEP) é pedido de uma vez (ver etapaConfirmacaoDetalhesProduto), extraído
+// numa única resposta, confirmado pelo cliente, e só DEPOIS o frete é
+// cotado de verdade — nunca antes da confirmação dos dados de entrega.
 
-  if (!endereco.cep) {
-    return { estado: estadoAtualizado, mensagem: 'Qual é o CEP da entrega para eu calcular o frete?' }
+/** Sincroniza o formulário validado pra estrutura antiga (endereco/produto.mensagemCartao) — nunca reinventa formato, só espelha o que já foi confirmado. */
+function sincronizarFormularioParaEndereco(estado: EstadoConversa): EstadoConversa {
+  const f = estado.dados.formulario
+  if (!f) return estado
+  const endereco: EnderecoEntrega = {
+    cep: f.cep!,
+    rua: f.rua,
+    numero: f.numero,
+    complemento: f.complemento,
+    bairro: f.bairro,
+    cidade: f.cidade,
+    uf: f.uf,
+    nomeDestinatario: f.nomeDestinatario,
+    telefoneDestinatario: f.telefoneDestinatario,
+  }
+  const produto = estado.dados.produto
+    ? { ...estado.dados.produto, mensagemCartao: f.mensagemCartao ?? estado.dados.produto.mensagemCartao }
+    : estado.dados.produto
+  return { ...estado, dados: { ...estado.dados, endereco, produto, nomeComprador: f.nomeComprador } }
+}
+
+/** Coleta o formulário único — aceita todos os campos numa mensagem só, pede só os que faltarem (nunca um por vez), e nunca sobrescreve um campo já válido com um valor vazio. */
+function etapaFormulario(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
+  const extraido = extrairFormularioEntrega(mensagemCliente)
+  const formularioAtual: FormularioEntregaDados = { ...(estado.dados.formulario ?? {}), ...extraido }
+  const estadoAtualizado: EstadoConversa = { ...estado, dados: { ...estado.dados, formulario: formularioAtual } }
+
+  const cepInformadoInvalido = !!formularioAtual.cep && !cepValido(formularioAtual.cep)
+  const telefoneInformadoInvalido = !!formularioAtual.telefoneDestinatario && !normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario)
+  const faltando = camposFaltandoFormulario(formularioAtual)
+
+  if (cepInformadoInvalido) {
+    return { estado: { ...estadoAtualizado, fase: 'aguardando_formulario' }, mensagem: 'O CEP informado não parece válido — pode confirmar (8 dígitos)?' }
+  }
+  if (telefoneInformadoInvalido) {
+    return { estado: { ...estadoAtualizado, fase: 'aguardando_formulario' }, mensagem: 'O telefone de quem vai receber não ficou claro — pode informar de novo, com DDD?' }
+  }
+  if (faltando.length > 0) {
+    return { estado: { ...estadoAtualizado, fase: 'aguardando_formulario' }, mensagem: montarMensagemCamposFaltando(faltando) }
   }
 
-  // Cota o frete na mesma interação — nunca deixa o cliente esperando uma
-  // segunda mensagem só para receber o resultado (bug real corrigido
-  // 2026-07-20: a fase virava 'calculando_frete' e só respondia "um
-  // momento", travando até chegar outra mensagem do cliente).
-  return etapaCalculoFrete({ ...estadoAtualizado, fase: 'calculando_frete' }, deps)
+  // Telefone sempre normalizado pra E.164 antes de seguir — é o formato que
+  // a Lalamove exige (Parte 2), nunca enviado "cru" pra frente.
+  const telefoneE164 = normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario!)!
+  const formularioNormalizado = { ...formularioAtual, telefoneDestinatario: telefoneE164 }
+  const novoEstado: EstadoConversa = { ...estadoAtualizado, fase: 'confirmando_formulario', dados: { ...estadoAtualizado.dados, formulario: formularioNormalizado } }
+  return { estado: novoEstado, mensagem: montarResumoFormulario(formularioNormalizado) }
 }
 
 async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil): Promise<ResultadoEtapa> {
-  const cep = estado.dados.endereco?.cep
+  const cep = estado.dados.endereco?.cep ?? estado.dados.formulario?.cep
   if (!cep) {
     return { estado: transferirParaHumano(estado, 'CEP ausente ao tentar calcular frete'), mensagem: mensagemTransferencia() }
   }
@@ -1096,13 +1437,13 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
     // Falha real (timeout, integração fora do ar, endereço não localizado)
     // nunca inventa valor nem avança para pagamento. Também nunca transfere
     // pra humano de imediato por uma falha transitória — fica em
-    // 'aguardando_endereco' pra permitir uma nova tentativa controlada (o
-    // cliente reenvia o CEP, ou a própria integração já pode ter se
+    // 'confirmando_formulario' pra permitir uma nova tentativa controlada
+    // (o cliente confirma de novo, ou a própria integração já pode ter se
     // recuperado). O chamador (webhook-meta) é responsável por logar o erro
     // técnico sanitizado antes de devolver { ok: false } aqui.
     return {
-      estado: { ...estado, fase: 'aguardando_endereco' },
-      mensagem: 'No momento não consegui calcular o frete para esse CEP. Pode confirmar o CEP novamente, ou tentar de novo em alguns instantes?',
+      estado: { ...estado, fase: 'confirmando_formulario' },
+      mensagem: 'No momento não consegui calcular o frete para esse CEP. Pode confirmar se os dados de entrega estão certos? (responda "sim" pra eu tentar de novo)',
     }
   }
   const precoProduto = estado.dados.produto?.preco ?? 0
@@ -1111,56 +1452,53 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
   const subtotal = precoProduto * quantidade
   const valorTotal = subtotal + valorFrete
   const dados = { ...estado.dados, valorFrete, valorTotal, freteDetalhes: resultado.detalhes }
-  const primeiraPergunta = CAMPOS_ENDERECO_COMPLETO[0]
-  const novoEstado: EstadoConversa = { ...estado, fase: 'endereco_completo', dados }
-  return {
-    estado: novoEstado,
-    mensagem: `${resultado.mensagem} Subtotal: ${formatarPreco(subtotal)}. Total: ${formatarPreco(valorTotal)}.\n\n${primeiraPergunta.pergunta}`,
-  }
+  const novoEstado: EstadoConversa = { ...estado, fase: 'aguardando_aprovacao_frete', dados }
+  return { estado: novoEstado, mensagem: montarMensagemAprovacaoFrete(dados) }
 }
 
-// ── Etapa 5b — Endereço completo e destinatário (só depois da cotação real) ──
-
-const CAMPOS_ENDERECO_COMPLETO: { campo: keyof EnderecoEntrega; pergunta: string }[] = [
-  { campo: 'nomeDestinatario', pergunta: 'Qual o nome de quem vai receber?' },
-  { campo: 'telefoneDestinatario', pergunta: 'Qual o telefone de quem vai receber (com DDD)?' },
-  { campo: 'rua', pergunta: 'Qual a rua ou avenida da entrega?' },
-  { campo: 'numero', pergunta: 'Qual o número?' },
-  { campo: 'bairro', pergunta: 'Qual o bairro?' },
-  { campo: 'cidade', pergunta: 'Qual a cidade?' },
-]
-
-/** true quando todos os campos mínimos de endereço estão presentes — complemento/referência são opcionais. */
-function enderecoCompletoValido(endereco?: EnderecoEntrega): boolean {
-  if (!endereco) return false
-  return CAMPOS_ENDERECO_COMPLETO.every(({ campo }) => !!endereco[campo])
+/** Nunca cobra antes de cotar e aprovar o frete — esta mensagem é o único lugar que apresenta subtotal/frete/total antes do link de pagamento (Parte 3). */
+function montarMensagemAprovacaoFrete(dados: DadosPedido): string {
+  const p = dados.produto
+  const subtotal = p?.preco != null ? p.preco * (p.quantidade ?? 1) : 0
+  const transportadora = dados.freteDetalhes?.transportadora
+  const servico = dados.freteDetalhes?.servico
+  const linhaFrete = `Frete${transportadora ? ` (${transportadora}${servico ? ` — ${servico}` : ''})` : ''}: ${formatarPreco(dados.valorFrete)}`
+  return [
+    `Subtotal: ${formatarPreco(subtotal)}`,
+    linhaFrete,
+    `Total: ${formatarPreco(dados.valorTotal)}`,
+    '',
+    'Você aprova o frete e o total?',
+  ].join('\n')
 }
 
-/** Coleta nome do destinatário e endereço completo, um campo por vez, sem repetir pergunta já respondida — nunca sobrescreve um valor já válido com uma mensagem vazia/incompleta. */
-function etapaEnderecoCompleto(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
-  const endereco: EnderecoEntrega = { ...(estado.dados.endereco ?? { cep: '' }) }
-  const respondendo = CAMPOS_ENDERECO_COMPLETO.find(({ campo }) => !endereco[campo])
-  const valor = mensagemCliente.trim()
-  if (respondendo && valor) {
-    endereco[respondendo.campo] = valor
-  }
-  const dadosAtualizados = { ...estado.dados, endereco }
-  const estadoAtualizado: EstadoConversa = { ...estado, dados: dadosAtualizados }
-
-  const proximo = CAMPOS_ENDERECO_COMPLETO.find(({ campo }) => !endereco[campo])
-  if (proximo) {
-    return { estado: { ...estadoAtualizado, fase: 'endereco_completo' }, mensagem: proximo.pergunta }
-  }
-
-  return {
-    estado: { ...estadoAtualizado, fase: 'aguardando_confirmacao' },
-    mensagem: montarResumoPedido(dadosAtualizados),
-  }
-}
-
-async function etapaConfirmacao(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+/** Coleta a confirmação dos dados do formulário — nunca cota frete antes disso (Parte 3.3/3.4). Cliente pode corrigir um campo em vez de confirmar; nunca perde os dados já certos. */
+async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
   if (!pareceConfirmacao(mensagemCliente)) {
-    return { estado, mensagem: `Sem problemas — me avisa quando quiser confirmar.\n\n${montarResumoPedido(estado.dados)}` }
+    const correcao = extrairFormularioEntrega(mensagemCliente)
+    if (Object.keys(correcao).length > 0) {
+      const formularioAtualizado = { ...(estado.dados.formulario ?? {}), ...correcao }
+      return {
+        estado: { ...estado, dados: { ...estado.dados, formulario: formularioAtualizado } },
+        mensagem: montarResumoFormulario(formularioAtualizado),
+      }
+    }
+    return { estado, mensagem: `Sem problemas — me avisa quando os dados estiverem certos.\n\n${montarResumoFormulario(estado.dados.formulario ?? {})}` }
+  }
+
+  if (!estado.dados.formulario || !formularioCompleto(estado.dados.formulario)) {
+    // Estado inconsistente (nunca deveria chegar aqui sem formulário
+    // completo) — nunca cota frete com dados incompletos, reenvia o formulário.
+    return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA }
+  }
+
+  const estadoSincronizado = sincronizarFormularioParaEndereco(estado)
+  return etapaCalculoFrete({ ...estadoSincronizado, fase: 'calculando_frete' }, deps)
+}
+
+async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+  if (!pareceConfirmacao(mensagemCliente)) {
+    return { estado, mensagem: `Sem problemas — me avisa quando quiser seguir.\n\n${montarMensagemAprovacaoFrete(estado.dados)}` }
   }
 
   // Guarda defensiva: nunca gera link de pagamento faltando produto,
@@ -1173,11 +1511,12 @@ async function etapaConfirmacao(estado: EstadoConversa, mensagemCliente: string,
     !estado.dados.produto?.dataEntrega ||
     estado.dados.valorFrete == null ||
     estado.dados.valorTotal == null ||
-    !enderecoCompletoValido(estado.dados.endereco)
+    !estado.dados.formulario ||
+    !formularioCompleto(estado.dados.formulario)
   if (dadosIncompletos) {
     return {
-      estado: { ...estado, fase: 'endereco_completo' },
-      mensagem: 'Antes de confirmar, preciso terminar de coletar os dados da entrega.\n\n' + (CAMPOS_ENDERECO_COMPLETO.find(({ campo }) => !estado.dados.endereco?.[campo])?.pergunta ?? 'Qual o nome de quem vai receber?'),
+      estado: { ...estado, fase: 'aguardando_formulario' },
+      mensagem: 'Antes de confirmar, preciso terminar de coletar os dados da entrega.\n\n' + TEXTO_FORMULARIO_ENTREGA,
     }
   }
 
@@ -1271,14 +1610,38 @@ export function estadoComPedidoInconsistente(estado: EstadoConversa): boolean {
  * Avança o funil em uma mensagem. Deve ser chamado DEPOIS do portão de
  * escopo (classificarIntencao + intencaoInterrompeFluxo) — este dispatcher
  * assume que a mensagem já foi considerada dentro do escopo comercial.
+ *
+ * @param foraDoHorario Calculado pelo chamador (ver _shared/horario-comercial.ts,
+ *   fonte única do horário) — funil.ts nunca calcula hora sozinho (zero imports).
+ * @param proximoHorarioTexto Texto pronto ("amanhã (terça-feira), a partir das
+ *   9h") pra ajustar "hoje" quando a jornada foi aceita fora do horário (Parte 4).
  */
 export async function avancarFunil(
   estadoRecebido: EstadoConversa,
   mensagemCliente: string,
   intencao: Intencao,
   deps: DependenciasFunil,
+  foraDoHorario = false,
+  proximoHorarioTexto?: string,
 ): Promise<ResultadoEtapa> {
   let estado: EstadoConversa = { ...estadoRecebido, dados: extrairDadosQualificacao(mensagemCliente, estadoRecebido.dados) }
+
+  // Gate de horário (Parte 4): só é resolvido respondendo sim/continuar —
+  // nunca avança sozinho, nunca repete o aviso completo de novo (só um
+  // lembrete curto), nunca transfere pra humano só por estar fora do horário.
+  if (estado.fase === 'aviso_fora_horario') {
+    const n = normalizar(mensagemCliente)
+    if (pareceConfirmacao(mensagemCliente) || n.includes('continuar')) {
+      estado = {
+        ...estado,
+        fase: 'inicio',
+        dados: { ...estado.dados, aceitouForaDoHorario: true, aceitouForaDoHorarioEm: new Date().toISOString(), proximoHorarioTexto },
+      }
+      // segue o fluxo normal abaixo, agora liberado.
+    } else {
+      return { estado, mensagem: mensagemAguardandoRespostaForaDoHorario() }
+    }
+  }
 
   if (estadoComPedidoInconsistente(estado)) {
     // Cliente voltou só com uma saudação (sem informação nova) — pergunta
@@ -1291,10 +1654,23 @@ export async function avancarFunil(
     // Qualquer outra mensagem (confirmação como "sim", ou intenção comercial
     // nova como "quais flores tem pra hoje") já é o cliente decidindo seguir
     // em frente — a intenção explícita da mensagem atual prevalece sobre a
-    // fase antiga incompatível: repara o estado (limpa só dados/fase,
-    // histórico é preservado à parte pelo chamador) e reinicia o funil.
-    estado = { ...estadoInicial(), dados: extrairDadosQualificacao(mensagemCliente, {}) }
+    // fase antiga incompatível: repara o estado (histórico é preservado à
+    // parte pelo chamador) e reinicia o funil (ver Parte 1).
+    estado = reiniciarJornada(mensagemCliente)
     intencao = classificarIntencao(mensagemCliente, estado.fase)
+  } else if (pareceNovaIntencaoDeCompra(mensagemCliente, estado.fase)) {
+    // Nova intenção comercial explícita numa fase de compra já avançada —
+    // nunca reaproveita CEP/cotação/endereço/pagamento antigos (Parte 1;
+    // caso real observado em monitoramento 2026-07-21).
+    estado = reiniciarJornada(mensagemCliente)
+    intencao = classificarIntencao(mensagemCliente, estado.fase)
+  }
+
+  // Nova jornada (primeira mensagem real ou reinício) começando fora do
+  // horário — mostra o aviso com opt-in antes de catálogo/formulário
+  // (Parte 4). Nunca dispara de novo se esta jornada já foi aceita.
+  if (estado.fase === 'inicio' && foraDoHorario && !estado.dados.aceitouForaDoHorario) {
+    return { estado: { ...estado, fase: 'aviso_fora_horario' }, mensagem: mensagemAvisoForaDoHorarioComOpcao() }
   }
 
   // Cliente voltou só com uma saudação (sem informação nova) enquanto havia
@@ -1403,14 +1779,33 @@ export async function avancarFunil(
       return etapaRecomendacao(estado, mensagemCliente, deps)
     case 'produto_selecionado':
       return etapaConfirmacaoDetalhesProduto(estado, mensagemCliente)
-    case 'aguardando_endereco':
-      return etapaEndereco(estado, mensagemCliente, deps)
+    case 'aguardando_formulario':
+      return etapaFormulario(estado, mensagemCliente)
+    case 'confirmando_formulario':
+      return etapaConfirmandoFormulario(estado, mensagemCliente, deps)
     case 'calculando_frete':
       return etapaCalculoFrete(estado, deps)
+    case 'aguardando_aprovacao_frete':
+      return etapaAguardandoAprovacaoFrete(estado, mensagemCliente, deps)
+    // Fases antigas (fluxo campo-a-campo, substituído pelo formulário único
+    // — Parte 2/3): nunca travam uma conversa que ainda esteja numa delas,
+    // sempre reencaminham pro novo fluxo. 'aguardando_endereco'/
+    // 'calculando_frete'/'endereco_completo' nunca reaproveitam
+    // endereço/frete parciais do formato antigo — pedem o formulário do
+    // zero. 'aguardando_confirmacao' com frete real já calculado equivale à
+    // nova etapa de aprovação de frete (mais fiel ao que já foi comunicado
+    // ao cliente); sem frete, volta pro formulário.
+    case 'aguardando_endereco':
     case 'endereco_completo':
-      return etapaEnderecoCompleto(estado, mensagemCliente)
+      return {
+        estado: { ...estado, fase: 'aguardando_formulario', dados: { ...estado.dados, endereco: undefined, valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined } },
+        mensagem: TEXTO_FORMULARIO_ENTREGA,
+      }
     case 'aguardando_confirmacao':
-      return etapaConfirmacao(estado, mensagemCliente, deps)
+      if (estado.dados.valorFrete != null && estado.dados.freteDetalhes) {
+        return etapaAguardandoAprovacaoFrete({ ...estado, fase: 'aguardando_aprovacao_frete' }, mensagemCliente, deps)
+      }
+      return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA }
     case 'aguardando_pagamento':
       return { estado, mensagem: montarMensagemAguardandoPagamento(estado.dados) }
     case 'pagamento_confirmado':

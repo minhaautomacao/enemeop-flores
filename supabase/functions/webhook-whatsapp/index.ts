@@ -6,7 +6,19 @@
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { type Fase, classificarIntencao, intencaoInterrompeFluxo, mensagemForaDeEscopo, mensagemTransferencia } from '../_shared/funil.ts';
+import {
+  type Fase, type FormularioEntregaDados,
+  classificarIntencao, intencaoInterrompeFluxo, mensagemForaDeEscopo, mensagemTransferencia,
+  TEXTO_FORMULARIO_ENTREGA, extrairFormularioEntrega, camposFaltandoFormulario, formularioCompleto,
+  montarMensagemCamposFaltando, montarResumoFormulario, normalizarTelefoneDestinatarioBR, cepValido,
+  mensagemAvisoForaDoHorarioComOpcao, mensagemAguardandoRespostaForaDoHorario,
+} from '../_shared/funil.ts';
+import { dentroDoHorarioComercial, textoProximaAberturaComercial } from '../_shared/horario-comercial.ts';
+
+function pareceConfirmacaoForaHorario(texto: string): boolean {
+  const n = texto.trim().toLowerCase();
+  return /^(sim|s|ok|pode|continuar|pode continuar|pode seguir|seguir|isso|correto)\b/.test(n) || n.includes('continuar');
+}
 
 /**
  * Portão de escopo compartilhado (ver ../_shared/funil.ts e
@@ -16,16 +28,20 @@ import { type Fase, classificarIntencao, intencaoInterrompeFluxo, mensagemForaDe
  * interceptados ANTES de qualquer chamada de IA, com resposta fixa.
  *
  * Integração DELIBERADAMENTE PARCIAL nesta função: diferente do
- * webhook-meta (reescrito para usar avancarFunil por completo), aqui só o
- * classificador de intenção foi conectado. O restante do fluxo (fases em
- * português livre, extração via IA, formulário de endereço, cotação de
- * frete e geração de pagamento) já é bem mais "real" do que o webhook-meta
- * estava antes desta integração — já chama agente-logistica e
- * agente-financeiro de verdade — e reescrevê-lo por completo sem poder
- * rodar `deno check`/testes neste ambiente (sem Deno CLI disponível) seria
- * arriscar quebrar um fluxo em produção sem forma de verificar. Ver
- * relatório final da integração do funil comercial para os detalhes desta
- * decisão e o que falta para a unificação completa.
+ * webhook-meta (reescrito para usar avancarFunil por completo), aqui a
+ * qualificação/recomendação de produto continua livre via IA (fases em
+ * português livre). Reescrever isso por completo sem poder rodar
+ * `deno check`/testes neste ambiente (sem Deno CLI disponível) arriscaria
+ * quebrar um fluxo em produção sem forma de verificar.
+ *
+ * O que É determinístico e compartilhado com webhook-meta/funil.ts (Partes
+ * 1-4 da correção de reinício/formulário/horário): o portão de escopo, o
+ * formulário único de entrega (TEXTO_FORMULARIO_ENTREGA/
+ * extrairFormularioEntrega — nunca mais via IA, ver blocos
+ * 'coletando_endereco'/'confirmando_dados' em processarMensagem) e o aviso
+ * de fora do horário com opt-in. A IA só decide QUANDO mostrar o formulário
+ * (enviar_formulario:true) e conversa livremente fora dessas fases — nunca
+ * extrai nem confirma os dados de entrega.
  *
  * Mapa aproximado das fases livres desta função para o Fase determinístico
  * do funil, usado só para dar contexto de fase ao classificador (ex.: não
@@ -36,9 +52,9 @@ const FASE_LIVRE_PARA_FUNIL: Record<string, Fase> = {
   interesse: 'recomendacao',
   proposta: 'produto_selecionado',
   confirmar_produto: 'produto_selecionado',
-  coletando_endereco: 'aguardando_endereco',
-  confirmando_dados: 'aguardando_endereco',
-  confirmar_frete: 'calculando_frete',
+  coletando_endereco: 'aguardando_formulario',
+  confirmando_dados: 'confirmando_formulario',
+  confirmar_frete: 'aguardando_aprovacao_frete',
   aguardando_pagamento: 'aguardando_pagamento',
   concluido: 'pedido_criado',
   perdido: 'transferido_humano',
@@ -214,12 +230,10 @@ FOTOS — REGRAS ABSOLUTAS:
 - Quando enviar_formulario for true: codigos_produtos DEVE ser [] — nunca mande foto junto com o formulário.
 - Após o cliente confirmar dados de endereço ou frete: codigos_produtos deve ser [] — nessa fase a foto já foi enviada.
 
-ENDEREÇO — FORMULÁRIO E CONFIRMAÇÃO:
-- Quando for pedir o endereço, diga algo natural como "Claro! Preciso de alguns dados para calcular o frete." e inclua "enviar_formulario": true no JSON. O sistema envia o formulário automaticamente.
-- Quando o cliente responder com os dados de endereço (texto livre ou formulário preenchido): EXTRAIA os campos. NUNCA envie o formulário novamente ("enviar_formulario" deve ser false). Se CEP ou Rua estiver faltando, peça só o campo que faltou.
-- Com todos os dados extraídos: inclua "confirmar_dados": true e preencha "dados_para_confirmacao". O sistema envia o resumo — você NÃO precisa digitar o resumo, apenas diga "Confere?" ou "Está tudo certo?".
-- Só preencha "endereco_entrega" no JSON APÓS o cliente confirmar os dados ("sim", "correto", "pode ser", "tá certo", etc.). Aí o frete é calculado automaticamente.
-${fase === 'coletando_endereco' ? `\nATENÇÃO FASE ATUAL (coletando_endereco): O cliente acabou de enviar os dados de endereço. Extraia os campos e responda com confirmar_dados: true. NÃO envie o formulário de novo (enviar_formulario deve ser false obrigatoriamente).` : ''}
+ENDEREÇO — FORMULÁRIO (você só decide QUANDO enviar, nunca extrai os dados):
+- Quando for pedir o endereço, diga algo natural como "Claro! Preciso de alguns dados para calcular o frete." e inclua "enviar_formulario": true no JSON. O sistema envia o formulário e daqui pra frente assume sozinho: extrai os campos da resposta do cliente, pede o que faltar, mostra o resumo e pede confirmação — tudo isso acontece FORA da sua resposta, você não precisa (e não deve) fazer nada disso.
+- NUNCA tente extrair CEP/rua/número/telefone da resposta do cliente nem preencher um resumo de endereço — isso é sempre feito pelo sistema, nunca por você. Não inclua "endereco_entrega" nem "dados_para_confirmacao" na sua resposta.
+${fase === 'coletando_endereco' || fase === 'confirmando_dados' ? `\nATENÇÃO FASE ATUAL (${fase}): o sistema já está tratando isso deterministicamente antes de te chamar — você só vê essa fase se a mensagem do cliente não foi nem uma resposta ao formulário nem uma confirmação (ex.: uma pergunta solta). Responda essa mensagem naturalmente, sem tentar avançar o endereço.` : ''}
 
 FRETE (após cotação automática):
 - Quando o frete estiver em "FRETE JÁ COTADO" acima, apresente ao cliente de forma natural com o total.
@@ -235,25 +249,12 @@ FORMATO DE RESPOSTA — JSON válido, sempre:
   "codigos_produtos": [],
   "fase": "descoberta|interesse|proposta|confirmar_produto|coletando_endereco|confirmando_dados|confirmar_frete|aguardando_pagamento|concluido|perdido",
   "enviar_formulario": false,
-  "confirmar_dados": false,
-  "dados_para_confirmacao": {
-    "remetente": "",
-    "destinatario": "",
-    "rua": "",
-    "complemento": "",
-    "bairro": "",
-    "cep": "",
-    "mensagem_cartao": ""
-  },
-  "endereco_entrega": { "cep": "", "logradouro": "", "numero": "", "complemento": "", "bairro": "", "cidade": "São Paulo", "uf": "SP" },
   "produto_confirmado": "",
   "produto_preco": 0,
   "solicitar_pagamento": false,
   "forma_pagamento": ""
 }
 Omita campos vazios ou irrelevantes.
-Quando o cliente preencher o formulário: extraia os campos em "dados_para_confirmacao" e inclua "confirmar_dados": true.
-Só preencha "endereco_entrega" após o cliente confirmar os dados.
 codigos_produtos: sugerindo → até 3 códigos | confirmado → 1 código | sem produto → [].
 Use EXATAMENTE os códigos do catálogo (ex: "033", "M07", "032", "095").`;
 }
@@ -322,37 +323,6 @@ async function chamarIA(systemPrompt: string, mensagens: Array<{role: string; co
 
   return null;
 }
-
-// ── Resumo de confirmação de dados ────────────────────────────────────────────
-
-function montarResumoConfirmacao(dados: Record<string, string>): string {
-  const linhas = [
-    '*Verifique se as informações estão corretas:*',
-    '',
-    `*Remetente:* ${dados.remetente || '-'}`,
-    `*Destinatário:* ${dados.destinatario || '-'}`,
-    `*Rua:* ${dados.rua || '-'}`,
-    dados.complemento ? `*Complemento:* ${dados.complemento}` : null,
-    `*Bairro:* ${dados.bairro || '-'}`,
-    `*CEP:* ${dados.cep || '-'}`,
-    dados.mensagem_cartao ? `*Mensagem no cartão:* ${dados.mensagem_cartao}` : null,
-  ].filter(Boolean);
-  return linhas.join('\n');
-}
-
-// ── Formulário de entrega ─────────────────────────────────────────────────────
-
-const FORMULARIO_ENTREGA = `📋 *Dados para entrega*
-
-*Remetente:*
-*Destinatário:*
-*Rua:*
-*Complemento:*
-*Bairro:*
-*CEP:*
-
-Quer que enviemos um cartão impresso com uma mensagem personalizada? Se sim, deixe a sua mensagem aqui 💌
-*Mensagem para o cartão:*`;
 
 // ── Transcrição de áudio (Groq Whisper) ──────────────────────────────────────
 
@@ -432,51 +402,6 @@ interface EnderecoEntrega {
   uf?: string;
 }
 
-interface DadosFormulario {
-  remetente: string;
-  destinatario: string;
-  rua: string;
-  complemento: string;
-  bairro: string;
-  cep: string;
-  mensagem_cartao: string;
-}
-
-async function extrairDadosEndereco(groqKey: string, texto: string): Promise<DadosFormulario | null> {
-  const prompt = `Extraia os dados de entrega do texto abaixo e retorne SOMENTE um JSON válido com estes campos:
-{
-  "remetente": "nome de quem envia",
-  "destinatario": "nome de quem recebe",
-  "rua": "logradouro com número (ex: Rua do Boticário, 105)",
-  "complemento": "apto, bloco, casa etc (vazio se não informado)",
-  "bairro": "bairro",
-  "cep": "CEP formatado (apenas dígitos ou com hífen)",
-  "mensagem_cartao": "mensagem para o cartão (vazio se não informado)"
-}
-Se algum campo não estiver no texto, deixe como string vazia "".
-Texto: "${texto.replace(/"/g, "'")}"`
-
-  try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        max_tokens: 200,
-        response_format: { type: 'json_object' },
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const raw = data.choices?.[0]?.message?.content?.trim() ?? '';
-    const parsed = JSON.parse(raw) as DadosFormulario;
-    // Só retorna se pelo menos CEP ou rua foram extraídos
-    if (parsed.cep || parsed.rua) return parsed;
-    return null;
-  } catch { return null; }
-}
-
 async function gerarLinkPagamento(pedidoInfo: Record<string, unknown>, phone: string): Promise<{ link: string; preference_id: string } | null> {
   try {
     const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-financeiro`, {
@@ -551,6 +476,42 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, te
     return;
   }
 
+  // Fora do horário na primeira mensagem de uma jornada nova (Parte 4) —
+  // mostra o aviso com opt-in antes de catálogo/formulário, aguarda
+  // sim/continuar, nunca repete o aviso completo de novo. Mesmo texto fixo
+  // usado por webhook-meta/funil.ts.
+  const foraDoHorario = !dentroDoHorarioComercial();
+  if (conversa.fase === 'aviso_fora_horario') {
+    if (pareceConfirmacaoForaHorario(texto)) {
+      conversa.fase = 'descoberta';
+      pedidoInfo = { ...pedidoInfo, aceitou_fora_horario: true, proximo_horario_texto: textoProximaAberturaComercial() };
+      // segue o fluxo normal abaixo, agora liberado.
+    } else {
+      const lembrete = mensagemAguardandoRespostaForaDoHorario();
+      const msgAssistenteLembrete: Mensagem = { role: 'assistant', content: lembrete, ts: new Date().toISOString() };
+      await enviarTexto(phone, lembrete);
+      await salvarConversa(conversa.id, {
+        historico: [...historico, msgAssistenteLembrete].slice(-20),
+        fase: 'aviso_fora_horario',
+        nome_cliente: nomeCliente ?? undefined,
+        pedido_info: pedidoInfo,
+      });
+      return;
+    }
+  } else if (foraDoHorario && conversa.fase === 'descoberta' && (conversa.historico ?? []).length === 0 && !pedidoInfo.aceitou_fora_horario) {
+    const aviso = mensagemAvisoForaDoHorarioComOpcao();
+    const msgAssistenteAviso: Mensagem = { role: 'assistant', content: aviso, ts: new Date().toISOString() };
+    await enviarTexto(phone, aviso);
+    await salvarConversa(conversa.id, {
+      historico: [...historico, msgAssistenteAviso].slice(-20),
+      fase: 'aviso_fora_horario',
+      nome_cliente: nomeCliente ?? undefined,
+      pedido_info: pedidoInfo,
+    });
+    console.log(`[webhook-whatsapp] ${phone} — fora do horário, aviso com opt-in enviado`);
+    return;
+  }
+
   const ultimaMsgAnterior = conversa.historico?.slice(-1)[0]?.ts ?? undefined;
 
   const hora = new Date().getHours();
@@ -563,51 +524,98 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, te
   let produtoConfirmado: string | null = null;
   let produtoPreco: number | null = null;
   let enviarFormulario = false;
-  let dadosParaConfirmar: Record<string, string> | null = null;
 
   // Palavras que indicam confirmação — nesse caso não roda o extrator
   const textoConfirmacao = /^(sim|ok|s|correto|certo|pode|tá|ta|isso|exato|perfeito|confirmo|confirmado|é isso|e isso|prosseguir|continuar|seguir|pode prosseguir|pode seguir|pode continuar)\b/i.test(texto.trim());
 
-  // Confirmação de endereço → vai direto para cotação de frete sem chamar IA
-  // Evita que a IA peça confirmação de novo (double-confirm bug)
-  if (textoConfirmacao && conversa.fase === 'confirmando_dados' && pedidoInfo.dados_formulario) {
-    const dados = pedidoInfo.dados_formulario as Record<string, string>;
-    enderecoEntrega = {
-      cep: dados.cep ?? '',
-      logradouro: dados.rua ?? '',
-      bairro: dados.bairro ?? '',
-      cidade: 'São Paulo',
-      uf: 'SP',
-    };
-    novaFase = 'confirmar_frete';
-    console.log(`[webhook-whatsapp] ${phone} confirmou endereço → cotando frete CEP ${enderecoEntrega.cep}`);
+  const formularioAtual: FormularioEntregaDados = (pedidoInfo.dados_formulario as FormularioEntregaDados | undefined) ?? {};
+
+  // Formulário único de entrega (Parte 2/3) — extração, validação e
+  // confirmação 100% determinísticas, nunca via IA/LLM (mesmo parser usado
+  // no Instagram/Messenger, ver ../_shared/funil.ts). A IA só decide QUANDO
+  // enviar o formulário (enviar_formulario:true); a partir daí este bloco
+  // assume sozinho até o endereço estar confirmado.
+  if (conversa.fase === 'coletando_endereco') {
+    const extraido = extrairFormularioEntrega(texto);
+    const formularioNovo: FormularioEntregaDados = { ...formularioAtual, ...extraido };
+    pedidoInfo = { ...pedidoInfo, dados_formulario: formularioNovo };
+
+    const cepInvalido = !!formularioNovo.cep && !cepValido(formularioNovo.cep);
+    const telefoneInvalido = !!formularioNovo.telefoneDestinatario && !normalizarTelefoneDestinatarioBR(formularioNovo.telefoneDestinatario);
+    const faltando = camposFaltandoFormulario(formularioNovo);
+
+    let respostaFormulario: string | null = null;
+    if (cepInvalido) {
+      respostaFormulario = 'O CEP informado não parece válido — pode confirmar (8 dígitos)?';
+    } else if (telefoneInvalido) {
+      respostaFormulario = 'O telefone de quem vai receber não ficou claro — pode informar de novo, com DDD?';
+    } else if (faltando.length > 0) {
+      respostaFormulario = montarMensagemCamposFaltando(faltando);
+    }
+
+    if (respostaFormulario) {
+      const msgAssistenteForm: Mensagem = { role: 'assistant', content: respostaFormulario, ts: new Date().toISOString() };
+      await enviarTexto(phone, respostaFormulario);
+      await salvarConversa(conversa.id, {
+        historico: [...historico, msgAssistenteForm].slice(-20),
+        fase: 'coletando_endereco',
+        nome_cliente: nomeCliente ?? undefined,
+        pedido_info: pedidoInfo,
+      });
+      return;
+    }
+
+    // Completo e válido — normaliza telefone pra E.164 (formato exigido
+    // pela Lalamove) antes de guardar, e pede confirmação dos dados.
+    const telefoneE164 = normalizarTelefoneDestinatarioBR(formularioNovo.telefoneDestinatario!)!;
+    const formularioNormalizado = { ...formularioNovo, telefoneDestinatario: telefoneE164 };
+    pedidoInfo = { ...pedidoInfo, dados_formulario: formularioNormalizado };
+    const resumo = montarResumoFormulario(formularioNormalizado);
+
+    const msgAssistenteResumo: Mensagem = { role: 'assistant', content: resumo, ts: new Date().toISOString() };
+    await enviarTexto(phone, resumo);
+    await salvarConversa(conversa.id, {
+      historico: [...historico, msgAssistenteResumo].slice(-20),
+      fase: 'confirmando_dados',
+      nome_cliente: nomeCliente ?? undefined,
+      pedido_info: pedidoInfo,
+    });
+    return;
   }
 
-  // Extração dedicada de endereço — roda ANTES da IA principal quando fase=coletando_endereco
-  if (!textoConfirmacao && !enderecoEntrega && (conversa.fase === 'coletando_endereco' || conversa.fase === 'confirmando_dados')) {
-    const groqKey = Deno.env.get('GROQ_API_KEY') || await buscarConfigDB('GROQ_API_KEY');
-    if (groqKey) {
-      const dadosExtraidos = await extrairDadosEndereco(groqKey, texto);
-      if (dadosExtraidos) {
-        console.log('[webhook-whatsapp] dados de endereço extraídos:', JSON.stringify(dadosExtraidos));
-        pedidoInfo = { ...pedidoInfo, dados_formulario: dadosExtraidos };
-        dadosParaConfirmar = dadosExtraidos as unknown as Record<string, string>;
-        mensagem = 'Confere?';
-        novaFase = 'confirmando_dados';
-
-        const msgAssistente2: Mensagem = { role: 'assistant', content: mensagem, ts: new Date().toISOString() };
-        await enviarTexto(phone, mensagem);
-        await new Promise(r => setTimeout(r, 600));
-        await enviarTexto(phone, montarResumoConfirmacao(dadosParaConfirmar));
-
+  if (conversa.fase === 'confirmando_dados' && Object.keys(formularioAtual).length > 0) {
+    if (textoConfirmacao && formularioCompleto(formularioAtual)) {
+      // Confirmação → vai direto para cotação de frete sem chamar IA
+      // (evita que a IA peça confirmação de novo — double-confirm bug).
+      enderecoEntrega = {
+        cep: formularioAtual.cep!,
+        logradouro: formularioAtual.rua,
+        numero: formularioAtual.numero,
+        bairro: formularioAtual.bairro,
+        cidade: formularioAtual.cidade ?? 'São Paulo',
+        uf: formularioAtual.uf ?? 'SP',
+      };
+      novaFase = 'confirmar_frete';
+      console.log(`[webhook-whatsapp] ${phone} confirmou o formulário → cotando frete CEP ${enderecoEntrega.cep}`);
+    } else if (!textoConfirmacao) {
+      // Cliente pode estar corrigindo um campo em vez de confirmar — nunca
+      // perde os dados já certos.
+      const correcao = extrairFormularioEntrega(texto);
+      if (Object.keys(correcao).length > 0) {
+        const formularioCorrigido = { ...formularioAtual, ...correcao };
+        pedidoInfo = { ...pedidoInfo, dados_formulario: formularioCorrigido };
+        const resumoCorrigido = montarResumoFormulario(formularioCorrigido);
+        const msgAssistenteCorrecao: Mensagem = { role: 'assistant', content: resumoCorrigido, ts: new Date().toISOString() };
+        await enviarTexto(phone, resumoCorrigido);
         await salvarConversa(conversa.id, {
-          historico: [...historico, msgAssistente2].slice(-20),
-          fase: novaFase,
+          historico: [...historico, msgAssistenteCorrecao].slice(-20),
+          fase: 'confirmando_dados',
           nome_cliente: nomeCliente ?? undefined,
           pedido_info: pedidoInfo,
         });
         return;
       }
+      // nem confirmação nem correção reconhecível -> segue pro fluxo normal (IA responde naturalmente, sem mexer no endereço)
     }
   }
 
@@ -628,16 +636,10 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, te
       produtoPreco      = parsed.produto_preco ? Number(parsed.produto_preco) : null;
       enviarFormulario  = parsed.enviar_formulario === true;
 
-      // Dados do formulário preenchido pelo cliente
-      if (parsed.confirmar_dados === true && parsed.dados_para_confirmacao) {
-        const dados = parsed.dados_para_confirmacao as Record<string, string>;
-        pedidoInfo = { ...pedidoInfo, dados_formulario: dados };
-        dadosParaConfirmar = dados;
-      }
-
-      if (parsed.endereco_entrega?.cep) {
-        enderecoEntrega = parsed.endereco_entrega as EnderecoEntrega;
-      }
+      // Extração/confirmação de endereço nunca vem da IA (Parte 2/3 —
+      // determinístico, ver blocos 'coletando_endereco'/'confirmando_dados'
+      // acima) — parsed.dados_para_confirmacao/endereco_entrega são
+      // ignorados de propósito, mesmo que a IA ainda os inclua por hábito.
 
       if (produtoConfirmado) pedidoInfo = { ...pedidoInfo, produto_confirmado: produtoConfirmado };
       if (produtoPreco)      pedidoInfo = { ...pedidoInfo, produto_preco: produtoPreco };
@@ -662,8 +664,13 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, te
         const precoTotal = (pedidoInfo.produto_preco as number | undefined ?? 0) + precoFrete;
         pedidoInfo = { ...pedidoInfo, total: precoTotal };
 
-        // Injeta info de frete na conversa para a IA apresentar ao cliente
-        const msgFrete = `[Sistema] Frete cotado: R$ ${precoFrete.toFixed(2).replace('.', ',')} (Lalamove, carro, hoje ~2h). Total do pedido: R$ ${precoTotal.toFixed(2).replace('.', ',')}.`;
+        // Injeta info de frete na conversa para a IA apresentar ao cliente.
+        // Fora do horário (jornada já aceita com opt-in, Parte 4), a entrega
+        // nunca é anunciada como "hoje" — usa o próximo horário comercial real.
+        const prazoTexto = pedidoInfo.aceitou_fora_horario && pedidoInfo.proximo_horario_texto
+          ? `entrega ${pedidoInfo.proximo_horario_texto}`
+          : 'Lalamove, carro, hoje ~2h';
+        const msgFrete = `[Sistema] Frete cotado: R$ ${precoFrete.toFixed(2).replace('.', ',')} (${prazoTexto}). Total do pedido: R$ ${precoTotal.toFixed(2).replace('.', ',')}.`;
         const histComFrete = [...historico, { role: 'assistant' as const, content: mensagem, ts: new Date().toISOString() }, { role: 'user' as const, content: msgFrete, ts: new Date().toISOString() }].slice(-20);
 
         const respostaFreteRaw = await chamarIA(
@@ -707,18 +714,14 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, te
   const msgAssistente: Mensagem = { role: 'assistant', content: mensagem, ts: new Date().toISOString() };
 
   // Fotos só são enviadas quando o cliente escolheu/confirmou um produto ou pediu foto explicitamente.
-  // Nunca junto com formulário, confirmação de dados ou frete.
-  const podeEnviarFotos = !enviarFormulario && !dadosParaConfirmar && !enderecoEntrega;
+  // Nunca junto com o formulário (Parte 6, cenário 19) nem com endereço/frete.
+  const podeEnviarFotos = !enviarFormulario && !enderecoEntrega;
   const produtos = podeEnviarFotos ? await buscarProdutos(codigosProdutos) : [];
 
   await enviarTexto(phone, mensagem);
   if (enviarFormulario) {
     await new Promise(r => setTimeout(r, 800));
-    await enviarTexto(phone, FORMULARIO_ENTREGA);
-  }
-  if (dadosParaConfirmar && Object.keys(dadosParaConfirmar).some(k => dadosParaConfirmar![k])) {
-    await new Promise(r => setTimeout(r, 600));
-    await enviarTexto(phone, montarResumoConfirmacao(dadosParaConfirmar));
+    await enviarTexto(phone, TEXTO_FORMULARIO_ENTREGA);
   }
   for (const produto of produtos) {
     if (produto.foto_url) {

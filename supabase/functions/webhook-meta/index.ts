@@ -28,7 +28,7 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
 import { mensagemDuplicada } from './dedup.ts';
 import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPorTermoReal, revalidarProdutoReal } from '../_shared/catalogo-woocommerce.ts';
-import { dentroDoHorarioComercial, mensagemAvisoForaDoHorario, mensagemConfirmacaoForaDoHorario } from '../_shared/horario-comercial.ts';
+import { dentroDoHorarioComercial, textoProximaAberturaComercial } from '../_shared/horario-comercial.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -597,6 +597,7 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
   // funil (mesma regra do orchestrator Node, ver sdr.ts).
   const intencao = classificarIntencao(mensagemCliente, estado.fase);
   const foraDoHorario = !dentroDoHorarioComercial();
+  const proximoHorarioTexto = foraDoHorario ? textoProximaAberturaComercial() : undefined;
 
   let respostaFinal: string;
   let fotoUrl: string | null | undefined;
@@ -614,21 +615,17 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     }
   } else {
     const primeiraMensagem = (conversaRow.historico ?? []).length === 0;
-    // Aviso de horário só na primeira mensagem da conversa — nunca repetido a cada troca.
-    const avisoHorario = foraDoHorario && primeiraMensagem
-      ? mensagemAvisoForaDoHorario()
-      : '';
 
-    if (primeiraMensagem && !nomeCliente) {
-      respostaFinal = `${avisoHorario}Oi! Pode me dizer seu nome pra eu te atender melhor?`;
-    } else if (foraDoHorario && estado.fase === 'aguardando_confirmacao') {
-      // Fora do horário comercial a loja não confirma pedido nem gera pagamento.
-      // A fase não avança — a conversa retoma sozinha exatamente daqui na
-      // próxima mensagem dentro do horário comercial (sem handoff automático).
-      respostaFinal = mensagemConfirmacaoForaDoHorario();
+    // Fora do horário logo na primeira mensagem: o próprio funil mostra o
+    // aviso com opt-in (Parte 4) antes de qualquer coisa, inclusive antes de
+    // perguntar o nome — o nome é coletado normalmente assim que a conversa
+    // seguir. Dentro do horário, ou já em jornada aceita fora dele, mantém a
+    // pergunta de nome de sempre.
+    if (primeiraMensagem && !nomeCliente && !foraDoHorario) {
+      respostaFinal = 'Oi! Pode me dizer seu nome pra eu te atender melhor?';
     } else {
       const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', canal, canalId });
-      const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps);
+      const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps, foraDoHorario, proximoHorarioTexto);
       estado = resultado.estado;
       if (estado.fase === 'transferido_humano') {
         // O funil decidiu internamente transferir (CEP/frete falhou, falha
@@ -637,10 +634,10 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
         // real é criado, nunca como texto solto sem ticket. Mesmo mecanismo
         // do portão externo, pra nunca duplicar nem deixar órfã de novo.
         const motivo = estado.dados.motivoTransferencia ?? 'transferencia solicitada pelo funil';
-        respostaFinal = `${avisoHorario}${await iniciarHandoffHumano(conversaRow, canal, canalId, 'flora_sem_confianca', motivo)}`;
+        respostaFinal = await iniciarHandoffHumano(conversaRow, canal, canalId, 'flora_sem_confianca', motivo);
       } else {
-        const saudacaoNome = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ` : '';
-        respostaFinal = `${avisoHorario}${saudacaoNome}${resultado.mensagem}`;
+        const saudacaoNome = primeiraMensagem && nomeCliente && estado.fase !== 'aviso_fora_horario' ? `Oi, ${nomeCliente}! ` : '';
+        respostaFinal = `${saudacaoNome}${resultado.mensagem}`;
         fotoUrl = resultado.fotoUrl;
         fotos = resultado.fotos;
       }

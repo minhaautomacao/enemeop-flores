@@ -37,6 +37,7 @@ import { enviarWhatsApp } from '../_shared/whatsapp.ts';
 import { mapearStatusPagamento, valoresDivergem } from './logica.ts';
 import { processarLogisticaAposPagamento, SELECT_PEDIDO_PARA_LOGISTICA, type PedidoParaEntrega } from '../_shared/logistica-processamento.ts';
 import { decidirProcessamentoEvento, type EventoExistente } from '../_shared/pagamento-evento-decisao.ts';
+import { dentroDoHorarioComercial, proximaAberturaComercial, textoProximaAberturaComercial } from '../_shared/horario-comercial.ts';
 
 const SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
@@ -50,6 +51,10 @@ const FACTORY_SECRET = Deno.env.get('FACTORY_SECRET') ?? '';
 // pagamento continuam funcionando normalmente (ver Parte A.5).
 const STORE_PHONE   = Deno.env.get('STORE_PHONE') ?? '';
 const STORE_NOME    = 'Enemeop Flores';
+// Quanto o preço operacional pode subir (R$) numa re-cotação pós-expiração
+// antes de exigir revisão humana em vez de a loja absorver sozinha (Parte 3
+// — ordem financeiramente segura). Default = markup padrão da cotação.
+const LIMITE_AUMENTO_OPERACIONAL_REAIS = Number(Deno.env.get('LOGISTICA_LIMITE_AUMENTO_OPERACIONAL_REAIS') ?? '15');
 
 function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
@@ -109,6 +114,7 @@ const CONFIG_LOGISTICA = {
   workspaceId: WORKSPACE_ID,
   storePhone: STORE_PHONE,
   storeNome: STORE_NOME,
+  limiteAumentoOperacionalReais: LIMITE_AUMENTO_OPERACIONAL_REAIS,
 };
 
 async function notificarCliente(pedido: PedidoRow, texto: string): Promise<void> {
@@ -294,6 +300,28 @@ Deno.serve(async (req: Request) => {
       pago_em: new Date().toISOString(),
     }).eq('id', pedido.id);
 
+    // Pagamento aprovado fora do horário nunca chama o motorista na hora
+    // (Parte 5) — o pedido já foi marcado 'pago' acima (entra na produção
+    // normalmente), mas a criação da corrida real (POST /v3/orders) é
+    // adiada pro próximo horário comercial, processada só pelo job agendado
+    // (logistica-agendada-processar). Idempotente: só agenda se a logística
+    // ainda não foi criada/agendada/está em revisão.
+    const foraDoHorarioPagamento = !dentroDoHorarioComercial();
+    let proximaExecucaoTexto: string | null = null;
+    if (foraDoHorarioPagamento) {
+      const proximaExecucao = proximaAberturaComercial();
+      proximaExecucaoTexto = textoProximaAberturaComercial();
+      const { data: agendado } = await db.from('pedidos')
+        .update({ status_logistica: 'agendada', logistica_executar_em: proximaExecucao.toISOString() })
+        .eq('id', pedido.id)
+        .or('status_logistica.is.null,status_logistica.eq.erro_logistica')
+        .select('id')
+        .maybeSingle();
+      console.log(agendado
+        ? `[webhook-mp] pagamento aprovado fora do horario — logistica agendada para ${proximaExecucao.toISOString()}. pedido=${pedido.id}`
+        : `[webhook-mp] logistica ja criada/agendada/em revisao — nao reagenda. pedido=${pedido.id}`);
+    }
+
     if (decisaoEvento.acao === 'processar_completo') {
       await db.from('conversas').update({
         fase: 'concluido',
@@ -301,7 +329,9 @@ Deno.serve(async (req: Request) => {
       }).eq('canal', pedido.canal).eq('canal_id', pedido.canal_id);
 
       const valorFormatado = `R$ ${pagamento.valor.toFixed(2).replace('.', ',')}`;
-      const texto = `Recebemos o seu pagamento de ${valorFormatado}. Seu pedido está confirmado e vamos preparar tudo com muito carinho. Em breve entraremos em contato com as informações de entrega.`;
+      const texto = foraDoHorarioPagamento
+        ? `Recebemos o seu pagamento de ${valorFormatado}. Pagamento confirmado! Como estamos fora do horário de atendimento agora, a entrega segue ${proximaExecucaoTexto}. Vamos preparar tudo com muito carinho.`
+        : `Recebemos o seu pagamento de ${valorFormatado}. Seu pedido está confirmado e vamos preparar tudo com muito carinho. Em breve entraremos em contato com as informações de entrega.`;
       await notificarCliente(pedido as PedidoRow, texto);
       console.log(`[webhook-mp] pagamento aprovado e confirmado. pedido=${pedido.id} payment=${paymentId} valor=${valorFormatado}`);
       await marcarEventoOk();
@@ -309,13 +339,16 @@ Deno.serve(async (req: Request) => {
       console.log(`[webhook-mp] evento repetido — pulando nova notificacao ao cliente, so retomando logistica se necessario. pedido=${pedido.id}`);
     }
 
-    // Nunca fecha silenciosamente sem iniciar o operacional: pagamento
-    // confirmado sempre tenta a criação real da entrega — em evento novo
-    // OU repetido, já que a idempotência da logística vem inteiramente do
-    // estado em pedidos.status_logistica (nunca da notificação em si).
-    // Falha aqui nunca desfaz o pagamento nem re-notifica o cliente.
-    const resultadoLogistica = await processarLogisticaAposPagamento(db, { ...(pedido as PedidoRow), status: 'pago' }, CONFIG_LOGISTICA);
-    console.log(`[webhook-mp] resultado logistica: ${resultadoLogistica.status}${'motivo' in resultadoLogistica ? ` (${resultadoLogistica.motivo})` : ''} pedido=${pedido.id}`);
+    if (!foraDoHorarioPagamento) {
+      // Nunca fecha silenciosamente sem iniciar o operacional: pagamento
+      // confirmado dentro do horário sempre tenta a criação real da entrega
+      // — em evento novo OU repetido, já que a idempotência da logística vem
+      // inteiramente do estado em pedidos.status_logistica (nunca da
+      // notificação em si). Falha aqui nunca desfaz o pagamento nem
+      // re-notifica o cliente.
+      const resultadoLogistica = await processarLogisticaAposPagamento(db, { ...(pedido as PedidoRow), status: 'pago' }, CONFIG_LOGISTICA);
+      console.log(`[webhook-mp] resultado logistica: ${resultadoLogistica.status}${'motivo' in resultadoLogistica ? ` (${resultadoLogistica.motivo})` : ''} pedido=${pedido.id}`);
+    }
 
     return new Response('ok', { status: 200 });
   }

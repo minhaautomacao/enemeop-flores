@@ -28,6 +28,10 @@ const WORKSPACE_ID  = Deno.env.get('SAAS_WORKSPACE_ID') ?? '';
 const FACTORY_SECRET = Deno.env.get('FACTORY_SECRET') ?? '';
 const STORE_PHONE   = Deno.env.get('STORE_PHONE') ?? '';
 const STORE_NOME    = 'Enemeop Flores';
+// Quanto o preço operacional pode subir (R$) numa re-cotação pós-expiração
+// antes de exigir revisão humana em vez de a loja absorver sozinha (Parte 3
+// — ordem financeiramente segura). Default = markup padrão da cotação.
+const LIMITE_AUMENTO_OPERACIONAL_REAIS = Number(Deno.env.get('LOGISTICA_LIMITE_AUMENTO_OPERACIONAL_REAIS') ?? '15');
 
 function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
@@ -39,6 +43,7 @@ const CONFIG_LOGISTICA = {
   workspaceId: WORKSPACE_ID,
   storePhone: STORE_PHONE,
   storeNome: STORE_NOME,
+  limiteAumentoOperacionalReais: LIMITE_AUMENTO_OPERACIONAL_REAIS,
 };
 
 Deno.serve(async (req: Request) => {

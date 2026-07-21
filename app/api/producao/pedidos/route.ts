@@ -10,9 +10,9 @@ export async function GET() {
   const { data, error } = await supabase
     .from('pedidos')
     .select(`numero_pedido, id, produto, produtos, valor, cliente_nome, cliente_telefone,
-      status, status_producao, status_logistica, canal, criado_em, horario_entrega,
-      data_agendada, nome_destinatario, bairro, endereco_entrega, mensagem_cartao,
-      frete_transportadora`)
+      status, status_producao, status_logistica, logistica_resposta, canal, criado_em,
+      horario_entrega, data_agendada, nome_destinatario, bairro, endereco_entrega,
+      mensagem_cartao, frete_transportadora`)
     .eq('status', 'pago')
     .order('numero_pedido', { ascending: true })
     .limit(1000);

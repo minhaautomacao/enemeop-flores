@@ -3,12 +3,20 @@
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
 import { EnumeopLogo } from '@/components/enemeop-logo'
-import { Truck } from 'lucide-react'
+import { Truck, AlertTriangle, RefreshCw } from 'lucide-react'
 import { useAlertaNovoPedido } from '../use-alerta-pedido'
 
 type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue'
+type StatusLogistica = 'pendente' | 'criada' | 'erro_logistica' | 'revisao_logistica' | null
 
 const INTERVALO_ATUALIZACAO_MS = 15_000
+
+const LOGISTICA_CONFIG: Record<Exclude<StatusLogistica, null>, { label: string; classes: string }> = {
+  pendente:            { label: 'Logística: processando…', classes: 'bg-blue-500/10 border-blue-500/30 text-blue-400' },
+  criada:              { label: 'Entrega criada',          classes: 'bg-green-500/10 border-green-500/30 text-green-400' },
+  erro_logistica:      { label: 'Erro na entrega',         classes: 'bg-red-500/10 border-red-500/30 text-red-400' },
+  revisao_logistica:   { label: 'Revisão manual necessária', classes: 'bg-purple-500/10 border-purple-500/30 text-purple-300' },
+}
 
 interface Pedido {
   id: string
@@ -23,7 +31,8 @@ interface Pedido {
   bairro: string
   canal: string
   status: StatusPedido
-  statusLogistica: string | null
+  statusLogistica: StatusLogistica
+  erroLogistica: string | null
   prioridade?: boolean
   transportadora: string
   novo?: boolean
@@ -42,6 +51,7 @@ export default function ProducaoPage() {
   const [ultimo, setUltimo] = useState('')
   const [pedidos, setPedidos] = useState<Pedido[]>([])
   const [carregando, setCarregando] = useState(true)
+  const [reprocessando, setReprocessando] = useState<string | null>(null)
   const { registrar } = useAlertaNovoPedido()
 
   const carregarPedidos = useCallback(async () => {
@@ -67,7 +77,8 @@ export default function ProducaoPage() {
           bairro: String(p.bairro ?? ''),
           canal: String(p.canal ?? ''),
           status: String(p.status_producao ?? 'novo') as StatusPedido,
-          statusLogistica: (p.status_logistica as string | null) ?? null,
+          statusLogistica: (p.status_logistica as StatusLogistica) ?? null,
+          erroLogistica: (p.logistica_resposta as { erro?: string } | null)?.erro ?? null,
           prioridade: false,
           transportadora: String(p.frete_transportadora ?? 'A definir'),
           novo: novos.includes(numero),
@@ -80,6 +91,16 @@ export default function ProducaoPage() {
       setCarregando(false)
     }
   }, [registrar])
+
+  const reprocessarLogistica = useCallback(async (pedidoId: string) => {
+    setReprocessando(pedidoId)
+    try {
+      await fetch(`/api/producao/pedidos/${pedidoId}/retry-logistica`, { method: 'POST' })
+    } finally {
+      setReprocessando(null)
+      carregarPedidos()
+    }
+  }, [carregarPedidos])
 
   useEffect(() => {
     carregarPedidos()
@@ -109,7 +130,7 @@ export default function ProducaoPage() {
           <div className="w-px h-8 bg-white/10" />
           <div>
             <p className="text-sm font-bold text-white tracking-widest uppercase">Painel de Produção</p>
-            <p className="text-[10px] text-white/40">Enemeop Flores — uso interno</p>
+            <p className="text-[10px] text-white/40">Enemeop Flores — uso interno · alerta sonoro é habilitado após o primeiro clique nesta página</p>
           </div>
         </div>
         <div className="flex items-center gap-6">
@@ -222,6 +243,34 @@ export default function ProducaoPage() {
                             <p className="text-[11px] font-semibold text-white/70 truncate">{p.transportadora}</p>
                           </div>
                         </div>
+
+                        {/* Status da logística real (Lalamove) */}
+                        {p.statusLogistica && (
+                          <div className={`rounded-lg border px-2.5 py-1.5 ${LOGISTICA_CONFIG[p.statusLogistica].classes}`}>
+                            <div className="flex items-center gap-1.5">
+                              {(p.statusLogistica === 'erro_logistica' || p.statusLogistica === 'revisao_logistica') && (
+                                <AlertTriangle className="w-3 h-3 shrink-0" />
+                              )}
+                              <p className="text-[10px] font-bold uppercase tracking-widest leading-none">{LOGISTICA_CONFIG[p.statusLogistica].label}</p>
+                            </div>
+                            {p.erroLogistica && (
+                              <p className="text-[10px] mt-1 opacity-80 line-clamp-2">{p.erroLogistica}</p>
+                            )}
+                            {/* Reprocessar só aparece pra erro recuperável — nunca em
+                                estado ambíguo (revisao_logistica), que exige checagem
+                                humana antes de qualquer nova tentativa. */}
+                            {p.statusLogistica === 'erro_logistica' && (
+                              <button
+                                onClick={() => reprocessarLogistica(p.id)}
+                                disabled={reprocessando === p.id}
+                                className="mt-1.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest border border-current rounded px-2 py-1 hover:bg-white/10 disabled:opacity-40 transition-colors"
+                              >
+                                <RefreshCw className={`w-3 h-3 ${reprocessando === p.id ? 'animate-spin' : ''}`} />
+                                {reprocessando === p.id ? 'Reprocessando…' : 'Reprocessar entrega'}
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       {/* Rodapé: canal, bairro, horário */}

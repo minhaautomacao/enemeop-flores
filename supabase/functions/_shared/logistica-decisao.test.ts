@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decidirAcaoLogistica, statusLogisticaReivindicavel } from './logistica-decisao.ts';
+import { decidirAcaoLogistica, statusLogisticaReivindicavel, LIMITE_PENDENTE_AMBIGUO_MS } from './logistica-decisao.ts';
 
 test('pedido nao pago nunca aciona criacao de entrega', () => {
   const d = decidirAcaoLogistica({ status: 'aguardando_pagamento', status_logistica: null, lalamove_order_id: null }, true);
@@ -34,12 +34,37 @@ test('falha anterior (erro_logistica) permite nova tentativa', () => {
   assert.deepEqual(d, { acao: 'criar' });
 });
 
+test('em revisao_logistica nunca tenta de novo automaticamente — so revisao humana', () => {
+  const d = decidirAcaoLogistica({ status: 'pago', status_logistica: 'revisao_logistica', lalamove_order_id: null }, true);
+  assert.deepEqual(d, { acao: 'pular', motivo: 'em_revisao' });
+});
+
+test('pendente reivindicado ha pouco tempo -> outra execucao provavelmente ainda em andamento, nunca reivindica de novo', () => {
+  const agora = new Date('2026-07-21T12:00:00Z');
+  const pendenteDesde = new Date(agora.getTime() - 10_000).toISOString(); // 10s atras
+  const d = decidirAcaoLogistica({ status: 'pago', status_logistica: 'pendente', lalamove_order_id: null, logistica_pendente_desde: pendenteDesde }, true, agora);
+  assert.deepEqual(d, { acao: 'pular', motivo: 'claim_em_andamento' });
+});
+
+test('pendente ha mais tempo que o limite -> estado ambiguo, nunca retry cego', () => {
+  const agora = new Date('2026-07-21T12:00:00Z');
+  const pendenteDesde = new Date(agora.getTime() - (LIMITE_PENDENTE_AMBIGUO_MS + 1000)).toISOString();
+  const d = decidirAcaoLogistica({ status: 'pago', status_logistica: 'pendente', lalamove_order_id: null, logistica_pendente_desde: pendenteDesde }, true, agora);
+  assert.deepEqual(d, { acao: 'marcar_ambiguo_por_timeout' });
+});
+
+test('pendente sem timestamp de claim (dado corrompido/antigo) e tratado como ambiguo, nunca como recente', () => {
+  const d = decidirAcaoLogistica({ status: 'pago', status_logistica: 'pendente', lalamove_order_id: null, logistica_pendente_desde: null }, true);
+  assert.deepEqual(d, { acao: 'marcar_ambiguo_por_timeout' });
+});
+
 test('statusLogisticaReivindicavel: null e erro_logistica sao reivindicaveis', () => {
   assert.equal(statusLogisticaReivindicavel(null), true);
   assert.equal(statusLogisticaReivindicavel('erro_logistica'), true);
 });
 
-test('statusLogisticaReivindicavel: pendente e criada nunca sao reivindicaveis (evita corrida concorrente duplicada)', () => {
+test('statusLogisticaReivindicavel: pendente, criada e revisao_logistica nunca sao reivindicaveis (evita corrida concorrente/ambigua duplicada)', () => {
   assert.equal(statusLogisticaReivindicavel('pendente'), false);
   assert.equal(statusLogisticaReivindicavel('criada'), false);
+  assert.equal(statusLogisticaReivindicavel('revisao_logistica'), false);
 });

@@ -7,6 +7,8 @@ import { useAlertaNovoPedido } from '../../use-alerta-pedido'
 
 type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue'
 
+type StatusLogistica = 'pendente' | 'criada' | 'erro_logistica' | 'revisao_logistica' | null
+
 interface Pedido {
   id: string
   numero: number
@@ -14,6 +16,7 @@ interface Pedido {
   cliente: string
   horario: string
   status: StatusPedido
+  statusLogistica: StatusLogistica
   prioridade?: boolean
   novo?: boolean
 }
@@ -62,6 +65,7 @@ export default function StatusPage() {
             cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
             horario: p.data_agendada ? new Date(String(p.data_agendada)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : new Date(String(p.criado_em)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
             status: String(p.status_producao ?? 'novo') as StatusPedido,
+            statusLogistica: (p.status_logistica as StatusLogistica) ?? null,
             prioridade: false,
             novo: novos.includes(numero),
           }
@@ -92,7 +96,10 @@ export default function StatusPage() {
         <div className="flex items-center gap-5">
           <EnumeopLogo size="md" showText={true} />
           <div className="w-px h-10 bg-border" />
-          <p className="text-xl font-bold text-text-primary tracking-widest uppercase">Status dos Pedidos</p>
+          <div>
+            <p className="text-xl font-bold text-text-primary tracking-widest uppercase">Status dos Pedidos</p>
+            <p className="text-[10px] text-text-faint">alerta sonoro é habilitado após o primeiro clique nesta página</p>
+          </div>
         </div>
         <div className="flex items-center gap-8">
           <div className="text-center">
@@ -143,6 +150,16 @@ export default function StatusPage() {
                       {p.prioridade && (
                         <span className="rounded-full border border-gold/50 bg-gold/10 px-2 py-0.5 text-[10px] font-bold text-gold uppercase tracking-widest">
                           URGENTE
+                        </span>
+                      )}
+                      {p.statusLogistica === 'erro_logistica' && (
+                        <span className="rounded-full border border-red-500/50 bg-red-500/10 px-2 py-0.5 text-[10px] font-bold text-red-400 uppercase tracking-widest">
+                          ⚠ Erro na entrega
+                        </span>
+                      )}
+                      {p.statusLogistica === 'revisao_logistica' && (
+                        <span className="rounded-full border border-purple-500/50 bg-purple-500/10 px-2 py-0.5 text-[10px] font-bold text-purple-300 uppercase tracking-widest">
+                          ⚠ Revisão manual
                         </span>
                       )}
                     </div>

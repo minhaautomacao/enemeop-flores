@@ -280,7 +280,7 @@ export default function EncomendasPage() {
                       <span className="flex items-center gap-1"><Bell className="w-3 h-3" /> Lembretes: 2h, 1h, 30, 20, 10 min</span>
                     </div>
                     {enc.mensagemCard && (
-                      <p className="mt-2 text-xs text-text-faint italic border-l-2 border-gold/30 pl-2">"{enc.mensagemCard}"</p>
+                      <p className="mt-2 text-xs text-text-faint italic border-l-2 border-gold/30 pl-2">&quot;{enc.mensagemCard}&quot;</p>
                     )}
                   </div>
                 ))
@@ -444,7 +444,7 @@ export default function EncomendasPage() {
                 <div><p className="text-xs text-text-faint">Bairro</p><p className="font-medium text-text-primary">{detalhe.bairro}</p></div>
               </div>
               <div><p className="text-xs text-text-faint">Endereço</p><p className="font-medium text-text-primary">{detalhe.enderecoEntrega}</p></div>
-              {detalhe.mensagemCard && <div><p className="text-xs text-text-faint">Cartão</p><p className="italic text-text-muted">"{detalhe.mensagemCard}"</p></div>}
+              {detalhe.mensagemCard && <div><p className="text-xs text-text-faint">Cartão</p><p className="italic text-text-muted">&quot;{detalhe.mensagemCard}&quot;</p></div>}
               {detalhe.observacoes && <div><p className="text-xs text-text-faint">Obs</p><p className="text-text-muted">{detalhe.observacoes}</p></div>}
             </div>
           </div>

@@ -57,21 +57,26 @@ type Db = SupabaseClient<any, any, any>;
 
 async function marcarErroLogistica(db: Db, pedidoId: string, tentativas: number, motivoSanitizado: string): Promise<void> {
   console.error(`[logistica] falha recuperavel ao criar entrega real: ${motivoSanitizado} pedido=${pedidoId}`);
-  await db.from('pedidos').update({
+  const { error } = await db.from('pedidos').update({
     status_logistica: 'erro_logistica',
     logistica_resposta: { erro: motivoSanitizado },
     logistica_tentativas: tentativas + 1,
   }).eq('id', pedidoId);
+  // Parte 4: nunca ignora silenciosamente — se nem isso persistir, o pedido
+  // fica travado em 'pendente' (claim aberto) sem nenhum registro do que
+  // aconteceu; só resta o log pra investigação manual.
+  if (error) console.error(`[logistica] FALHA AO REGISTRAR erro_logistica (pedido pode ficar preso em 'pendente'): ${error.message} pedido=${pedidoId}`);
 }
 
 /** Estado ambíguo — não dá pra provar que a corrida não foi criada do lado da Lalamove. Nunca marcado como retriável automaticamente (ver statusLogisticaReivindicavel). */
 async function marcarRevisaoLogistica(db: Db, pedidoId: string, tentativas: number, motivoSanitizado: string): Promise<void> {
   console.error(`[logistica] ESTADO AMBIGUO — revisao humana necessaria: ${motivoSanitizado} pedido=${pedidoId}`);
-  await db.from('pedidos').update({
+  const { error } = await db.from('pedidos').update({
     status_logistica: 'revisao_logistica',
     logistica_resposta: { erro: motivoSanitizado, ambiguo: true },
     logistica_tentativas: tentativas + 1,
   }).eq('id', pedidoId);
+  if (error) console.error(`[logistica] FALHA AO REGISTRAR revisao_logistica (RISCO: pedido pode ficar preso em 'pendente' e nunca ser revisado): ${error.message} pedido=${pedidoId}`);
 }
 
 /** Re-cota o frete (mesmo caminho real usado durante a conversa) quando a cotação persistida no pedido já expirou — nunca cria a entrega com um quotationId vencido. */
@@ -139,10 +144,18 @@ export async function processarLogisticaAposPagamento(
     return { status: 'pulado', motivo: 'nao_reivindicavel' };
   }
 
+  // A condição de horário do agendamento entra na própria cláusula WHERE do
+  // UPDATE atômico — nunca só numa leitura anterior (decidirAcaoLogistica,
+  // acima, já bloqueou a maioria dos casos, mas essa checagem aqui é a
+  // fonte real de verdade: mesmo que dois processos concorrentes
+  // (logistica-agendada-processar e logistica-retry) cheguem os dois até
+  // aqui pro mesmo pedido 'agendada' ainda não vencido, nenhum dos dois
+  // UPDATEs bate a condição e nenhum reivindica antes da hora).
+  const agoraIso = new Date().toISOString();
   const { data: claim } = await db.from('pedidos')
-    .update({ status_logistica: 'pendente', logistica_pendente_desde: new Date().toISOString() })
+    .update({ status_logistica: 'pendente', logistica_pendente_desde: agoraIso })
     .eq('id', pedido.id)
-    .or('status_logistica.is.null,status_logistica.eq.erro_logistica,status_logistica.eq.agendada')
+    .or(`status_logistica.is.null,status_logistica.eq.erro_logistica,and(status_logistica.eq.agendada,logistica_executar_em.lte.${agoraIso})`)
     .select('id')
     .maybeSingle();
   if (!claim) {
@@ -194,12 +207,17 @@ export async function processarLogisticaAposPagamento(
     stopIdOrigem = nova.stopIdOrigem;
     stopIdDestino = nova.stopIdDestino;
     precoOperacionalFinal = nova.precoReal ?? pedido.frete_preco_real;
-    await db.from('pedidos').update({
+    const { error: cacheRecotacaoError } = await db.from('pedidos').update({
       lalamove_quotation_id: quotationId,
       frete_expires_at: expiresAt,
       lalamove_stop_id_origem: stopIdOrigem,
       lalamove_stop_id_destino: stopIdDestino,
     }).eq('id', pedido.id);
+    // Não bloqueia a criação da entrega abaixo (os valores re-cotados já
+    // estão em memória, nesta execução) — mas se isso não persistir, uma
+    // execução futura pode re-cotar de novo sem necessidade. Só um log, não
+    // é um dos casos "críticos" desta correção.
+    if (cacheRecotacaoError) console.error(`[logistica] falha ao cachear nova cotacao (nao critico, corrida ainda sera criada com os valores desta execucao): ${cacheRecotacaoError.message} pedido=${pedido.id}`);
   }
 
   if (!pedido.nome_destinatario || !pedido.telefone_destinatario) {
@@ -233,7 +251,7 @@ export async function processarLogisticaAposPagamento(
     return { status: 'erro_logistica', motivo };
   }
 
-  await db.from('pedidos').update({
+  const { error: persistirCriadaError } = await db.from('pedidos').update({
     status_logistica: 'criada',
     lalamove_order_id: resultado.orderId,
     logistica_criado_em: new Date().toISOString(),
@@ -244,10 +262,25 @@ export async function processarLogisticaAposPagamento(
     },
     logistica_tentativas: tentativas + 1,
   }).eq('id', pedido.id);
+
+  if (persistirCriadaError) {
+    // A Lalamove JÁ criou a corrida de verdade (temos orderId real) — se a
+    // persistência falhar aqui, o pedido não pode voltar a ser
+    // 'erro_logistica'/null (isso deixaria um retry futuro chamar
+    // POST /v3/orders de novo e criar uma SEGUNDA corrida pro mesmo pedido).
+    // Nunca repete cegamente um resultado ambíguo: força revisão humana,
+    // registrando o orderId real no motivo pra quem for revisar já ter o
+    // dado em mãos (Parte 4).
+    console.error(`[logistica] FALHA CRITICA ao persistir entrega ja criada (orderId=${resultado.orderId}): ${persistirCriadaError.message} pedido=${pedido.id}`);
+    await marcarRevisaoLogistica(db, pedido.id, tentativas, `corrida criada na Lalamove (orderId=${resultado.orderId}) mas falha ao persistir no pedido: ${persistirCriadaError.message}`);
+    return { status: 'revisao_logistica', motivo: 'falha_ao_persistir_entrega_ja_criada' };
+  }
+
   console.log(`[logistica] entrega real criada com sucesso. pedido=${pedido.id}`);
   return { status: 'criada', orderId: resultado.orderId };
 }
 
 export const SELECT_PEDIDO_PARA_LOGISTICA = `id, status, nome_destinatario, telefone_destinatario,
   lalamove_quotation_id, lalamove_order_id, lalamove_stop_id_origem, lalamove_stop_id_destino,
-  frete_expires_at, frete_destino, frete_preco_real, status_logistica, logistica_pendente_desde, logistica_tentativas`;
+  frete_expires_at, frete_destino, frete_preco_real, status_logistica, logistica_pendente_desde,
+  logistica_executar_em, logistica_tentativas`;

@@ -158,6 +158,10 @@ export interface DadosPedido {
   proximoHorarioTexto?: string
   /** Marca a fronteira de uma nova jornada dentro da mesma conversa — nunca apaga o histórico, só audita quando um reinício aconteceu (ver Parte 1). */
   jornadaIniciadaEm?: string
+  /** Data de entrega solicitada, já reconhecida e validada (nunca no passado) — calculada a partir do texto livre do formulário só uma vez, na confirmação (ver etapaConfirmandoFormulario / Parte 2 "agendar pela data prometida"). Nunca reconstruída a partir de texto livre depois disso. */
+  dataEntregaSolicitada?: DataCalendario
+  /** Período preferido (manhã/tarde/noite), se informado e reconhecido — null/ausente usa o horário operacional padrão configurado. */
+  periodoEntrega?: PeriodoEntrega | null
 }
 
 export interface EstadoConversa {
@@ -371,6 +375,100 @@ export function montarResumoFormulario(dados: FormularioEntregaDados): string {
     'Está tudo certo? (responda "sim" para eu calcular o frete)',
   ].filter((l): l is string => l !== null)
   return linhas.join('\n')
+}
+
+// ── Data e período de entrega — normalização determinística (Parte 2 da
+// correção "fechar bloqueios do agendamento") ─────────────────────────────
+//
+// A logística (webhook-mercadopago/_shared/agendamento-entrega.ts, fora
+// deste arquivo por depender de horário comercial) precisa de uma DATA
+// TIPADA pra decidir quando despachar a corrida real — nunca de texto livre
+// como "amanhã, a partir das 9h". Este bloco só RECONHECE e VALIDA padrões
+// explícitos e inequívocos ("hoje", "amanhã", dia da semana, DD/MM[/AAAA]);
+// qualquer outra coisa retorna null e a confirmação do pedido é bloqueada
+// (ver etapaConfirmandoFormulario) até o cliente esclarecer — nunca adivinha
+// uma data.
+
+export interface DataCalendario { ano: number; mes: number; dia: number } // mes: 0-11, mesma convenção do Date
+
+const DIAS_SEMANA_NOMES = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado']
+
+/** Lê a data de hoje no fuso America/Sao_Paulo a partir de um instante UTC — mesma técnica (sem métodos locais do Date) de _shared/horario-comercial.ts. */
+function dataAtualBRT(agora: Date): DataCalendario & { diaSemana: number } {
+  const deslocado = new Date(agora.getTime() - 3 * 60 * 60_000)
+  return { ano: deslocado.getUTCFullYear(), mes: deslocado.getUTCMonth(), dia: deslocado.getUTCDate(), diaSemana: deslocado.getUTCDay() }
+}
+
+/** Soma dias a uma data de calendário — usa meio-dia UTC como pivô só pra normalizar overflow de mês/ano via o próprio Date, nunca pra decidir hora (isso é sempre calculado à parte, em horario-comercial.ts). */
+function somarDiasCalendario(data: DataCalendario, dias: number): DataCalendario & { diaSemana: number } {
+  const instante = new Date(Date.UTC(data.ano, data.mes, data.dia + dias, 12, 0, 0))
+  return { ano: instante.getUTCFullYear(), mes: instante.getUTCMonth(), dia: instante.getUTCDate(), diaSemana: instante.getUTCDay() }
+}
+
+/**
+ * Reconhece só "hoje", "amanhã", nome de dia da semana ("segunda",
+ * "terça-feira"...) e datas explícitas DD/MM ou DD/MM/AAAA. Dia da semana
+ * dito no próprio dia sempre significa a PRÓXIMA ocorrência (nunca hoje —
+ * evita ambiguidade: "segunda" dito numa segunda não é natural pro mesmo
+ * dia). Qualquer outro texto (datas por extenso, "semana que vem",
+ * intervalos, etc.) retorna null.
+ */
+export function normalizarDataEntregaTexto(texto: string, agora: Date = new Date()): DataCalendario | null {
+  const n = normalizar(texto).trim()
+  const hojeBRT = dataAtualBRT(agora)
+  const limpar = (d: DataCalendario): DataCalendario => ({ ano: d.ano, mes: d.mes, dia: d.dia })
+
+  if (/^hoje\b/.test(n)) return limpar(hojeBRT)
+  if (/^amanha\b/.test(n)) return limpar(somarDiasCalendario(hojeBRT, 1))
+
+  const diaSemanaAlvo = DIAS_SEMANA_NOMES.findIndex(d => n.includes(d))
+  if (diaSemanaAlvo !== -1) {
+    const diff = ((diaSemanaAlvo - hojeBRT.diaSemana + 7) % 7) || 7
+    return limpar(somarDiasCalendario(hojeBRT, diff))
+  }
+
+  const dataExplicita = n.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/)
+  if (dataExplicita) {
+    const dia = parseInt(dataExplicita[1], 10)
+    const mes = parseInt(dataExplicita[2], 10) - 1
+    let ano = dataExplicita[3] ? parseInt(dataExplicita[3], 10) : hojeBRT.ano
+    if (ano < 100) ano += 2000
+    if (mes < 0 || mes > 11 || dia < 1 || dia > 31) return null
+    return { ano, mes, dia }
+  }
+
+  return null
+}
+
+function chaveComparavelData(d: DataCalendario): number {
+  return d.ano * 10000 + d.mes * 100 + d.dia
+}
+
+/** Data reconhecida (não null) e não está no passado, comparada ao dia de hoje em BRT — nunca aceita silenciosamente uma data inválida ou já passada. */
+export function dataEntregaValida(data: DataCalendario | null, agora: Date = new Date()): boolean {
+  if (!data) return false
+  return chaveComparavelData(data) >= chaveComparavelData(dataAtualBRT(agora))
+}
+
+/** Formato ISO (AAAA-MM-DD) pra persistir num campo `date` do banco — nunca guarda o texto livre original como se fosse a data operacional. */
+export function dataCalendarioParaISO(data: DataCalendario): string {
+  return `${String(data.ano).padStart(4, '0')}-${String(data.mes + 1).padStart(2, '0')}-${String(data.dia).padStart(2, '0')}`
+}
+
+export type PeriodoEntrega = 'manha' | 'tarde' | 'noite'
+
+const PERIODOS_ENTREGA_ACEITOS: { periodo: PeriodoEntrega; termos: string[] }[] = [
+  { periodo: 'manha', termos: ['manha', 'de manha'] },
+  { periodo: 'tarde', termos: ['tarde', 'de tarde'] },
+  { periodo: 'noite', termos: ['noite', 'de noite'] },
+]
+
+/** Reconhece só manhã/tarde/noite — período não reconhecido ou ausente retorna null (nunca inventa um período; a logística usa um horário operacional seguro configurado como padrão nesse caso). */
+export function normalizarPeriodoEntregaTexto(texto?: string): PeriodoEntrega | null {
+  if (!texto) return null
+  const n = normalizar(texto)
+  for (const p of PERIODOS_ENTREGA_ACEITOS) if (p.termos.some(t => n.includes(t))) return p.periodo
+  return null
 }
 
 // ── Classificador de intenção (determinístico, sem LLM) ──────────────────
@@ -1492,8 +1590,25 @@ async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemClient
     return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA }
   }
 
+  // Data de entrega tem que ser reconhecível e nunca no passado ANTES de
+  // seguir — nunca gera pagamento (nem sequer cota frete) com uma data
+  // inválida/ambígua; o cliente precisa corrigir primeiro (Parte 2 "agendar
+  // pela data prometida, não pelo horário do pagamento").
+  const dataParseada = normalizarDataEntregaTexto(estado.dados.formulario.dataEntrega ?? '')
+  if (!dataEntregaValida(dataParseada)) {
+    return {
+      estado: { ...estado, fase: 'confirmando_formulario' },
+      mensagem: 'Não consegui identificar a data de entrega — pode confirmar usando "hoje", "amanhã", o dia da semana ou uma data no formato DD/MM?',
+    }
+  }
+
   const estadoSincronizado = sincronizarFormularioParaEndereco(estado)
-  return etapaCalculoFrete({ ...estadoSincronizado, fase: 'calculando_frete' }, deps)
+  const dadosComDataTipada: DadosPedido = {
+    ...estadoSincronizado.dados,
+    dataEntregaSolicitada: dataParseada!,
+    periodoEntrega: normalizarPeriodoEntregaTexto(estado.dados.formulario.periodo),
+  }
+  return etapaCalculoFrete({ ...estadoSincronizado, dados: dadosComDataTipada, fase: 'calculando_frete' }, deps)
 }
 
 async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {

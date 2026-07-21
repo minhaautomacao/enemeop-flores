@@ -21,6 +21,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { factorySecretValido } from '../_shared/auth-crm.ts';
 import { processarLogisticaAposPagamento, SELECT_PEDIDO_PARA_LOGISTICA, type PedidoParaEntrega } from '../_shared/logistica-processamento.ts';
+import { agendamentoVencido } from '../_shared/logistica-decisao.ts';
 
 const SERVICE_KEY   = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_URL  = Deno.env.get('SUPABASE_URL') ?? '';
@@ -104,6 +105,22 @@ Deno.serve(async (req: Request) => {
   // uma resposta clara em vez de um "pulado" genérico.
   if (pedido.status !== 'pago') {
     return new Response(JSON.stringify({ erro: 'pedido nao esta pago', status_atual: pedido.status }), {
+      status: 409,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // Nunca chama o motorista antes da hora combinada, nem por reprocessamento
+  // administrativo — logistica_executar_em só é reivindicável quando já
+  // chegou. Este é só um pré-check (resposta clara em vez de "pulado"
+  // genérico); a garantia real contra corrida concorrente está na condição
+  // de horário embutida no UPDATE atômico do claim (logistica-processamento.ts).
+  if (!agendamentoVencido(pedido, new Date())) {
+    return new Response(JSON.stringify({
+      erro: 'logistica agendada ainda nao venceu',
+      status_atual: pedido.status_logistica,
+      logistica_executar_em: pedido.logistica_executar_em,
+    }), {
       status: 409,
       headers: { 'Content-Type': 'application/json' },
     });

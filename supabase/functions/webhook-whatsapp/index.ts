@@ -1,64 +1,54 @@
 /**
- * webhook-whatsapp — Recebe mensagens do Z-API e responde com IA + fotos dos produtos
+ * webhook-whatsapp — Z-API, usando o funil comercial determinístico
+ * compartilhado (ver ../_shared/funil.ts) — mesma arquitetura de
+ * webhook-meta/index.ts (Instagram/Messenger), adaptada só na camada de
+ * canal (Z-API em vez de Graph API).
  *
- * Quando a IA sugere ou o cliente confirma um produto, a foto real é enviada via Z-API.
- * Fotos e códigos ficam na tabela catalogo_produtos.
+ * Reescrita completa (Correção P0 "fechar bloqueios do agendamento", Parte
+ * 5/6): a versão anterior misturava um LLM (Groq) decidindo fase/catálogo
+ * hardcoded (CATALOGO_IA com preços fixos no prompt) com um bloco
+ * determinístico parcial só pro formulário — duas implementações comerciais
+ * divergentes no mesmo produto. Agora о LLM não é mais chamado para nada do
+ * fluxo comercial: catálogo, preço, frete, aprovação e pagamento são 100%
+ * responsabilidade do dispatcher avancarFunil, exatamente como no
+ * Instagram/Messenger — nunca duas fontes de verdade pro mesmo negócio.
+ *
+ * Áudio (Z-API) continua sendo transcrito (Groq Whisper) e tratado como
+ * texto normal a partir daí — a transcrição em si não decide nada, só vira
+ * a mensagem de entrada do funil.
+ *
+ * ATENÇÃO — não foi possível rodar `deno check`/testes deste arquivo no
+ * ambiente onde esta integração foi construída (sem Deno CLI disponível).
+ *
+ * Variáveis de ambiente:
+ *   ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN
+ *   FACTORY_SECRET, SAAS_WORKSPACE_ID
+ *   GROQ_API_KEY — usado só pra transcrição de áudio (Whisper), nunca para
+ *     decidir fase/catálogo/preço.
+ *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (auto-injetados)
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import {
-  type Fase, type FormularioEntregaDados,
-  classificarIntencao, intencaoInterrompeFluxo, mensagemForaDeEscopo, mensagemTransferencia,
-  TEXTO_FORMULARIO_ENTREGA, extrairFormularioEntrega, camposFaltandoFormulario, formularioCompleto,
-  montarMensagemCamposFaltando, montarResumoFormulario, normalizarTelefoneDestinatarioBR, cepValido,
-  mensagemAvisoForaDoHorarioComOpcao, mensagemAguardandoRespostaForaDoHorario,
-} from '../_shared/funil.ts';
+import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
+import { mensagemDuplicada } from '../_shared/dedup.ts';
+import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPorTermoReal, revalidarProdutoReal } from '../_shared/catalogo-woocommerce.ts';
 import { dentroDoHorarioComercial, textoProximaAberturaComercial } from '../_shared/horario-comercial.ts';
-
-function pareceConfirmacaoForaHorario(texto: string): boolean {
-  const n = texto.trim().toLowerCase();
-  return /^(sim|s|ok|pode|continuar|pode continuar|pode seguir|seguir|isso|correto)\b/.test(n) || n.includes('continuar');
-}
-
-/**
- * Portão de escopo compartilhado (ver ../_shared/funil.ts e
- * orchestrator/src/lib/sdr.ts) — mesma regra determinística usada no
- * Instagram/Messenger (webhook-meta) e no orchestrator Node: assunto fora
- * do escopo comercial, reclamação e pedido de atendimento humano são
- * interceptados ANTES de qualquer chamada de IA, com resposta fixa.
- *
- * Integração DELIBERADAMENTE PARCIAL nesta função: diferente do
- * webhook-meta (reescrito para usar avancarFunil por completo), aqui a
- * qualificação/recomendação de produto continua livre via IA (fases em
- * português livre). Reescrever isso por completo sem poder rodar
- * `deno check`/testes neste ambiente (sem Deno CLI disponível) arriscaria
- * quebrar um fluxo em produção sem forma de verificar.
- *
- * O que É determinístico e compartilhado com webhook-meta/funil.ts (Partes
- * 1-4 da correção de reinício/formulário/horário): o portão de escopo, o
- * formulário único de entrega (TEXTO_FORMULARIO_ENTREGA/
- * extrairFormularioEntrega — nunca mais via IA, ver blocos
- * 'coletando_endereco'/'confirmando_dados' em processarMensagem) e o aviso
- * de fora do horário com opt-in. A IA só decide QUANDO mostrar o formulário
- * (enviar_formulario:true) e conversa livremente fora dessas fases — nunca
- * extrai nem confirma os dados de entrega.
- *
- * Mapa aproximado das fases livres desta função para o Fase determinístico
- * do funil, usado só para dar contexto de fase ao classificador (ex.: não
- * deixar uma palavra fora de escopo interromper uma compra em andamento).
- */
-const FASE_LIVRE_PARA_FUNIL: Record<string, Fase> = {
-  descoberta: 'qualificacao',
-  interesse: 'recomendacao',
-  proposta: 'produto_selecionado',
-  confirmar_produto: 'produto_selecionado',
-  coletando_endereco: 'aguardando_formulario',
-  confirmando_dados: 'confirmando_formulario',
-  confirmar_frete: 'aguardando_aprovacao_frete',
-  aguardando_pagamento: 'aguardando_pagamento',
-  concluido: 'pedido_criado',
-  perdido: 'transferido_humano',
-};
+import {
+  type EstadoConversa,
+  type DadosPedido,
+  type ProdutoCatalogo,
+  type DependenciasFunil,
+  type Fase,
+  type ResultadoFrete,
+  type FreteDetalhes,
+  estadoInicial,
+  classificarIntencao,
+  intencaoInterrompeFluxo,
+  mensagemForaDeEscopo,
+  mensagemTransferencia,
+  avancarFunil,
+  dataCalendarioParaISO,
+} from '../_shared/funil.ts';
 
 const SERVICE_KEY   = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const FACTORY_SECRET = Deno.env.get('FACTORY_SECRET') ?? '';
@@ -79,259 +69,289 @@ async function buscarConfigDB(chave: string): Promise<string> {
   } catch { return ''; }
 }
 
-// ── Tipos ─────────────────────────────────────────────────────────────────────
+// ── Tipos de persistência (tabela conversas — mesma usada por webhook-meta) ─
 
-interface Mensagem { role: 'user' | 'assistant'; content: string; ts: string; }
-interface Conversa { id: string; canal_id: string; canal: string; fase: string; historico: Mensagem[]; pedido_info: Record<string, unknown> | null; lead_id: string | null; nome_cliente: string | null; }
-interface Produto { codigo: string; nome: string; preco: number; foto_url: string; }
+interface Mensagem { role: 'user' | 'assistant' | 'human'; content: string; ts: string; mid?: string; }
 
-// ── Catálogo (codigos para a IA usar) ─────────────────────────────────────────
-
-// Catálogo compacto com códigos — a IA usa esses códigos no JSON de resposta
-// IMPORTANTE: Use APENAS os códigos abaixo. Eles existem no banco com foto_url.
-// Projeto real: gftnjvdzgjkhwxnxnwl. NUNCA inventar códigos.
-const CATALOGO_IA = `
-ENEMEOP FLORES — Ipiranga, SP, desde 1997. Seg–Sáb 9h–19h | Dom/Feriados 10h–14h.
-Entrega até 3h após pagamento. São Paulo e Grande SP.
-
-PRODUTOS (use o CÓDIGO exato no campo codigos_produtos):
-RAMALHETES / MINI:
-  095 Ramalhete Rosa+Girassol R$145 | 096 6 Rosas+Ferrero Rocher R$185
-
-BUQUÊS:
-  032 Buquê Rosas Vermelhas R$140 | 033 12 Rosas Vermelhas R$280 | 034 24 Rosas Vermelhas R$560
-  045 Romance em Flor (12 Rosas Rosa+Alstroemêrias) R$370 | 046 12 Rosas Rosa Nacionais+Alstroemêrias R$370
-  047 Buquê Mix de Flores R$745 | 052 12 Girassóis Premium R$435 | 054 Mix Girassóis+Flores do Campo R$295
-  056 100 Rosas Vermelhas R$1490 | 061 Buquê Luxuoso Alstroemêrias Coloridas R$395
-  067 Buquê de Tulipas R$790 | 093 Buquê Lírios Rosa R$395 | 039 Buquê Mix Flores Nobre R$590
-
-ARRANJOS:
-  M01 Arranjo Vaso Vidro R$70 | M09 Girassol Solitário R$75 | 002 2 Rosas+Junco R$105
-  010 Girassol+Ferrero R$120 | 011 Girassol no Vaso R$135 | 003 Coração 2 Rosas+Ferrero R$140
-  M08 Mix Flores do Campo R$145 | M20 Arranjo Laranja R$145 | 027 Alstroemêrias no Vaso R$155
-  M07 Arranjo de Rosas R$160 | 006 4 Rosas Brancas+Alstroemêrias R$225 | M05 Rosas Pink no Vaso R$225
-  004 Buquê Rosas no Vaso de Vidro R$295
-
-ORQUÍDEAS:
-  083 Orquídea Branca 1 haste R$170 | 091 Orquídea Pink 1 haste R$225
-  012 Orquídeas Brancas Frente Única R$225 | 013 Orquídeas Pink Vaso R$225
-  014 Orquídeas Brancas+Ruscus R$225 | 094O Orquídeas Brancas Vaso Barro R$225
-  087 Mini Orquídea Vaso de Vidro R$215 | 084 Phalaenópsis Branca 2 hastes R$290
-  085 Phalaenópsis Pink R$300 | 088 Phalaenópsis Pink no Vaso R$315
-  086 Phalaenópsis Cascata Branca R$390 | 094B Tulipas Brancas Noiva R$720
-
-FORMAS DE PAGAMENTO: Cartão, PIX, online.
-PERSONALIZAÇÃO: encomendas sob medida disponíveis.
-`.trim();
-
-// ── Memória de conversa ───────────────────────────────────────────────────────
-
-async function buscarOuCriarConversa(canalId: string): Promise<Conversa> {
-  const db = getDb();
-  const { data } = await db.from('conversas').select('*').eq('canal_id', canalId).eq('canal', 'whatsapp').single();
-  if (data) return data as Conversa;
-  const { data: nova } = await db.from('conversas')
-    .insert({ canal_id: canalId, canal: 'whatsapp', workspace_id: WORKSPACE_ID })
-    .select('*').single();
-  return nova as Conversa;
+interface ConversaRow {
+  id: string;
+  canal_id: string;
+  canal: string;
+  fase: string;
+  historico: Mensagem[];
+  pedido_info: { dados?: DadosPedido; perguntasFeitas?: string[] } | null;
+  lead_id: string | null;
+  nome_cliente: string | null;
 }
 
-async function salvarConversa(id: string, updates: Partial<Conversa>): Promise<void> {
+async function buscarOuCriarConversa(canalId: string): Promise<ConversaRow> {
+  const db = getDb();
+  const { data } = await db.from('conversas').select('*').eq('canal_id', canalId).eq('canal', 'whatsapp').single();
+  if (data) return data as ConversaRow;
+  const { data: nova } = await db.from('conversas')
+    .insert({ canal_id: canalId, canal: 'whatsapp', workspace_id: WORKSPACE_ID || null, fase: estadoInicial().fase })
+    .select('*').single();
+  return nova as ConversaRow;
+}
+
+async function salvarConversa(id: string, updates: Partial<ConversaRow>): Promise<void> {
   await getDb().from('conversas').update({ ...updates, atualizado_em: new Date().toISOString() }).eq('id', id);
 }
 
-// ── Busca fotos no banco ──────────────────────────────────────────────────────
-
-async function buscarProdutos(codigos: string[]): Promise<Produto[]> {
-  if (!codigos || codigos.length === 0) return [];
-  const { data } = await getDb()
-    .from('catalogo_produtos')
-    .select('codigo, nome, preco, foto_url')
-    .in('codigo', codigos)
-    .eq('ativo', true)
-    .not('foto_url', 'is', null);
-  return (data ?? []) as Produto[];
+function estadoDaConversa(row: ConversaRow): EstadoConversa {
+  return {
+    fase: (row.fase as Fase) || 'inicio',
+    dados: row.pedido_info?.dados ?? {},
+    perguntasFeitas: row.pedido_info?.perguntasFeitas ?? [],
+  };
 }
 
-// ── IA ────────────────────────────────────────────────────────────────────────
+// ── Catálogo real (WooCommerce ao vivo — nunca preço/catálogo hardcoded) ───
 
-function buildSystemPrompt(fase: string, pedidoInfo: Record<string, unknown> | null, nomeCliente: string | null, ultimaMsgTs?: string): string {
-  const freteInfo = pedidoInfo?.frete as Record<string, unknown> | null | undefined;
-  const freteDisponivel = freteInfo?.disponivel === true;
-  const fretePreco = freteDisponivel ? (freteInfo?.preco_cliente as number) : null;
-  const produtoPreco = pedidoInfo?.produto_preco as number | null | undefined;
-  const totalPedido = fretePreco && produtoPreco ? (produtoPreco + fretePreco) : null;
-  const agora = Date.now();
-  const hora = new Date().getHours();
-  const saudacao = hora < 12 ? 'Bom dia' : hora < 18 ? 'Boa tarde' : 'Boa noite';
-  const minutosSilencio = ultimaMsgTs
-    ? Math.floor((agora - new Date(ultimaMsgTs).getTime()) / 60000)
-    : null;
-  const primeiroContato = fase === 'descoberta' && !ultimaMsgTs;
-  const voltouDepoisDeTempo = minutosSilencio !== null && minutosSilencio > 360; // +6h
-
-  return `Você é Flor, atendente da Enemeop Flores — floricultura em São Paulo desde 1997.
-Você atende pelo WhatsApp como se fosse uma pessoa real, simpática e atenciosa.
-${nomeCliente ? `O cliente se chama ${nomeCliente}. Trate-o pelo primeiro nome sempre que soar natural.` : ''}
-
-REGRAS DE OURO:
-- Seja breve. Máximo 2 frases por mensagem. Nunca escreva parágrafos longos.
-- Uma pergunta por vez. Nunca faça duas perguntas na mesma mensagem.
-- Tom natural, como um atendente humano simpático. Nada de robótico.
-- ZERO emojis. Nenhum. Em nenhuma mensagem. Jamais.
-- Nunca mencione ligação, nunca diga que é IA.
-- Se o cliente pedir atendente humano: "Claro! Em breve alguém da nossa equipe entra em contato por aqui."
-- Sempre que souber o nome do cliente, use-o na mensagem quando soar natural.
-
-SAUDAÇÃO — REGRA ABSOLUTA:
-${primeiroContato
-  ? `É o primeiro contato. OBRIGATÓRIO: comece com "${saudacao}, ${nomeCliente ?? '[nome]'}!" e pergunte como pode ajudar.${!nomeCliente ? ' Se não souber o nome, cumprimente sem ele e pergunte o nome na sequência.' : ''}`
-  : voltouDepoisDeTempo
-  ? `O cliente ficou ${Math.floor(minutosSilencio! / 60)}h sem responder. Comece com uma saudação breve e retome de onde parou.`
-  : `PROIBIDO começar com "Bom dia", "Boa tarde", "Boa noite" ou qualquer saudação. A conversa está em andamento — continue de onde parou sem cumprimentos.`
+async function buscarCatalogoReal(params: { query: string; occasion?: string; budget?: number; color?: string }): Promise<ProdutoCatalogo[]> {
+  return buscarProdutosPorTermoReal(WORKSPACE_ID, { query: [params.query, params.color].filter(Boolean).join(' '), budget: params.budget });
 }
 
-FLUXO NATURAL (siga esta ordem, avance sempre que possível):
-1. PRIMEIRO CONTATO: cumprimente com "${saudacao}" + nome se souber, pergunte como pode ajudar
-2. OCASIÃO: descubra para quem é e a ocasião (aniversário, namoro, luto, decoração...)
-3. PRODUTO: sugira até 3 opções adequadas com nome e preço. Aguarde o cliente escolher.
-4. UPSELL: após o cliente escolher as flores, ofereça os complementos disponíveis:
-   - Ferrero Rocher 100g (código: ferrero100) R$45
-   - Ferrero Rocher 50g (código: ferrero50) R$25
-   - Pelúcia Urso Pequeno (código: pelucia_urso_p) R$35
-   - Pelúcia Urso Grande (código: pelucia_urso_g) R$65
-   Inclua os códigos dos itens citados em "codigos_produtos" para as fotos aparecerem.
-   Diga algo como: "Quer adicionar um Ferrero Rocher ou uma pelúcia para deixar ainda mais especial?"
-   Aguarde a resposta — cliente pode recusar, e tudo bem.
-5. ENDEREÇO: envie o formulário com "enviar_formulario": true nos seguintes casos — SEM EXCEÇÃO, OBRIGATÓRIO:
-   - Cliente confirmar o produto (disse "quero esse", "pode ser", "gostei", "esse mesmo", "fechado", etc.)
-   - Cliente perguntar QUALQUER COISA sobre entrega, frete, prazo ou valor ("qual o frete?", "quanto custa?", "qual o valor da entrega?", "e qual o valor?", "como é a entrega?", "qual o prazo?")
-   REGRA ABSOLUTA: quando o cliente perguntar sobre entrega ou valor de entrega, a resposta NUNCA é texto explicativo — é SEMPRE o formulário com "enviar_formulario": true.
-   NÃO responda "nossa entrega é X". Envie o formulário imediatamente.
-   NÃO invente preços. Use SEMPRE o preço que está em "PREÇO DO PRODUTO" acima.
-6. FRETE: após receber endereço preenchido, o sistema calcula automaticamente — apresente o total
-7. PAGAMENTO: pergunte a forma preferida (PIX, cartão crédito ou débito)
-8. FECHAMENTO: confirme tudo e informe que o pedido foi registrado
+// ── Frete real (agente-logistica) ──────────────────────────────────────────
 
-ESTADO ATUAL DA CONVERSA:
-- Fase: ${fase}
-${pedidoInfo?.produto_confirmado ? `- PRODUTO CONFIRMADO: código ${pedidoInfo.produto_confirmado}` : ''}
-${pedidoInfo?.produto_preco ? `- PREÇO DO PRODUTO: R$ ${Number(pedidoInfo.produto_preco).toFixed(2).replace('.', ',')} — USE SEMPRE ESTE VALOR, NUNCA INVENTE OUTRO` : ''}
-${freteDisponivel && fretePreco ? `- FRETE COTADO: R$ ${fretePreco.toFixed(2).replace('.', ',')} (carro, hoje ~2h)` : ''}
-${totalPedido ? `- TOTAL (produto + frete): R$ ${totalPedido.toFixed(2).replace('.', ',')}` : ''}
-${pedidoInfo && Object.keys(pedidoInfo).length > 0 ? `- Contexto completo: ${JSON.stringify(pedidoInfo)}` : '- Nenhum pedido em andamento ainda'}
+const TIMEOUT_FRETE_MS = 25_000;
 
-${CATALOGO_IA}
-
-FOTOS — REGRAS ABSOLUTAS:
-- Ao sugerir opções ou perguntar o que o cliente busca: codigos_produtos deve ser [] (vazio). NÃO envie fotos antes do cliente escolher.
-- Quando o cliente CONFIRMAR ou ESCOLHER um produto específico ("quero esse", "pode ser o 033", "esse mesmo"): coloque o código escolhido em codigos_produtos (1 código apenas).
-- Quando o cliente pedir foto explicitamente ("manda uma foto", "tem foto?", "como é?", "me mostra"): coloque o código do produto sendo discutido em codigos_produtos. NUNCA diga que não pode mandar foto.
-- Quando enviar_formulario for true: codigos_produtos DEVE ser [] — nunca mande foto junto com o formulário.
-- Após o cliente confirmar dados de endereço ou frete: codigos_produtos deve ser [] — nessa fase a foto já foi enviada.
-
-ENDEREÇO — FORMULÁRIO (você só decide QUANDO enviar, nunca extrai os dados):
-- Quando for pedir o endereço, diga algo natural como "Claro! Preciso de alguns dados para calcular o frete." e inclua "enviar_formulario": true no JSON. O sistema envia o formulário e daqui pra frente assume sozinho: extrai os campos da resposta do cliente, pede o que faltar, mostra o resumo e pede confirmação — tudo isso acontece FORA da sua resposta, você não precisa (e não deve) fazer nada disso.
-- NUNCA tente extrair CEP/rua/número/telefone da resposta do cliente nem preencher um resumo de endereço — isso é sempre feito pelo sistema, nunca por você. Não inclua "endereco_entrega" nem "dados_para_confirmacao" na sua resposta.
-${fase === 'coletando_endereco' || fase === 'confirmando_dados' ? `\nATENÇÃO FASE ATUAL (${fase}): o sistema já está tratando isso deterministicamente antes de te chamar — você só vê essa fase se a mensagem do cliente não foi nem uma resposta ao formulário nem uma confirmação (ex.: uma pergunta solta). Responda essa mensagem naturalmente, sem tentar avançar o endereço.` : ''}
-
-FRETE (após cotação automática):
-- Quando o frete estiver em "FRETE JÁ COTADO" acima, apresente ao cliente de forma natural com o total.
-- Ex: "O frete ficou R$ X,XX — o total fica R$ Y,YY. Posso confirmar o pedido?"
-
-PAGAMENTO:
-- Quando cliente confirmar o total: pergunte a forma (PIX, cartão crédito ou débito).
-- Inclua "solicitar_pagamento": true e "forma_pagamento" no JSON.
-
-FORMATO DE RESPOSTA — JSON válido, sempre:
-{
-  "mensagem": "texto curto e natural para o cliente",
-  "codigos_produtos": [],
-  "fase": "descoberta|interesse|proposta|confirmar_produto|coletando_endereco|confirmando_dados|confirmar_frete|aguardando_pagamento|concluido|perdido",
-  "enviar_formulario": false,
-  "produto_confirmado": "",
-  "produto_preco": 0,
-  "solicitar_pagamento": false,
-  "forma_pagamento": ""
-}
-Omita campos vazios ou irrelevantes.
-codigos_produtos: sugerindo → até 3 códigos | confirmado → 1 código | sem produto → [].
-Use EXATAMENTE os códigos do catálogo (ex: "033", "M07", "032", "095").`;
+interface RespostaAgenteLogistica {
+  disponivel?: boolean;
+  preco_real?: number;
+  preco_cliente?: number;
+  transportadora?: string;
+  servico?: string;
+  cotacao?: {
+    quotationId?: string;
+    moeda?: string;
+    expiresAt?: string | null;
+    ambiente?: string;
+    mercado?: string;
+    cotado_em: string;
+    origem: { lat: string; lng: string; endereco: string };
+    destino: { lat: string; lng: string; endereco: string; cep: string };
+    stopIdOrigem?: string;
+    stopIdDestino?: string;
+  };
 }
 
-async function chamarGroq(groqKey: string, systemPrompt: string, mensagens: Array<{role: string; content: string}>, maxTokens: number, modelo = 'llama-3.3-70b-versatile'): Promise<string | null> {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}` },
-    body: JSON.stringify({
-      model: modelo,
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: systemPrompt }, ...mensagens],
-    }),
-  });
-  if (res.ok) return ((await res.json()).choices?.[0]?.message?.content as string)?.trim() ?? null;
-  const errText = await res.text();
-  if (res.status === 429) throw new Error('rate_limit');
-  console.error(`[ia] Groq ${modelo} status ${res.status}:`, errText.slice(0, 200));
-  return null;
-}
-
-async function chamarIA(systemPrompt: string, mensagens: Array<{role: string; content: string}>, maxTokens = 400): Promise<string | null> {
-  const groqKey = Deno.env.get('GROQ_API_KEY') || await buscarConfigDB('GROQ_API_KEY');
-
-  if (groqKey) {
-    // Tentativa 1: modelo principal (70b — melhor qualidade)
-    try {
-      const r = await chamarGroq(groqKey, systemPrompt, mensagens, maxTokens, 'llama-3.3-70b-versatile');
-      if (r) return r;
-    } catch (e) {
-      if (String(e).includes('rate_limit')) {
-        console.warn('[ia] Groq rate limit — aguardando 4s e tentando novamente...');
-        await new Promise(r => setTimeout(r, 4000));
-        // Tentativa 2: retry no 70b após espera
-        try {
-          const r = await chamarGroq(groqKey, systemPrompt, mensagens, maxTokens, 'llama-3.3-70b-versatile');
-          if (r) return r;
-        } catch {
-          // Tentativa 3: fallback para modelo menor se 70b ainda travado
-          try {
-            const r = await chamarGroq(groqKey, systemPrompt, mensagens, maxTokens, 'llama-3.1-8b-instant');
-            if (r) return r;
-          } catch { /* segue para Anthropic */ }
-        }
-      }
+async function calcularFreteReal(cep: string): Promise<ResultadoFrete> {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
+      method: 'POST',
+      // agente-logistica exige o segredo interno do orquestrador (não é
+      // autenticação de usuário Supabase) — ver _shared/auth-crm.ts.
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${FACTORY_SECRET}` },
+      body: JSON.stringify({ endereco: { cep }, workspace_id: WORKSPACE_ID }),
+      signal: AbortSignal.timeout(TIMEOUT_FRETE_MS),
+    });
+    if (!res.ok) {
+      console.error(`[webhook-whatsapp] falha ao calcular frete real: status=${res.status} cep=${cep}`);
+      return { ok: false };
     }
-  }
+    const data = await res.json() as RespostaAgenteLogistica;
+    if (!data.disponivel || data.preco_cliente == null) return { ok: false };
 
-  // Fallback final: Anthropic Claude Haiku
-  const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY') || await buscarConfigDB('ANTHROPIC_API_KEY');
-  if (anthropicKey) {
-    try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001', max_tokens: maxTokens,
-          system: systemPrompt + '\nRetorne APENAS o JSON, sem texto adicional.',
-          messages: mensagens,
-        }),
-      });
-      if (res.ok) return ((await res.json()).content?.[0]?.text as string)?.trim() ?? null;
-    } catch {}
+    const detalhes: FreteDetalhes = {
+      transportadora: data.transportadora,
+      servico: data.servico,
+      precoReal: data.preco_real,
+      markup: data.preco_real != null ? data.preco_cliente - data.preco_real : undefined,
+      quotationId: data.cotacao?.quotationId,
+      moeda: data.cotacao?.moeda,
+      expiresAt: data.cotacao?.expiresAt,
+      ambiente: data.cotacao?.ambiente,
+      mercado: data.cotacao?.mercado,
+      cotadoEm: data.cotacao?.cotado_em,
+      origem: data.cotacao?.origem,
+      destino: data.cotacao?.destino,
+      stopIdOrigem: data.cotacao?.stopIdOrigem,
+      stopIdDestino: data.cotacao?.stopIdDestino,
+    };
+    return { ok: true, valor: data.preco_cliente, detalhes };
+  } catch (e) {
+    const motivo = e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : String(e);
+    console.error(`[webhook-whatsapp] falha ao calcular frete real: ${motivo} cep=${cep}`);
+    return { ok: false };
   }
-
-  return null;
 }
 
-// ── Transcrição de áudio (Groq Whisper) ──────────────────────────────────────
+// ── Pedido (rascunho) e pagamento real (Mercado Pago) ──────────────────────
+
+interface DadosClientePedido { nome: string; telefone?: string; canal: string; canalId?: string; }
+
+async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePedido): Promise<{ pedidoId: string } | null> {
+  const produto = dados.produto;
+  if (!produto || dados.valorTotal == null) {
+    console.error('[webhook-whatsapp] criarPedidoProvisorio chamado sem produto/valorTotal');
+    return null;
+  }
+  const enderecoTexto = dados.endereco
+    ? [dados.endereco.rua, dados.endereco.numero, dados.endereco.bairro, dados.endereco.cidade].filter(Boolean).join(', ')
+    : null;
+  // Gerado aqui (em vez de esperar o default do banco) porque o external_reference
+  // enviado ao Mercado Pago precisa existir já na criação do pedido.
+  const pedidoId = crypto.randomUUID();
+  try {
+    const { data, error } = await getDb()
+      .from('pedidos')
+      .insert({
+        id: pedidoId,
+        cliente_nome: cliente.nome || 'Cliente',
+        cliente_telefone: cliente.telefone ?? '',
+        canal: cliente.canal,
+        canal_id: cliente.canalId ?? null,
+        canal_origem: cliente.canal,
+        produto: produto.nome,
+        produtos: [{ nome: produto.nome, codigo: produto.codigo, woocommerce_product_id: produto.idExterno ?? null, preco: produto.preco, quantidade: produto.quantidade ?? 1 }],
+        valor: dados.valorTotal,
+        valor_frete: dados.valorFrete ?? null,
+        status: 'aguardando_pagamento',
+        provedor_pagamento: 'mercadopago',
+        external_reference: `enemeop-${pedidoId}`,
+        horario_entrega: produto.dataEntrega ?? null,
+        // Data/período tipados (Parte 2 "agendar pela data prometida") —
+        // nunca o texto livre acima é usado pra decisão operacional de
+        // quando despachar a corrida real; ver webhook-mercadopago.
+        data_entrega_solicitada: dados.dataEntregaSolicitada ? dataCalendarioParaISO(dados.dataEntregaSolicitada) : null,
+        periodo_entrega: dados.periodoEntrega ?? null,
+        nome_destinatario: dados.endereco?.nomeDestinatario ?? null,
+        telefone_destinatario: dados.endereco?.telefoneDestinatario ?? null,
+        endereco_entrega: enderecoTexto,
+        cep: dados.endereco?.cep ?? null,
+        numero: dados.endereco?.numero ?? null,
+        complemento: dados.endereco?.complemento ?? null,
+        bairro: dados.endereco?.bairro ?? null,
+        cidade: dados.endereco?.cidade ?? null,
+        uf: dados.endereco?.uf ?? null,
+        nome_comprador: dados.nomeComprador ?? null,
+        mensagem_cartao: produto.mensagemCartao ?? null,
+        workspace_id: WORKSPACE_ID,
+        lalamove_quotation_id: dados.freteDetalhes?.quotationId ?? null,
+        frete_transportadora: dados.freteDetalhes?.transportadora ?? null,
+        frete_servico: dados.freteDetalhes?.servico ?? null,
+        frete_preco_real: dados.freteDetalhes?.precoReal ?? null,
+        frete_markup: dados.freteDetalhes?.markup ?? null,
+        frete_moeda: dados.freteDetalhes?.moeda ?? null,
+        frete_expires_at: dados.freteDetalhes?.expiresAt ?? null,
+        frete_cotado_em: dados.freteDetalhes?.cotadoEm ?? null,
+        frete_ambiente: dados.freteDetalhes?.ambiente ?? null,
+        frete_mercado: dados.freteDetalhes?.mercado ?? null,
+        frete_origem: dados.freteDetalhes?.origem ?? null,
+        frete_destino: dados.freteDetalhes?.destino ?? null,
+        lalamove_stop_id_origem: dados.freteDetalhes?.stopIdOrigem ?? null,
+        lalamove_stop_id_destino: dados.freteDetalhes?.stopIdDestino ?? null,
+      })
+      .select('id')
+      .single();
+    if (error || !data) {
+      console.error('[webhook-whatsapp] falha ao criar pedido provisorio:', error?.message);
+      return null;
+    }
+    return { pedidoId: data.id as string };
+  } catch (e) {
+    console.error('[webhook-whatsapp] excecao ao criar pedido provisorio:', e);
+    return null;
+  }
+}
+
+/** Idempotente: reaproveita mp_preference_id/link_pagamento já persistidos em vez de criar uma preference nova — nunca duas cobranças pro mesmo pedido. */
+async function gerarPagamentoReal(pedidoId: string, _valorTotal: number): Promise<{ link: string; paymentId: string } | null> {
+  const { data: pedido, error } = await getDb()
+    .from('pedidos')
+    .select('produtos, valor_frete, external_reference, mp_preference_id, link_pagamento')
+    .eq('id', pedidoId)
+    .single();
+  if (error || !pedido) {
+    console.error('[webhook-whatsapp] gerarPagamentoReal: pedido nao encontrado:', error?.message);
+    return null;
+  }
+
+  if (pedido.mp_preference_id && pedido.link_pagamento) {
+    return { link: pedido.link_pagamento as string, paymentId: pedido.mp_preference_id as string };
+  }
+
+  const produtos = (pedido.produtos as Array<{ nome: string; preco: number; quantidade?: number }> | null) ?? [];
+  const itens = produtos
+    .filter(p => p.preco > 0)
+    .map(p => ({ titulo: p.nome, quantidade: p.quantidade ?? 1, precoUnitarioReais: p.preco }));
+  const frete = Number(pedido.valor_frete ?? 0);
+  if (frete > 0) itens.push({ titulo: 'Frete', quantidade: 1, precoUnitarioReais: frete });
+  if (itens.length === 0) {
+    console.error('[webhook-whatsapp] gerarPagamentoReal: pedido sem itens cobraveis, preference nao criada');
+    return null;
+  }
+
+  const externalReference = (pedido.external_reference as string | null) ?? `enemeop-${pedidoId}`;
+  const resultado = await criarPreferenciaMercadoPago(WORKSPACE_ID, {
+    externalReference,
+    itens,
+    notificationUrl: `${SUPABASE_URL}/functions/v1/webhook-mercadopago`,
+    backUrls: {
+      success: 'https://enemeopflores.com.br/pagamento/sucesso',
+      failure: 'https://enemeopflores.com.br/pagamento/falha',
+      pending: 'https://enemeopflores.com.br/pagamento/pendente',
+    },
+    metadata: { pedido_id: pedidoId, workspace_id: WORKSPACE_ID },
+  });
+  if (!resultado.criado || !resultado.initPoint || !resultado.preferenceId) {
+    console.error('[webhook-whatsapp] falha ao criar preference Mercado Pago:', resultado.erro);
+    return null;
+  }
+
+  try {
+    await getDb().from('pedidos').update({
+      mp_preference_id: resultado.preferenceId,
+      external_reference: externalReference,
+      link_pagamento: resultado.initPoint,
+      link_pagamento_id: resultado.preferenceId,
+    }).eq('id', pedidoId);
+  } catch (e) {
+    console.error('[webhook-whatsapp] falha ao registrar preference no pedido:', e);
+  }
+  return { link: resultado.initPoint, paymentId: resultado.preferenceId };
+}
+
+// Nunca inventa Pix/cartão/dinheiro — só responde o que está realmente
+// habilitado (mesma credencial que gerarPagamentoReal usa de verdade).
+async function buscarFormasPagamentoReal(): Promise<string[]> {
+  try {
+    const { data } = await getDb()
+      .from('workspace_credentials')
+      .select('chave')
+      .eq('workspace_id', WORKSPACE_ID)
+      .eq('tipo', 'financeiro')
+      .eq('ativo', true);
+    const chaves = new Set((data ?? []).map((r: { chave: string }) => r.chave));
+    return chaves.has('mp_access_token')
+      ? ['Pix', 'cartão de crédito', 'cartão de débito']
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFunil {
+  return {
+    buscarCatalogo: buscarCatalogoReal,
+    buscarCategorias: () => buscarCategoriasReais(WORKSPACE_ID),
+    buscarProdutosPorCategoria: (categoriaId) => buscarProdutosPorCategoriaReal(WORKSPACE_ID, categoriaId),
+    revalidarProduto: (idExterno) => revalidarProdutoReal(WORKSPACE_ID, idExterno),
+    calcularFrete: calcularFreteReal,
+    gerarPagamento: gerarPagamentoReal,
+    criarPedido: (dados) => criarPedidoProvisorio(dados, cliente),
+    buscarFormasPagamento: buscarFormasPagamentoReal,
+  };
+}
+
+// ── Transcrição de áudio (Groq Whisper) — vira texto normal, nunca decide nada ─
 
 async function transcreverAudio(audioUrl: string): Promise<string | null> {
   const groqKey = Deno.env.get('GROQ_API_KEY') || await buscarConfigDB('GROQ_API_KEY');
   if (!groqKey) return null;
 
   try {
-    // Baixa o áudio da URL do Z-API
     const audioResp = await fetch(audioUrl);
     if (!audioResp.ok) throw new Error(`Falha ao baixar áudio: ${audioResp.status}`);
     const audioBlob = await audioResp.blob();
@@ -349,410 +369,179 @@ async function transcreverAudio(audioUrl: string): Promise<string | null> {
     });
 
     if (!res.ok) {
-      console.error('[audio] Groq Whisper status:', res.status, await res.text().catch(() => ''));
+      console.error('[webhook-whatsapp] Groq Whisper status:', res.status, await res.text().catch(() => ''));
       return null;
     }
 
     const transcricao = (await res.text()).trim();
-    console.log(`[audio] transcrito: "${transcricao.slice(0, 80)}"`);
+    console.log(`[webhook-whatsapp] audio transcrito: "${transcricao.slice(0, 80)}"`);
     return transcricao || null;
   } catch (e) {
-    console.error('[audio] erro na transcrição:', e);
+    console.error('[webhook-whatsapp] erro na transcricao de audio:', e);
     return null;
   }
 }
 
-// ── Normalização de telefone ──────────────────────────────────────────────────
+// ── Normalização de telefone ────────────────────────────────────────────────
 
 function normalizarTelefone(phone: string): string {
   const digits = phone.replace(/\D/g, '');
-  // Já tem código do país 55 e tem 12-13 dígitos → correto
   if (digits.startsWith('55') && digits.length >= 12) return digits;
-  // Número brasileiro sem código do país (10-11 dígitos) → adiciona 55
   if (digits.length >= 10 && digits.length <= 11) return `55${digits}`;
   return digits;
 }
 
-// ── Envio Z-API ───────────────────────────────────────────────────────────────
+// ── Envio Z-API ──────────────────────────────────────────────────────────────
 
-async function enviarTexto(phone: string, message: string): Promise<void> {
-  await fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
-    body: JSON.stringify({ phone, message }),
-  }).catch(e => console.error('[zapi] falha texto:', e));
-}
-
-async function enviarImagem(phone: string, imageUrl: string, caption: string): Promise<void> {
-  await fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-image`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
-    body: JSON.stringify({ phone, image: imageUrl, caption }),
-  }).catch(e => console.error('[zapi] falha imagem:', e));
-}
-
-// ── Processar mensagem ────────────────────────────────────────────────────────
-
-interface EnderecoEntrega {
-  cep: string;
-  logradouro?: string;
-  numero?: string;
-  bairro?: string;
-  cidade?: string;
-  uf?: string;
-}
-
-async function gerarLinkPagamento(pedidoInfo: Record<string, unknown>, phone: string): Promise<{ link: string; preference_id: string } | null> {
+async function enviarTexto(phone: string, message: string): Promise<boolean> {
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-financeiro`, {
+    const res = await fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_KEY}` },
-      body: JSON.stringify({ pedido_info: pedidoInfo, phone, canal_id: phone, workspace_id: WORKSPACE_ID }),
+      headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
+      body: JSON.stringify({ phone, message }),
     });
-    if (!res.ok) { console.error('[webhook-whatsapp] agente-financeiro status:', res.status); return null; }
-    return await res.json() as { link: string; preference_id: string };
+    if (!res.ok) { console.error(`[webhook-whatsapp] falha ao enviar texto status=${res.status}`); return false; }
+    return true;
   } catch (e) {
-    console.error('[webhook-whatsapp] erro ao gerar link pagamento:', e);
-    return null;
+    console.error('[webhook-whatsapp] falha ao enviar texto:', e);
+    return false;
   }
 }
 
-async function cotarFrete(endereco: EnderecoEntrega): Promise<Record<string, unknown> | null> {
+async function enviarImagem(phone: string, imageUrl: string, caption: string): Promise<boolean> {
   try {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
+    const res = await fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-image`, {
       method: 'POST',
-      // agente-logistica exige o segredo interno do orquestrador (não é
-      // autenticação de usuário Supabase) — ver _shared/auth-crm.ts.
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${FACTORY_SECRET}` },
-      body: JSON.stringify({ endereco, workspace_id: WORKSPACE_ID }),
-      signal: AbortSignal.timeout(25_000),
+      headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
+      body: JSON.stringify({ phone, image: imageUrl, caption }),
     });
-    return await res.json() as Record<string, unknown>;
+    if (!res.ok) { console.error(`[webhook-whatsapp] falha ao enviar imagem status=${res.status}`); return false; }
+    return true;
   } catch (e) {
-    console.error('[webhook-whatsapp] erro ao cotar frete:', e);
-    return null;
+    console.error('[webhook-whatsapp] falha ao enviar imagem:', e);
+    return false;
   }
 }
 
-async function processarMensagem(phone: string, nomeRemetente: string | null, texto: string): Promise<void> {
-  const conversa = await buscarOuCriarConversa(phone);
+// ── Processar mensagem — usa o funil determinístico compartilhado ──────────
 
-  // Se conversa estava concluída e cliente voltou → reinicia mantendo o nome
-  if (conversa.fase === 'concluido') {
-    await getDb().from('conversas').update({
-      fase: 'descoberta',
-      historico: [],
-      pedido_info: null,
-      atualizado_em: new Date().toISOString(),
-    }).eq('id', conversa.id);
-    conversa.fase = 'descoberta';
-    conversa.historico = [];
-    conversa.pedido_info = null;
-    console.log(`[webhook-whatsapp] ${phone} voltou após concluído — reiniciando conversa`);
-  }
+async function processarMensagem(phone: string, nomeRemetente: string | null, mensagemCliente: string, mid?: string): Promise<void> {
+  const conversaRow = await buscarOuCriarConversa(phone);
 
-  const novaMsg: Mensagem = { role: 'user', content: texto, ts: new Date().toISOString() };
-  const historico = [...(conversa.historico ?? []), novaMsg].slice(-20);
-  const nomeCliente = conversa.nome_cliente ?? nomeRemetente ?? null;
-  let pedidoInfo = conversa.pedido_info ?? {};
-
-  // Portão de escopo compartilhado — roda ANTES de qualquer chamada de IA.
-  // Ver comentário no topo do arquivo: integração deliberadamente parcial.
-  const faseFunil = FASE_LIVRE_PARA_FUNIL[conversa.fase] ?? 'qualificacao';
-  const intencao = classificarIntencao(texto, faseFunil);
-  if (intencaoInterrompeFluxo(intencao)) {
-    const respostaFixa = intencao === 'assunto_fora_escopo' ? mensagemForaDeEscopo() : mensagemTransferencia();
-    await enviarTexto(phone, respostaFixa);
-    const msgAssistenteGate: Mensagem = { role: 'assistant', content: respostaFixa, ts: new Date().toISOString() };
-    await salvarConversa(conversa.id, {
-      historico: [...historico, msgAssistenteGate].slice(-20),
-      // fase e pedido_info NÃO mudam para assunto_fora_escopo — cliente pode
-      // retomar a compra na próxima mensagem sem perder o que já coletou.
-      // reclamação/atendimento_humano só marcam o pedido_info, sem apagar
-      // dados já coletados, para não obrigar o cliente a repetir tudo.
-      pedido_info: intencao === 'assunto_fora_escopo' ? pedidoInfo : { ...pedidoInfo, motivo_transferencia: `${intencao}: "${texto}"` },
-    });
-    console.log(`[webhook-whatsapp] ${phone} — portão de escopo interceptou (${intencao})`);
+  if (mensagemDuplicada(conversaRow.historico ?? [], mensagemCliente, mid)) {
+    console.log(`[webhook-whatsapp] mensagem_duplicada_ignorada phone=${phone} mid=${mid ?? '(sem mid)'}`);
     return;
   }
 
-  // Fora do horário na primeira mensagem de uma jornada nova (Parte 4) —
-  // mostra o aviso com opt-in antes de catálogo/formulário, aguarda
-  // sim/continuar, nunca repete o aviso completo de novo. Mesmo texto fixo
-  // usado por webhook-meta/funil.ts.
+  let estado = estadoDaConversa(conversaRow);
+
+  if (estado.fase === 'pedido_criado' || estado.fase === 'encerrado_sem_venda') {
+    console.log(`[webhook-whatsapp] conversa_reaberta phone=${phone}`);
+    estado = estadoInicial();
+  } else if (estado.fase === 'transferido_humano') {
+    // fase="transferido_humano" órfã (nunca existiu handoff real ativo pra
+    // WhatsApp neste fluxo — sem sistema de ticket aqui) nunca deve travar o
+    // cliente recebendo a mesma mensagem de transferência pra sempre.
+    console.log(`[webhook-whatsapp] fase_transferido_humano_reparada phone=${phone}`);
+    estado = estadoInicial();
+  }
+
+  const nomeCliente = conversaRow.nome_cliente ?? nomeRemetente ?? null;
+
+  const novaMsg: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString(), mid };
+  const historico = [...(conversaRow.historico ?? []), novaMsg].slice(-20);
+
+  // Portão de escopo — determinístico, roda antes de qualquer avanço de
+  // funil (mesma regra do Instagram/Messenger, ver webhook-meta/index.ts).
+  const intencao = classificarIntencao(mensagemCliente, estado.fase);
   const foraDoHorario = !dentroDoHorarioComercial();
-  if (conversa.fase === 'aviso_fora_horario') {
-    if (pareceConfirmacaoForaHorario(texto)) {
-      conversa.fase = 'descoberta';
-      pedidoInfo = { ...pedidoInfo, aceitou_fora_horario: true, proximo_horario_texto: textoProximaAberturaComercial() };
-      // segue o fluxo normal abaixo, agora liberado.
+  const proximoHorarioTexto = foraDoHorario ? textoProximaAberturaComercial() : undefined;
+
+  let respostaFinal: string;
+  let fotoUrl: string | null | undefined;
+  let fotos: { codigo?: string; nome: string; url: string }[] | undefined;
+
+  if (intencaoInterrompeFluxo(intencao)) {
+    if (intencao === 'assunto_fora_escopo') {
+      respostaFinal = mensagemForaDeEscopo();
+      // fase/dados não mudam — cliente pode voltar ao fluxo comercial depois.
     } else {
-      const lembrete = mensagemAguardandoRespostaForaDoHorario();
-      const msgAssistenteLembrete: Mensagem = { role: 'assistant', content: lembrete, ts: new Date().toISOString() };
-      await enviarTexto(phone, lembrete);
-      await salvarConversa(conversa.id, {
-        historico: [...historico, msgAssistenteLembrete].slice(-20),
-        fase: 'aviso_fora_horario',
-        nome_cliente: nomeCliente ?? undefined,
-        pedido_info: pedidoInfo,
-      });
-      return;
+      const motivo = `${intencao}: "${mensagemCliente}"`;
+      respostaFinal = mensagemTransferencia();
+      estado = { ...estado, fase: 'transferido_humano', dados: { ...estado.dados, motivoTransferencia: motivo } };
     }
-  } else if (foraDoHorario && conversa.fase === 'descoberta' && (conversa.historico ?? []).length === 0 && !pedidoInfo.aceitou_fora_horario) {
-    const aviso = mensagemAvisoForaDoHorarioComOpcao();
-    const msgAssistenteAviso: Mensagem = { role: 'assistant', content: aviso, ts: new Date().toISOString() };
-    await enviarTexto(phone, aviso);
-    await salvarConversa(conversa.id, {
-      historico: [...historico, msgAssistenteAviso].slice(-20),
-      fase: 'aviso_fora_horario',
-      nome_cliente: nomeCliente ?? undefined,
-      pedido_info: pedidoInfo,
-    });
-    console.log(`[webhook-whatsapp] ${phone} — fora do horário, aviso com opt-in enviado`);
-    return;
-  }
+  } else {
+    const primeiraMensagem = (conversaRow.historico ?? []).length === 0;
 
-  const ultimaMsgAnterior = conversa.historico?.slice(-1)[0]?.ts ?? undefined;
-
-  const hora = new Date().getHours();
-  const saudacaoFallback = hora < 12 ? 'Bom dia' : hora < 18 ? 'Boa tarde' : 'Boa noite';
-  const nomeFallback = nomeCliente ? `, ${nomeCliente.split(' ')[0]}` : '';
-  let mensagem = `${saudacaoFallback}${nomeFallback}! Como posso ajudar?`;
-  let codigosProdutos: string[] = [];
-  let novaFase = conversa.fase;
-  let enderecoEntrega: EnderecoEntrega | null = null;
-  let produtoConfirmado: string | null = null;
-  let produtoPreco: number | null = null;
-  let enviarFormulario = false;
-
-  // Palavras que indicam confirmação — nesse caso não roda o extrator
-  const textoConfirmacao = /^(sim|ok|s|correto|certo|pode|tá|ta|isso|exato|perfeito|confirmo|confirmado|é isso|e isso|prosseguir|continuar|seguir|pode prosseguir|pode seguir|pode continuar)\b/i.test(texto.trim());
-
-  const formularioAtual: FormularioEntregaDados = (pedidoInfo.dados_formulario as FormularioEntregaDados | undefined) ?? {};
-
-  // Formulário único de entrega (Parte 2/3) — extração, validação e
-  // confirmação 100% determinísticas, nunca via IA/LLM (mesmo parser usado
-  // no Instagram/Messenger, ver ../_shared/funil.ts). A IA só decide QUANDO
-  // enviar o formulário (enviar_formulario:true); a partir daí este bloco
-  // assume sozinho até o endereço estar confirmado.
-  if (conversa.fase === 'coletando_endereco') {
-    const extraido = extrairFormularioEntrega(texto);
-    const formularioNovo: FormularioEntregaDados = { ...formularioAtual, ...extraido };
-    pedidoInfo = { ...pedidoInfo, dados_formulario: formularioNovo };
-
-    const cepInvalido = !!formularioNovo.cep && !cepValido(formularioNovo.cep);
-    const telefoneInvalido = !!formularioNovo.telefoneDestinatario && !normalizarTelefoneDestinatarioBR(formularioNovo.telefoneDestinatario);
-    const faltando = camposFaltandoFormulario(formularioNovo);
-
-    let respostaFormulario: string | null = null;
-    if (cepInvalido) {
-      respostaFormulario = 'O CEP informado não parece válido — pode confirmar (8 dígitos)?';
-    } else if (telefoneInvalido) {
-      respostaFormulario = 'O telefone de quem vai receber não ficou claro — pode informar de novo, com DDD?';
-    } else if (faltando.length > 0) {
-      respostaFormulario = montarMensagemCamposFaltando(faltando);
-    }
-
-    if (respostaFormulario) {
-      const msgAssistenteForm: Mensagem = { role: 'assistant', content: respostaFormulario, ts: new Date().toISOString() };
-      await enviarTexto(phone, respostaFormulario);
-      await salvarConversa(conversa.id, {
-        historico: [...historico, msgAssistenteForm].slice(-20),
-        fase: 'coletando_endereco',
-        nome_cliente: nomeCliente ?? undefined,
-        pedido_info: pedidoInfo,
-      });
-      return;
-    }
-
-    // Completo e válido — normaliza telefone pra E.164 (formato exigido
-    // pela Lalamove) antes de guardar, e pede confirmação dos dados.
-    const telefoneE164 = normalizarTelefoneDestinatarioBR(formularioNovo.telefoneDestinatario!)!;
-    const formularioNormalizado = { ...formularioNovo, telefoneDestinatario: telefoneE164 };
-    pedidoInfo = { ...pedidoInfo, dados_formulario: formularioNormalizado };
-    const resumo = montarResumoFormulario(formularioNormalizado);
-
-    const msgAssistenteResumo: Mensagem = { role: 'assistant', content: resumo, ts: new Date().toISOString() };
-    await enviarTexto(phone, resumo);
-    await salvarConversa(conversa.id, {
-      historico: [...historico, msgAssistenteResumo].slice(-20),
-      fase: 'confirmando_dados',
-      nome_cliente: nomeCliente ?? undefined,
-      pedido_info: pedidoInfo,
-    });
-    return;
-  }
-
-  if (conversa.fase === 'confirmando_dados' && Object.keys(formularioAtual).length > 0) {
-    if (textoConfirmacao && formularioCompleto(formularioAtual)) {
-      // Confirmação → vai direto para cotação de frete sem chamar IA
-      // (evita que a IA peça confirmação de novo — double-confirm bug).
-      enderecoEntrega = {
-        cep: formularioAtual.cep!,
-        logradouro: formularioAtual.rua,
-        numero: formularioAtual.numero,
-        bairro: formularioAtual.bairro,
-        cidade: formularioAtual.cidade ?? 'São Paulo',
-        uf: formularioAtual.uf ?? 'SP',
-      };
-      novaFase = 'confirmar_frete';
-      console.log(`[webhook-whatsapp] ${phone} confirmou o formulário → cotando frete CEP ${enderecoEntrega.cep}`);
-    } else if (!textoConfirmacao) {
-      // Cliente pode estar corrigindo um campo em vez de confirmar — nunca
-      // perde os dados já certos.
-      const correcao = extrairFormularioEntrega(texto);
-      if (Object.keys(correcao).length > 0) {
-        const formularioCorrigido = { ...formularioAtual, ...correcao };
-        pedidoInfo = { ...pedidoInfo, dados_formulario: formularioCorrigido };
-        const resumoCorrigido = montarResumoFormulario(formularioCorrigido);
-        const msgAssistenteCorrecao: Mensagem = { role: 'assistant', content: resumoCorrigido, ts: new Date().toISOString() };
-        await enviarTexto(phone, resumoCorrigido);
-        await salvarConversa(conversa.id, {
-          historico: [...historico, msgAssistenteCorrecao].slice(-20),
-          fase: 'confirmando_dados',
-          nome_cliente: nomeCliente ?? undefined,
-          pedido_info: pedidoInfo,
-        });
-        return;
-      }
-      // nem confirmação nem correção reconhecível -> segue pro fluxo normal (IA responde naturalmente, sem mexer no endereço)
-    }
-  }
-
-  // Pula IA principal quando endereço já foi confirmado deterministicamente
-  const respostaRaw = enderecoEntrega ? null : await chamarIA(
-    buildSystemPrompt(conversa.fase, pedidoInfo, nomeCliente, ultimaMsgAnterior),
-    historico.map(m => ({ role: m.role, content: m.content })),
-    500,
-  );
-
-  if (respostaRaw) {
-    try {
-      const parsed = JSON.parse(respostaRaw.replace(/```json\n?|\n?```/g, '').trim());
-      mensagem          = parsed.mensagem ?? mensagem;
-      codigosProdutos   = Array.isArray(parsed.codigos_produtos) ? parsed.codigos_produtos.slice(0, 3) : [];
-      novaFase          = parsed.fase ?? conversa.fase;
-      produtoConfirmado = parsed.produto_confirmado ?? null;
-      produtoPreco      = parsed.produto_preco ? Number(parsed.produto_preco) : null;
-      enviarFormulario  = parsed.enviar_formulario === true;
-
-      // Extração/confirmação de endereço nunca vem da IA (Parte 2/3 —
-      // determinístico, ver blocos 'coletando_endereco'/'confirmando_dados'
-      // acima) — parsed.dados_para_confirmacao/endereco_entrega são
-      // ignorados de propósito, mesmo que a IA ainda os inclua por hábito.
-
-      if (produtoConfirmado) pedidoInfo = { ...pedidoInfo, produto_confirmado: produtoConfirmado };
-      if (produtoPreco)      pedidoInfo = { ...pedidoInfo, produto_preco: produtoPreco };
-      if (parsed.forma_pagamento) pedidoInfo = { ...pedidoInfo, forma_pagamento: parsed.forma_pagamento };
-      if (parsed.solicitar_pagamento === true) pedidoInfo = { ...pedidoInfo, solicitar_pagamento: true };
-    } catch {
-      mensagem = respostaRaw.slice(0, 400);
-    }
-  }
-
-  // Se a IA coletou endereço completo, aciona agente de logística
-  if (enderecoEntrega && !pedidoInfo.frete) {
-    console.log(`[webhook-whatsapp] cotando frete para CEP ${enderecoEntrega.cep}`);
-    pedidoInfo = { ...pedidoInfo, endereco_entrega: enderecoEntrega };
-
-    const resultadoFrete = await cotarFrete(enderecoEntrega);
-    if (resultadoFrete) {
-      pedidoInfo = { ...pedidoInfo, frete: resultadoFrete };
-
-      if (resultadoFrete.disponivel) {
-        const precoFrete = resultadoFrete.preco_cliente as number;
-        const precoTotal = (pedidoInfo.produto_preco as number | undefined ?? 0) + precoFrete;
-        pedidoInfo = { ...pedidoInfo, total: precoTotal };
-
-        // Injeta info de frete na conversa para a IA apresentar ao cliente.
-        // Fora do horário (jornada já aceita com opt-in, Parte 4), a entrega
-        // nunca é anunciada como "hoje" — usa o próximo horário comercial real.
-        const prazoTexto = pedidoInfo.aceitou_fora_horario && pedidoInfo.proximo_horario_texto
-          ? `entrega ${pedidoInfo.proximo_horario_texto}`
-          : 'Lalamove, carro, hoje ~2h';
-        const msgFrete = `[Sistema] Frete cotado: R$ ${precoFrete.toFixed(2).replace('.', ',')} (${prazoTexto}). Total do pedido: R$ ${precoTotal.toFixed(2).replace('.', ',')}.`;
-        const histComFrete = [...historico, { role: 'assistant' as const, content: mensagem, ts: new Date().toISOString() }, { role: 'user' as const, content: msgFrete, ts: new Date().toISOString() }].slice(-20);
-
-        const respostaFreteRaw = await chamarIA(
-          buildSystemPrompt('confirmar_frete', pedidoInfo, nomeCliente, ultimaMsgAnterior),
-          histComFrete.map(m => ({ role: m.role, content: m.content })),
-          300,
-        );
-
-        if (respostaFreteRaw) {
-          try {
-            const parsedFrete = JSON.parse(respostaFreteRaw.replace(/```json\n?|\n?```/g, '').trim());
-            mensagem  = parsedFrete.mensagem ?? mensagem;
-            novaFase  = parsedFrete.fase ?? 'confirmar_frete';
-          } catch { /* mantém mensagem anterior */ }
-        }
+    // Fora do horário logo na primeira mensagem: o próprio funil mostra o
+    // aviso com opt-in (Parte 4) antes de qualquer coisa, inclusive antes de
+    // perguntar o nome.
+    if (primeiraMensagem && !nomeCliente && !foraDoHorario) {
+      respostaFinal = 'Oi! Pode me dizer seu nome pra eu te atender melhor?';
+    } else {
+      const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', telefone: phone, canal: 'whatsapp', canalId: phone });
+      const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps, foraDoHorario, proximoHorarioTexto);
+      estado = resultado.estado;
+      if (estado.fase === 'transferido_humano') {
+        // O funil decidiu internamente transferir (CEP/frete falhou, falha
+        // ao gerar pagamento, ou fase inesperada) — nunca finge que criou um
+        // ticket que não existe: só a mensagem fixa de transferência.
+        respostaFinal = mensagemTransferencia();
       } else {
-        mensagem = `Não consegui calcular o frete para esse endereço. Pode confirmar o CEP? ${resultadoFrete.erro ? `(${resultadoFrete.erro})` : ''}`;
-        novaFase = 'coletando_endereco';
+        const saudacaoNome = primeiraMensagem && nomeCliente && estado.fase !== 'aviso_fora_horario' ? `Oi, ${nomeCliente}! ` : '';
+        respostaFinal = `${saudacaoNome}${resultado.mensagem}`;
+        fotoUrl = resultado.fotoUrl;
+        fotos = resultado.fotos;
       }
     }
   }
 
-  // Gera link de pagamento quando forma de pagamento foi definida e total existe
-  const deveGerarPagamento = pedidoInfo.solicitar_pagamento === true
-    && pedidoInfo.forma_pagamento
-    && pedidoInfo.total
-    && !pedidoInfo.preference_id; // não gera novamente se já existe
-
-  if (deveGerarPagamento) {
-    console.log(`[webhook-whatsapp] gerando link MP para ${phone} | forma: ${pedidoInfo.forma_pagamento}`);
-    const resultadoPag = await gerarLinkPagamento(pedidoInfo, phone);
-    if (resultadoPag?.link) {
-      pedidoInfo = { ...pedidoInfo, preference_id: resultadoPag.preference_id, link_pagamento: resultadoPag.link };
-      novaFase = 'aguardando_pagamento';
-      mensagem = `Aqui esta o seu link de pagamento: ${resultadoPag.link}\n\nAssim que o pagamento for confirmado, avisamos por aqui.`;
-    } else {
-      mensagem = 'Tive um problema ao gerar o link de pagamento. Pode tentar novamente em instantes?';
-    }
-  }
-
-  const msgAssistente: Mensagem = { role: 'assistant', content: mensagem, ts: new Date().toISOString() };
-
-  // Fotos só são enviadas quando o cliente escolheu/confirmou um produto ou pediu foto explicitamente.
-  // Nunca junto com o formulário (Parte 6, cenário 19) nem com endereço/frete.
-  const podeEnviarFotos = !enviarFormulario && !enderecoEntrega;
-  const produtos = podeEnviarFotos ? await buscarProdutos(codigosProdutos) : [];
-
-  await enviarTexto(phone, mensagem);
-  if (enviarFormulario) {
-    await new Promise(r => setTimeout(r, 800));
-    await enviarTexto(phone, TEXTO_FORMULARIO_ENTREGA);
-  }
-  for (const produto of produtos) {
-    if (produto.foto_url) {
-      await new Promise(r => setTimeout(r, 400));
-      const caption = `${produto.nome} — R$ ${Number(produto.preco).toFixed(2).replace('.', ',')}`;
-      await enviarImagem(phone, produto.foto_url, caption);
-    }
-  }
+  const msgAssistente: Mensagem = { role: 'assistant', content: respostaFinal, ts: new Date().toISOString() };
+  const historicoFinal = [...historico, msgAssistente].slice(-20);
 
   await Promise.all([
-    salvarConversa(conversa.id, {
-      historico: [...historico, msgAssistente].slice(-20),
-      fase: novaFase,
+    salvarConversa(conversaRow.id, {
+      historico: historicoFinal,
+      fase: estado.fase,
       nome_cliente: nomeCliente ?? undefined,
-      pedido_info: pedidoInfo,
-    }),
+      pedido_info: { dados: estado.dados, perguntasFeitas: estado.perguntasFeitas },
+    } as Partial<ConversaRow>),
     fetch(`${SUPABASE_URL}/functions/v1/captacao-leads`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SERVICE_KEY}` },
       body: JSON.stringify({
         tipo: 'mensagem-recebida', task_id: crypto.randomUUID(), escopo: 'producao',
         urgencia: 'normal', workspace_id: WORKSPACE_ID,
-        payload: { canal: 'whatsapp', canal_id: phone, telefone: phone, nome: nomeCliente, mensagem: texto },
+        payload: { canal: 'whatsapp', canal_id: phone, telefone: phone, nome: nomeCliente, mensagem: mensagemCliente },
       }),
     }).catch(() => {}),
   ]);
 
-  console.log(`[webhook-whatsapp] ${phone} | ${conversa.fase}->${novaFase} | fotos: ${produtos.length} | frete: ${pedidoInfo.frete ? 'sim' : 'não'} | ${mensagem.slice(0, 60)}`);
+  console.log(`[webhook-whatsapp] ${phone} | fase: ${conversaRow.fase}→${estado.fase} | resposta: ${respostaFinal.slice(0, 60)}`);
+
+  // Fotos nunca são enviadas junto com o formulário de entrega (Parte 2,
+  // cenário 19) — resultado.fotoUrl/fotos só vêm preenchidos quando o
+  // cliente pediu foto explicitamente ou confirmou um produto, nunca
+  // enquanto enviaFormulario está em jogo (funil.ts nunca popula os dois ao
+  // mesmo tempo).
+  if (fotos && fotos.length > 0) {
+    let algumaFalhou = false;
+    for (const foto of fotos) {
+      console.log(`[webhook-whatsapp] enviando foto produto codigo=${foto.codigo ?? '(sem codigo)'} nome="${foto.nome}"`);
+      const enviado = await enviarImagem(phone, foto.url, foto.nome);
+      if (!enviado) { algumaFalhou = true; break; }
+    }
+    await enviarTexto(phone, algumaFalhou ? mensagemTransferencia() : respostaFinal);
+  } else if (fotoUrl) {
+    const enviado = await enviarImagem(phone, fotoUrl, respostaFinal);
+    if (!enviado) await enviarTexto(phone, mensagemTransferencia());
+    // legenda da imagem já carrega o texto — nada mais a enviar quando ok.
+  } else {
+    await enviarTexto(phone, respostaFinal);
+  }
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
+// ── Handler ───────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'GET') return new Response('webhook-whatsapp ok', { status: 200 });
@@ -765,25 +554,24 @@ Deno.serve(async (req: Request) => {
 
   const phoneRaw      = String(body['phone'] ?? '');
   const nomeRemetente = (body['senderName'] ?? body['chatName'] ?? null) as string | null;
+  const mid           = (body['messageId'] as string | undefined) ?? undefined;
 
   if (!phoneRaw) return new Response('ok', { status: 200 });
 
-  // Extrai texto — mensagem de texto normal
   let texto: string = (body['text'] as Record<string, string> | null)?.['message']
     ?? (body['message'] as string | null)
     ?? '';
 
-  // Detecta mensagem de áudio (Z-API envia campo "audio" com "audioUrl")
   const audioPayload = body['audio'] as Record<string, string> | null;
   const audioUrl = audioPayload?.['audioUrl'] ?? audioPayload?.['url'] ?? null;
 
   if (!texto && audioUrl) {
-    console.log(`[webhook-whatsapp] áudio recebido de ${phoneRaw}, transcrevendo...`);
+    console.log(`[webhook-whatsapp] audio recebido de ${phoneRaw}, transcrevendo...`);
     const phone = normalizarTelefone(phoneRaw);
     EdgeRuntime.waitUntil((async () => {
       const transcricao = await transcreverAudio(audioUrl);
       if (transcricao) {
-        await processarMensagem(phone, nomeRemetente, transcricao);
+        await processarMensagem(phone, nomeRemetente, transcricao, mid);
       } else {
         await enviarTexto(phone, 'Desculpe, não consegui ouvir seu áudio. Pode escrever sua mensagem?');
       }
@@ -796,7 +584,7 @@ Deno.serve(async (req: Request) => {
   const phone = normalizarTelefone(phoneRaw);
   console.log(`[webhook-whatsapp] texto de ${phoneRaw} → normalizado: ${phone}`);
 
-  EdgeRuntime.waitUntil(processarMensagem(phone, nomeRemetente, texto));
+  EdgeRuntime.waitUntil(processarMensagem(phone, nomeRemetente, texto, mid));
 
   return new Response('ok', { status: 200 });
 });

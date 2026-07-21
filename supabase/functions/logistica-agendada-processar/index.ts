@@ -83,7 +83,7 @@ Deno.serve(async (req: Request) => {
   // status_logistica) nem antes do horário combinado.
   const { data: pedidos, error } = await db
     .from('pedidos')
-    .select(SELECT_PEDIDO_PARA_LOGISTICA + ', logistica_executar_em')
+    .select(SELECT_PEDIDO_PARA_LOGISTICA)
     .eq('status', 'pago')
     .eq('status_logistica', 'agendada')
     .lte('logistica_executar_em', agora)

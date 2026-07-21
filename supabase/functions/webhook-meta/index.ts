@@ -26,7 +26,7 @@
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
-import { mensagemDuplicada } from './dedup.ts';
+import { mensagemDuplicada } from '../_shared/dedup.ts';
 import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPorTermoReal, revalidarProdutoReal } from '../_shared/catalogo-woocommerce.ts';
 import { dentroDoHorarioComercial, textoProximaAberturaComercial } from '../_shared/horario-comercial.ts';
 import {
@@ -44,6 +44,7 @@ import {
   mensagemTransferencia,
   mensagemTransferenciaLimitacaoTecnica,
   avancarFunil,
+  dataCalendarioParaISO,
 } from '../_shared/funil.ts';
 
 const VERIFY_TOKEN   = Deno.env.get('META_VERIFY_TOKEN') ?? '';
@@ -262,10 +263,21 @@ async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePe
         provedor_pagamento: 'mercadopago',
         external_reference: `enemeop-${pedidoId}`,
         horario_entrega: produto.dataEntrega ?? null,
+        // Data/período tipados (Parte 2 "agendar pela data prometida") —
+        // nunca o texto livre acima é usado pra decisão operacional de
+        // quando despachar a corrida real; ver webhook-mercadopago.
+        data_entrega_solicitada: dados.dataEntregaSolicitada ? dataCalendarioParaISO(dados.dataEntregaSolicitada) : null,
+        periodo_entrega: dados.periodoEntrega ?? null,
         nome_destinatario: dados.endereco?.nomeDestinatario ?? null,
         telefone_destinatario: dados.endereco?.telefoneDestinatario ?? null,
         endereco_entrega: enderecoTexto,
+        cep: dados.endereco?.cep ?? null,
+        numero: dados.endereco?.numero ?? null,
+        complemento: dados.endereco?.complemento ?? null,
         bairro: dados.endereco?.bairro ?? null,
+        cidade: dados.endereco?.cidade ?? null,
+        uf: dados.endereco?.uf ?? null,
+        nome_comprador: dados.nomeComprador ?? null,
         mensagem_cartao: produto.mensagemCartao ?? null,
         workspace_id: WORKSPACE_ID,
         // Cotação real usada para valor_frete — nunca o preço real "puro" da

@@ -41,6 +41,10 @@ import {
   type DependenciasFunil,
   type CategoriaCatalogo,
   type FormularioEntregaDados,
+  normalizarDataEntregaTexto,
+  dataEntregaValida,
+  dataCalendarioParaISO,
+  normalizarPeriodoEntregaTexto,
 } from './funil.js'
 
 // 1. cliente pede buquê para aniversário
@@ -1539,4 +1543,174 @@ test('Parte 4: "hoje" numa jornada aceita fora do horário vira o próximo dia �
   const r = await avancarFunil(estado, 'hoje', 'compra_produto', deps)
   assert.equal(r.estado.dados.produto?.dataEntrega, 'amanhã (terça-feira), a partir das 09h')
   assert.match(r.mensagem, /ajustei sua entrega para amanhã/i)
+})
+
+// ── Parte 2 (correção "fechar bloqueios do agendamento") — data/período de entrega tipados ──
+
+const AGORA_TERCA = new Date('2026-07-21T15:00:00Z') // terça-feira 12h BRT
+
+test('normalizarDataEntregaTexto reconhece "hoje" e "amanhã" relativos à data atual', () => {
+  assert.deepEqual(normalizarDataEntregaTexto('hoje', AGORA_TERCA), { ano: 2026, mes: 6, dia: 21 })
+  assert.deepEqual(normalizarDataEntregaTexto('amanhã', AGORA_TERCA), { ano: 2026, mes: 6, dia: 22 })
+})
+
+test('normalizarDataEntregaTexto reconhece dia da semana — dito no próprio dia sempre significa a próxima ocorrência, nunca hoje', () => {
+  // AGORA_TERCA já é terça — "terça" dito agora tem que ser a terça QUE VEM, não hoje.
+  assert.deepEqual(normalizarDataEntregaTexto('terça', AGORA_TERCA), { ano: 2026, mes: 6, dia: 28 })
+  assert.deepEqual(normalizarDataEntregaTexto('sexta-feira', AGORA_TERCA), { ano: 2026, mes: 6, dia: 24 })
+})
+
+test('normalizarDataEntregaTexto reconhece datas explícitas DD/MM e DD/MM/AAAA', () => {
+  assert.deepEqual(normalizarDataEntregaTexto('25/12', AGORA_TERCA), { ano: 2026, mes: 11, dia: 25 })
+  assert.deepEqual(normalizarDataEntregaTexto('25/12/2027', AGORA_TERCA), { ano: 2027, mes: 11, dia: 25 })
+})
+
+test('normalizarDataEntregaTexto nunca adivinha texto livre não reconhecido (datas por extenso, "semana que vem", etc.)', () => {
+  assert.equal(normalizarDataEntregaTexto('depois do carnaval', AGORA_TERCA), null)
+  assert.equal(normalizarDataEntregaTexto('semana que vem', AGORA_TERCA), null)
+  assert.equal(normalizarDataEntregaTexto('assim que possível', AGORA_TERCA), null)
+})
+
+test('dataEntregaValida rejeita data nula, não reconhecida ou no passado; aceita hoje e futuro', () => {
+  assert.equal(dataEntregaValida(null, AGORA_TERCA), false)
+  assert.equal(dataEntregaValida({ ano: 2026, mes: 6, dia: 20 }, AGORA_TERCA), false, 'ontem nunca é válido')
+  assert.equal(dataEntregaValida({ ano: 2026, mes: 6, dia: 21 }, AGORA_TERCA), true, 'hoje é válido')
+  assert.equal(dataEntregaValida({ ano: 2026, mes: 6, dia: 22 }, AGORA_TERCA), true, 'futuro é válido')
+})
+
+test('dataCalendarioParaISO formata AAAA-MM-DD com zero à esquerda', () => {
+  assert.equal(dataCalendarioParaISO({ ano: 2026, mes: 6, dia: 5 }), '2026-07-05')
+  assert.equal(dataCalendarioParaISO({ ano: 2027, mes: 0, dia: 1 }), '2027-01-01')
+})
+
+test('normalizarPeriodoEntregaTexto reconhece manhã/tarde/noite e nunca inventa um período não informado', () => {
+  assert.equal(normalizarPeriodoEntregaTexto('de manhã'), 'manha')
+  assert.equal(normalizarPeriodoEntregaTexto('à tarde'), 'tarde')
+  assert.equal(normalizarPeriodoEntregaTexto('período da noite'), 'noite')
+  assert.equal(normalizarPeriodoEntregaTexto(undefined), null)
+  assert.equal(normalizarPeriodoEntregaTexto('qualquer horário'), null)
+})
+
+test('Parte 2: data de entrega não reconhecida bloqueia a confirmação — nunca cota frete nem gera pagamento com data inválida', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 }, formulario: formularioFixture({ dataEntrega: 'depois do carnaval' }) },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'confirmando_formulario')
+  assert.equal(r.estado.dados.valorFrete, undefined, 'nunca cota frete com data invalida')
+  assert.equal(r.estado.dados.pedidoId, undefined)
+  assert.match(r.mensagem, /não consegui identificar a data/i)
+})
+
+test('Parte 2: data de entrega no passado bloqueia a confirmação até o cliente corrigir', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 }, formulario: formularioFixture({ dataEntrega: '01/01/2020' }) },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'confirmando_formulario')
+  assert.equal(r.estado.dados.pedidoId, undefined)
+  assert.match(r.mensagem, /não consegui identificar a data/i)
+})
+
+test('Parte 2: data de entrega válida segue normalmente e fica disponível tipada em dados.dataEntregaSolicitada', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 }, formulario: formularioFixture({ dataEntrega: 'amanhã' }) },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_aprovacao_frete')
+  assert.ok(r.estado.dados.dataEntregaSolicitada, 'data tipada deve estar presente apos a confirmacao')
+  assert.equal(typeof r.estado.dados.dataEntregaSolicitada?.ano, 'number')
+})
+
+// ── Parte 7 (correção "fechar bloqueios do agendamento") — ponta a ponta,
+// totalmente mockado, simulando o caminho do WhatsApp (webhook-whatsapp usa
+// exatamente este mesmo dispatcher avancarFunil desde a reescrita da Parte
+// 5/6 — nunca mais uma segunda implementação comercial divergente por
+// canal). Sem rede real, sem efeitos externos: catálogo/frete/pagamento/
+// pedido inteiramente via depsFake().
+
+test('Parte 7: ponta a ponta mockado — produto WooCommerce -> formulário -> confirmação -> cotação -> aprovação do frete -> pedido -> preference -> pagamento (caminho do WhatsApp)', async () => {
+  let revalidarChamadoComId: string | undefined
+  const deps = depsFake({
+    // idExterno presente simula o ID técnico real do WooCommerce — nunca o
+    // código comercial (Parte 6: "produto escolhido deve guardar ID técnico
+    // do WooCommerce" / "revalidar produto/preço/estoque antes de criar pedido").
+    buscarCatalogo: async () => [
+      { nome: 'Buquê de Rosas', preco: 140, disponivel: true, fotoUrl: 'https://site/rosas.jpg', idExterno: 'wc_9001' },
+      { nome: 'Arranjo Girassóis', preco: 135, disponivel: true, idExterno: 'wc_9002' },
+    ],
+    revalidarProduto: async (idExterno) => { revalidarChamadoComId = idExterno; return { disponivel: true, preco: 140 } },
+    criarPedido: async () => ({ pedidoId: 'pedido_whatsapp_e2e_001' }),
+    gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
+  })
+  let estado = estadoInicial()
+
+  // 1) produto vindo do catálogo real (nunca hardcoded — mesma função
+  // buscarCatalogo que webhook-meta/webhook-whatsapp injetam com o
+  // WooCommerce de verdade em produção).
+  let r = await avancarFunil(estado, 'Quero um buquê de rosas para hoje', 'recomendacao', deps)
+  estado = r.estado
+  let guard = 0
+  while ((estado.fase === 'qualificacao' || estado.fase === 'inicio') && guard < 6) {
+    r = await avancarFunil(estado, 'tanto faz', 'compra_produto', deps)
+    estado = r.estado
+    guard++
+  }
+  assert.equal(estado.fase, 'recomendacao')
+
+  r = await avancarFunil(estado, 'quero esse mesmo', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'produto_selecionado')
+  const produtoEscolhidoId = estado.dados.produto?.idExterno
+  assert.equal(produtoEscolhidoId, 'wc_9001', 'produto escolhido guarda o ID técnico do WooCommerce')
+
+  // 2) quantidade/data -> formulário único de entrega
+  r = await avancarFunil(estado, '1 unidade, entrega amanhã', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'aguardando_formulario')
+  assert.equal(r.fotoUrl, undefined, 'nunca envia foto junto com o formulário')
+  assert.equal(r.fotos, undefined)
+
+  // 3) formulário completo numa única mensagem
+  r = await avancarFunil(estado, formularioTexto(), 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'confirmando_formulario')
+  assert.equal(estado.dados.valorFrete, undefined, 'nunca cota frete antes da confirmação')
+
+  // 4) confirmação -> cotação real do frete
+  r = await avancarFunil(estado, 'sim', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'aguardando_aprovacao_frete')
+  assert.equal(estado.dados.valorFrete, 22.5)
+  assert.match(r.mensagem, /Subtotal:/)
+  assert.match(r.mensagem, /Frete/)
+  assert.match(r.mensagem, /Total:/)
+  assert.match(r.mensagem, /Você aprova o frete e o total\?/)
+
+  // 5) aprovação explícita do frete -> pedido provisório + preference única
+  r = await avancarFunil(estado, 'sim, pode confirmar', 'compra_produto', deps)
+  estado = r.estado
+  assert.equal(estado.fase, 'aguardando_pagamento')
+  assert.equal(estado.dados.pedidoId, 'pedido_whatsapp_e2e_001')
+  assert.match(estado.dados.linkPagamento!, /pagamento\.exemplo\/pedido_whatsapp_e2e_001/)
+  assert.equal(revalidarChamadoComId, produtoEscolhidoId, 'revalida preço/estoque sempre pelo ID técnico do produto, nunca pelo código comercial')
+
+  // 6) "paguei" nunca confirma pagamento — só o webhook real do Mercado Pago
+  const rPaguei = await avancarFunil(estado, 'paguei, pode confirmar', 'compra_produto', deps)
+  assert.equal(rPaguei.estado.fase, 'aguardando_pagamento')
+  assert.equal(rPaguei.estado.dados.pagamentoConfirmado, undefined)
+
+  // 7) só processarConfirmacaoPagamento (chamado pelo webhook-mercadopago
+  // real após consultar a API) avança pra pedido_criado (produção).
+  const rPago = await processarConfirmacaoPagamento(estado, estado.dados.paymentId!, deps.criarPedido)
+  assert.equal(rPago.estado.fase, 'pedido_criado')
 })

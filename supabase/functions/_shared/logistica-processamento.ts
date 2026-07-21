@@ -17,7 +17,7 @@ import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { buscarTodasCredenciais } from './credentials.ts';
 import { criarEntregaLalamove } from './lalamove-orders.ts';
 import { decidirAcaoLogistica, statusLogisticaReivindicavel, type PedidoParaLogistica } from './logistica-decisao.ts';
-import { cotacaoExpirada } from './lalamove-config.ts';
+import { cotacaoExpirada, telefoneE164Valido } from './lalamove-config.ts';
 
 export interface PedidoParaEntrega extends PedidoParaLogistica {
   id: string;
@@ -109,7 +109,11 @@ export async function processarLogisticaAposPagamento(
   pedido: PedidoParaEntrega,
   config: ConfigLogisticaProcessamento,
 ): Promise<ResultadoProcessamentoLogistica> {
-  const decisao = decidirAcaoLogistica(pedido, !!config.storePhone);
+  // Nunca envia um STORE_PHONE mal formatado pra Lalamove — a API exige
+  // E.164 com "+" (regex oficial ^\+[1-9]\d{1,14}$). Configurado mas
+  // inválido é tratado igual a ausente: bloqueia com motivo claro, nunca
+  // manda um telefone que a API vai rejeitar (ou pior, aceitar mal-parseado).
+  const decisao = decidirAcaoLogistica(pedido, telefoneE164Valido(config.storePhone));
 
   if (decisao.acao === 'pular') return { status: 'pulado', motivo: decisao.motivo };
 

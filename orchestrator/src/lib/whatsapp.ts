@@ -5,7 +5,6 @@
  *   ZAPI_INSTANCE_ID    Painel Z-API > Instância > ID
  *   ZAPI_TOKEN          Painel Z-API > Instância > Token
  *   ZAPI_CLIENT_TOKEN   Painel Z-API > Minha Conta > Client-Token
- *   CARLOS_WHATSAPP     Número do operador para escaladas (ex: 5511999999999)
  *   WHATSAPP_PROVIDER   Deve ser "zapi" (padrão)
  *
  * Preparado para futura migração à Meta Cloud API:
@@ -16,7 +15,6 @@ const ZAPI_BASE         = 'https://api.z-api.io'
 const ZAPI_INSTANCE_ID  = process.env.ZAPI_INSTANCE_ID ?? ''
 const ZAPI_TOKEN        = process.env.ZAPI_TOKEN ?? ''
 const ZAPI_CLIENT_TOKEN = process.env.ZAPI_CLIENT_TOKEN ?? ''
-const CARLOS            = process.env.CARLOS_WHATSAPP ?? ''
 
 const TIMEOUT_MS  = 10_000
 const MAX_RETRIES = 1
@@ -164,9 +162,15 @@ export async function enviarImagem(opts: EnviarImagemOpts): Promise<boolean> {
 
 // ── Escalada para humano ──────────────────────────────────────────────────────
 
+/**
+ * Registra a escalada no CRM (orchestrator_logs, visível no dashboard) —
+ * nunca envia WhatsApp pra um número de operador. Registrar no
+ * painel/CRM é a única via aqui: notificar por WhatsApp exigiria um
+ * número de operador dedicado (não o canal automatizado da loja, que
+ * criaria uma mensagem da loja pra ela mesma) que este projeto não tem
+ * configurado hoje.
+ */
 export async function notificarEscalada(taskId: string, tipo: string, motivo: string): Promise<void> {
-  // Fallback: grava no Supabase como escalada pendente (visível no dashboard)
-  // independente de WhatsApp estar configurado ou não
   try {
     const { getSupabase } = await import('./supabase.js')
     await getSupabase().from('orchestrator_logs').insert({
@@ -180,21 +184,6 @@ export async function notificarEscalada(taskId: string, tipo: string, motivo: st
   } catch (err) {
     console.error('[WhatsApp] Falha ao gravar escalada no Supabase:', err)
   }
-
-  if (!CARLOS) {
-    console.warn(`[WhatsApp] CARLOS_WHATSAPP não configurado — escalada registrada no Supabase: ${tipo}`)
-    return
-  }
-
-  const mensagem = [
-    'Escalada — requer sua atenção',
-    '',
-    `Tipo: ${tipo}`,
-    `Motivo: ${motivo}`,
-    `Task: ${taskId}`,
-  ].join('\n')
-
-  await enviarMensagem({ numero: CARLOS, mensagem })
 }
 
 // ── SDR responde lead via WhatsApp ────────────────────────────────────────────

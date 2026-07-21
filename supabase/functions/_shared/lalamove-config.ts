@@ -94,3 +94,23 @@ export function mascarar(valor: string | null | undefined): string {
   if (valor.length <= 8) return '*'.repeat(valor.length);
   return `${valor.slice(0, 4)}…${valor.slice(-4)}`;
 }
+
+// Exigido pela Lalamove pro campo `phone` de sender/recipients — E.164 com o
+// sinal "+" obrigatório: "Must be a valid number with region code (ex: +65)",
+// validado com a mesma regex documentada por eles pra todos os mercados.
+const REGEX_TELEFONE_E164 = /^\+[1-9]\d{1,14}$/;
+
+/** true só quando o telefone está em E.164 válido (+DDI+número, só dígitos depois do +) — nunca envia um telefone mal formatado pra Lalamove. */
+export function telefoneE164Valido(telefone: string | null | undefined): boolean {
+  return !!telefone && REGEX_TELEFONE_E164.test(telefone);
+}
+
+/** Mascara um telefone pra log/relatório — mantém só o prefixo (+DDI) e os 4 últimos dígitos. Ex.: +5511982829083 -> +55•••••••9083. Nunca expõe o número completo. */
+export function mascararTelefone(telefone: string | null | undefined): string {
+  if (!telefone) return '';
+  if (telefone.length <= 7) return '•'.repeat(telefone.length);
+  const inicio = telefone.slice(0, 3);
+  const fim = telefone.slice(-4);
+  const meio = '•'.repeat(telefone.length - 7);
+  return `${inicio}${meio}${fim}`;
+}

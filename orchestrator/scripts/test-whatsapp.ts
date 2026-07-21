@@ -13,7 +13,10 @@ import 'dotenv/config'
 import { enviarMensagem, extrairMensagemZApi, normalizarTelefone } from '../src/lib/whatsapp.js'
 
 const PORT = process.env.PORT ?? 3000
-const NUMERO_TESTE = process.env.CARLOS_WHATSAPP ?? ''
+// Número sintético só pra testes manuais deste script — nunca o número
+// real da loja. Defina WHATSAPP_NUMERO_TESTE no seu .env local se quiser
+// rodar `enviar`/`webhook` de verdade.
+const NUMERO_TESTE = process.env.WHATSAPP_NUMERO_TESTE ?? ''
 
 const cmd = process.argv[2] ?? 'creds'
 
@@ -23,7 +26,6 @@ async function testeCreds(): Promise<void> {
     ZAPI_INSTANCE_ID:  process.env.ZAPI_INSTANCE_ID,
     ZAPI_TOKEN:        process.env.ZAPI_TOKEN,
     ZAPI_CLIENT_TOKEN: process.env.ZAPI_CLIENT_TOKEN,
-    CARLOS_WHATSAPP:   process.env.CARLOS_WHATSAPP,
     WHATSAPP_PROVIDER: process.env.WHATSAPP_PROVIDER,
   }
   let ok = true
@@ -42,7 +44,7 @@ async function testeCreds(): Promise<void> {
 // ── Enviar mensagem de teste ──────────────────────────────────────────────────
 async function testeEnviar(): Promise<void> {
   if (!NUMERO_TESTE) {
-    console.error('[FALHA] CARLOS_WHATSAPP não definido no .env')
+    console.error('[FALHA] WHATSAPP_NUMERO_TESTE não definido no .env')
     process.exit(1)
   }
   console.log(`Enviando mensagem de teste para ${NUMERO_TESTE}...`)
@@ -103,17 +105,17 @@ function testePayload(): void {
   const casos = [
     {
       desc: 'mensagem normal',
-      payload: { type: 'ReceivedCallback', phone: '5511982829083', text: { message: 'Olá' }, fromMe: false },
+      payload: { type: 'ReceivedCallback', phone: '5511911112222', text: { message: 'Olá' }, fromMe: false },
       esperado: 'extrair',
     },
     {
       desc: 'mensagem fromMe (bot)',
-      payload: { type: 'ReceivedCallback', phone: '5511982829083', text: { message: 'Resposta da Flora' }, fromMe: true },
+      payload: { type: 'ReceivedCallback', phone: '5511911112222', text: { message: 'Resposta da Flora' }, fromMe: true },
       esperado: 'ignorar',
     },
     {
       desc: 'evento de status (não mensagem)',
-      payload: { type: 'MessageStatusCallback', phone: '5511982829083' },
+      payload: { type: 'MessageStatusCallback', phone: '5511911112222' },
       esperado: 'ignorar',
     },
     {
@@ -123,7 +125,7 @@ function testePayload(): void {
     },
     {
       desc: 'normalização de telefone',
-      payload: { type: 'ReceivedCallback', phone: '+55 (11) 98282-9083', text: { message: 'Oi' }, fromMe: false },
+      payload: { type: 'ReceivedCallback', phone: '+55 (11) 91111-2222', text: { message: 'Oi' }, fromMe: false },
       esperado: 'extrair',
     },
   ]
@@ -141,9 +143,9 @@ function testePayload(): void {
   }
 
   // Teste de normalização
-  const norm = normalizarTelefone('+55 (11) 98282-9083')
-  const normOk = norm === '5511982829083'
-  console.log(`${normOk ? '✓' : '✗'} normalizarTelefone("+55 (11) 98282-9083") → "${norm}"`)
+  const norm = normalizarTelefone('+55 (11) 91111-2222')
+  const normOk = norm === '5511911112222'
+  console.log(`${normOk ? '✓' : '✗'} normalizarTelefone("+55 (11) 91111-2222") → "${norm}"`)
   if (!normOk) falhas++
 
   if (falhas === 0) {

@@ -20,10 +20,8 @@ import { getSupabaseAdmin } from '../_shared/supabase.ts';
 import { logEvento } from '../_shared/logger.ts';
 import { enviarWhatsApp } from '../_shared/whatsapp.ts';
 import { enviarDMInstagram } from '../_shared/instagram.ts';
+import { montarRegistroHandoff } from '../_shared/handoff-whatsapp-sdr.ts';
 import type { OrquestradorPayload } from '../_shared/types.ts';
-
-// Número do operador humano (WhatsApp)
-const OPERADOR_WHATSAPP = Deno.env.get('CARLOS_WHATSAPP') ?? Deno.env.get('OPERADOR_WHATSAPP') ?? '';
 
 // Feriados nacionais fixos (MM-DD)
 const FERIADOS = new Set([
@@ -171,34 +169,35 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Handoff: notifica operador humano
-    if (isHandoff && OPERADOR_WHATSAPP) {
+    // Handoff: registra no CRM (atendimentos_humanos, mesmo painel usado pelo
+    // fluxo Instagram/Facebook — /dashboard/atendimento) em vez de notificar
+    // um operador por WhatsApp. Nunca reusa o canal automatizado da própria
+    // loja pra essa notificação — enviar uma mensagem via enviarWhatsApp
+    // usando o número da própria loja como destino seria a Enemeop Flores
+    // mandando mensagem pra si mesma, sem nenhum humano do outro lado.
+    if (isHandoff) {
       const horario = eHorarioComercial();
-      const nomeCliente = (payload.nome as string | undefined) ?? telefone ?? canalId ?? 'Cliente';
-      const intencao    = (payload.intencao as string | undefined) ?? '';
-      const motivo      = resultado.motivo_handoff ?? 'Solicitado durante atendimento';
+      const registro = montarRegistroHandoff({
+        canal: canalLead,
+        canalId,
+        telefone,
+        nome: payload.nome as string | undefined,
+        leadId: payload.lead_id as string | undefined,
+        intencao: payload.intencao as string | undefined,
+        ultimaMensagem: payload.mensagem as string | undefined,
+        motivo: resultado.motivo_handoff ?? 'Solicitado durante atendimento',
+        horarioComercial: horario,
+      });
 
-      let avisoOperador = `🔔 *HANDOFF — Atendimento Humano Necessário*\n\n`;
-      avisoOperador    += `👤 *Cliente:* ${nomeCliente}\n`;
-      if (telefone) avisoOperador += `📱 *Telefone:* ${telefone}\n`;
-      if (intencao) avisoOperador += `🎯 *Intenção:* ${intencao}\n`;
-      avisoOperador    += `📋 *Motivo:* ${motivo}\n\n`;
-      avisoOperador    += `💬 *Última mensagem do cliente:*\n${(payload.mensagem as string | undefined) ?? '(sem mensagem registrada)'}\n\n`;
-      if (payload.lead_id) avisoOperador += `🆔 Lead ID: ${payload.lead_id}`;
-
-      if (!horario) {
-        avisoOperador += `\n\n⏰ *Fora do horário comercial.* Seg–Sáb: 09–19h | Dom/Feriados: 10–14h.`;
-      }
-
-      const envioOp = await enviarWhatsApp(workspace_id, OPERADOR_WHATSAPP, avisoOperador);
-      acoes.push(envioOp.enviado
-        ? `Operador notificado: ${OPERADOR_WHATSAPP} (horário comercial: ${horario ? 'sim' : 'não'})`
-        : `Falha ao notificar operador: ${envioOp.erro}`);
+      const { error: handoffError } = await sb.from('atendimentos_humanos').insert(registro);
+      acoes.push(handoffError
+        ? `Falha ao registrar handoff no CRM: ${handoffError.message}`
+        : `Handoff registrado no CRM (horário comercial: ${horario ? 'sim' : 'não'})`);
 
       // Atualiza lead com flag de handoff
       if (payload.lead_id) {
         await sb.from('leads')
-          .update({ status: 'em_atendimento', notas: `Handoff solicitado: ${motivo}` })
+          .update({ status: 'em_atendimento', notas: `Handoff solicitado: ${registro.motivo_transferencia}` })
           .eq('id', payload.lead_id as string);
         acoes.push('Lead marcado para atendimento humano');
       }

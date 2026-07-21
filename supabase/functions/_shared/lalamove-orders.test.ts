@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { montarPayloadCriarEntrega, type CriarEntregaParams } from './lalamove-orders.ts';
+import { telefoneE164Valido } from './lalamove-config.ts';
 
 const PARAMS: CriarEntregaParams = {
   quotationId: 'quotation-123',
@@ -54,4 +55,14 @@ test('metadata contem so o pedidoId — nunca dados pessoais do cliente (nome/te
 test('quotationId e passado exatamente como recebido, sem transformacao', () => {
   const payload = montarPayloadCriarEntrega(PARAMS);
   assert.equal(payload.data.quotationId, 'quotation-123');
+});
+
+test('telefone do remetente e o oficial da loja (STORE_PHONE), em E.164, passado sem transformacao pro payload', () => {
+  const paramsComStorePhone: CriarEntregaParams = {
+    ...PARAMS,
+    remetente: { ...PARAMS.remetente, telefone: '+5511982829083' },
+  };
+  const payload = montarPayloadCriarEntrega(paramsComStorePhone);
+  assert.equal(payload.data.sender.phone, '+5511982829083');
+  assert.equal(telefoneE164Valido(payload.data.sender.phone), true);
 });

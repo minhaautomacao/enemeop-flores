@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   resolverAmbiente, resolverBaseUrl, resolverMarket, montarStringAssinatura,
   validarPreco, cotacaoExpirada, servicoDisponivel, mascarar,
+  telefoneE164Valido, mascararTelefone,
 } from './lalamove-config.ts';
 
 test('resolverAmbiente aceita sandbox e production', () => {
@@ -92,4 +93,32 @@ test('mascarar nunca expoe o quotationId inteiro em log', () => {
   assert.equal(mascarar('abcd'), '****');
   assert.equal(mascarar(null), '');
   assert.equal(mascarar(undefined), '');
+});
+
+test('telefoneE164Valido aceita E.164 com sinal + (exigencia oficial da Lalamove, regex ^\\+[1-9]\\d{1,14}$)', () => {
+  assert.equal(telefoneE164Valido('+5511982829083'), true);
+  assert.equal(telefoneE164Valido('+6512345678'), true);
+});
+
+test('telefoneE164Valido rejeita sem o sinal +, com formatacao, vazio ou ausente', () => {
+  assert.equal(telefoneE164Valido('5511982829083'), false);
+  assert.equal(telefoneE164Valido('+55 11 98282-9083'), false);
+  assert.equal(telefoneE164Valido('+55 (11) 98282-9083'), false);
+  assert.equal(telefoneE164Valido(''), false);
+  assert.equal(telefoneE164Valido(null), false);
+  assert.equal(telefoneE164Valido(undefined), false);
+});
+
+test('telefoneE164Valido rejeita numero comecando com 0 apos o + (regex oficial exige [1-9] primeiro)', () => {
+  assert.equal(telefoneE164Valido('+0511982829083'), false);
+});
+
+test('mascararTelefone nunca expoe o numero completo — mantem so +DDI e os 4 ultimos digitos', () => {
+  assert.equal(mascararTelefone('+5511982829083'), '+55•••••••9083');
+});
+
+test('mascararTelefone com telefone ausente/vazio devolve vazio', () => {
+  assert.equal(mascararTelefone(null), '');
+  assert.equal(mascararTelefone(undefined), '');
+  assert.equal(mascararTelefone(''), '');
 });

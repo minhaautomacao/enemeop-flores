@@ -202,6 +202,20 @@ async function buscarFormasPagamentoReal(): Promise<string[]> {
   return configurado ? ['Pix', 'cartão de crédito', 'cartão de débito'] : []
 }
 
+// Cálculo mínimo (sem a correção de janela impossível de
+// _shared/agendamento-entrega.ts, usada só pelas Edge Functions Deno —
+// este serviço Node/Render não tem esse módulo duplicado, e hoje nem
+// recebe foraDoHorario/proximoHorarioTexto no avancarFunil abaixo, então
+// já não tem paridade completa com webhook-meta/webhook-whatsapp). Existe
+// só pra satisfazer o contrato de DependenciasFunil (GO-LIVE Parte 4) sem
+// nunca prometer uma data no passado.
+function calcularAgendamentoMinimo(dataEntrega: { ano: number; mes: number; dia: number }): { entregaPrometidaEmISO: string; despachoEmISO: string; imediato: boolean } {
+  const alvo = new Date(Date.UTC(dataEntrega.ano, dataEntrega.mes, dataEntrega.dia, 12, 0))
+  const agora = new Date()
+  const entregaPrometidaEm = alvo.getTime() > agora.getTime() ? alvo : agora
+  return { entregaPrometidaEmISO: entregaPrometidaEm.toISOString(), despachoEmISO: entregaPrometidaEm.toISOString(), imediato: entregaPrometidaEm.getTime() <= agora.getTime() }
+}
+
 function construirDependenciasFunil(opts: {
   estado: EstadoConversa
   cliente: { nome: string; telefone?: string; canal: CanalAtendimento; canalId?: string }
@@ -213,6 +227,7 @@ function construirDependenciasFunil(opts: {
     buscarProdutosPorCategoria: buscarProdutosPorCategoriaParaFunil,
     revalidarProduto: revalidateProductFromSite,
     calcularFrete: (cep: string) => calcularFreteReal(cep, valorProduto),
+    calcularAgendamento: calcularAgendamentoMinimo,
     gerarPagamento: gerarPagamentoReal,
     criarPedido: (dados) => criarPedidoProvisorio(dados, opts.cliente),
     buscarFormasPagamento: buscarFormasPagamentoReal,

@@ -7,6 +7,15 @@ import { createClient } from '@/lib/supabase/server';
 // nunca reaproveita um valor de uma pela outra.
 export async function GET() {
   const supabase = await createClient();
+
+  // RLS já bloqueia a leitura de `pedidos` pra quem não está autenticado
+  // (auth.role() = 'authenticated'), mas checar a sessão aqui explicitamente
+  // (mesmo padrão de retry-logistica/route.ts) devolve 401 claro em vez de
+  // uma lista vazia que parece só "nenhum pedido" — nunca confunde
+  // "sem sessão" com "sem pedidos em aberto" (GO-LIVE Parte 7/8).
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: 'Não autenticado' }, { status: 401 });
+
   const { data, error } = await supabase
     .from('pedidos')
     .select(`numero_pedido, id, produto, produtos, valor, cliente_nome, cliente_telefone,

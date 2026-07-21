@@ -111,6 +111,7 @@ interface PedidoRow extends PedidoParaEntrega {
   external_reference: string | null;
   data_entrega_solicitada: string | null; // AAAA-MM-DD, ver funil.ts dataCalendarioParaISO
   periodo_entrega: string | null;
+  entrega_prometida_em: string | null;
 }
 
 type Db = ReturnType<typeof getDb>;
@@ -294,7 +295,7 @@ Deno.serve(async (req: Request) => {
   async function processarNotificacao(): Promise<Response> {
   const { data: pedido, error: pedidoError } = await db
     .from('pedidos')
-    .select(`canal, canal_id, cliente_telefone, valor, external_reference, data_entrega_solicitada, periodo_entrega, ${SELECT_PEDIDO_PARA_LOGISTICA}`)
+    .select(`canal, canal_id, cliente_telefone, valor, external_reference, data_entrega_solicitada, periodo_entrega, entrega_prometida_em, ${SELECT_PEDIDO_PARA_LOGISTICA}`)
     .eq('external_reference', pagamento.externalReference)
     .maybeSingle();
 
@@ -352,17 +353,35 @@ Deno.serve(async (req: Request) => {
 
     // Quando despachar a corrida real: pela DATA/PERÍODO PROMETIDOS ao
     // cliente (Parte 2), nunca só pelo horário em que o pagamento foi
-    // aprovado. Pedido sem data tipada reconhecida (nunca deveria acontecer
-    // — funil.ts bloqueia a confirmação nesse caso; só ocorreria num pedido
-    // legado anterior a esta correção) cai no mesmo agendamento
-    // conservador de sempre: nunca despacha sem saber a data prometida.
+    // aprovado. GO-LIVE Parte 4: a janela já foi calculada (self-corrigida
+    // pra nunca ser impossível) e MOSTRADA ao cliente antes da aprovação do
+    // frete/pagamento (ver funil.ts etapaCalculoFrete) — se o pedido já
+    // carrega entrega_prometida_em persistido, ele é reaproveitado tal como
+    // está, nunca recalculado aqui (recalcular com o "agora" do pagamento,
+    // que pode ser minutos/horas depois da aprovação, alteraria
+    // silenciosamente a promessa já comunicada). Só um pedido sem essa
+    // persistência (legado, anterior a esta correção, ou criado por um
+    // caminho que nunca teve data tipada) cai no cálculo de segurança
+    // abaixo.
     const agora = new Date();
     const dataEntregaTipada: DataCalendario | null = pedidoRow.data_entrega_solicitada
       ? (([ano, mes, dia]) => ({ ano, mes: mes - 1, dia }))(pedidoRow.data_entrega_solicitada.split('-').map(Number) as [number, number, number])
       : null;
     const periodoEntregaTipado = (pedidoRow.periodo_entrega as PeriodoEntrega | null) ?? null;
 
-    const agendamento = dataEntregaTipada
+    const entregaPrometidaFixada = pedidoRow.entrega_prometida_em ? new Date(pedidoRow.entrega_prometida_em) : null;
+    const despachoFixado = pedidoRow.logistica_executar_em ? new Date(pedidoRow.logistica_executar_em) : null;
+
+    const agendamento = entregaPrometidaFixada
+      ? {
+          entregaPrometidaEm: entregaPrometidaFixada,
+          // despachoEm técnico: se por algum motivo não foi persistido junto
+          // (não deveria acontecer — ver _shared/pedido-repositorio.ts),
+          // nunca despacha antes de agora nem fora do horário comercial.
+          despachoEm: despachoFixado ?? proximaAberturaComercial(agora),
+          imediato: (despachoFixado ?? proximaAberturaComercial(agora)).getTime() <= agora.getTime() && dentroDoHorarioComercial(agora),
+        }
+      : dataEntregaTipada
       ? calcularAgendamentoEntrega(dataEntregaTipada, periodoEntregaTipado, agora, { leadTimeMinutos: LEAD_TIME_MINUTOS })
       : (() => {
           const despacho = dentroDoHorarioComercial(agora) ? agora : proximaAberturaComercial(agora);

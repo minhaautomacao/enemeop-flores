@@ -631,6 +631,14 @@ function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
     buscarProdutosPorCategoria: async () => [],
     revalidarProduto: async () => ({ disponivel: true }),
     calcularFrete: async () => ({ ok: true, valor: 22.5 }),
+    // Fake determinístico e simples (não precisa reproduzir a lógica real de
+    // horário comercial de _shared/agendamento-entrega.ts, usada só pelas
+    // Edge Functions Deno) — só devolve datas ISO válidas e coerentes pra
+    // exercitar o fluxo do funil.
+    calcularAgendamento: (dataEntrega) => {
+      const iso = new Date(Date.UTC(dataEntrega.ano, dataEntrega.mes, dataEntrega.dia, 12, 0)).toISOString()
+      return { entregaPrometidaEmISO: iso, despachoEmISO: iso, imediato: true }
+    },
     gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
     criarPedido: async () => ({ pedidoId: 'pedido_fake_001' }),
     buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'],

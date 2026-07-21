@@ -51,6 +51,7 @@ export default function ProducaoPage() {
   const [ultimo, setUltimo] = useState('')
   const [pedidos, setPedidos] = useState<Pedido[]>([])
   const [carregando, setCarregando] = useState(true)
+  const [erro, setErro] = useState<string | null>(null)
   const [reprocessando, setReprocessando] = useState<string | null>(null)
   const { registrar } = useAlertaNovoPedido()
 
@@ -59,6 +60,7 @@ export default function ProducaoPage() {
       const res = await fetch('/api/producao/pedidos', { cache: 'no-store' })
       const json = await res.json()
       if (!res.ok) throw new Error(json.error ?? 'erro ao carregar pedidos')
+      setErro(null)
       const bruto: Record<string, unknown>[] = json.pedidos ?? []
       const { novos } = registrar(bruto.map((p) => Number(p.numero_pedido)).filter((n) => Number.isFinite(n)))
       const montados: Pedido[] = bruto.map((p) => {
@@ -85,8 +87,12 @@ export default function ProducaoPage() {
         }
       })
       setPedidos(montados)
-    } catch {
-      setPedidos([])
+    } catch (e) {
+      // Erro de API nunca vira lista vazia silenciosa (pareceria "nenhum
+      // pedido em aberto", quando na verdade o painel só não conseguiu
+      // carregar) — mantém a última lista boa conhecida na tela e mostra um
+      // aviso visível, com retry manual disponível (GO-LIVE Parte 7).
+      setErro(e instanceof Error ? e.message : 'Falha ao carregar pedidos')
     } finally {
       setCarregando(false)
     }
@@ -148,6 +154,15 @@ export default function ProducaoPage() {
           </Link>
         </div>
       </header>
+
+      {erro && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-red-500/10 border-b border-red-500/30 text-red-400 text-xs shrink-0">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span className="font-bold uppercase tracking-widest">Falha ao atualizar pedidos:</span>
+          <span className="text-red-300">{erro}</span>
+          <span className="text-red-400/60">— mostrando a última lista carregada com sucesso.</span>
+        </div>
+      )}
 
       {carregando ? (
         <div className="flex flex-1 items-center justify-center text-white/30 text-sm">

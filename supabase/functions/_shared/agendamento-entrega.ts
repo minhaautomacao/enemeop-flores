@@ -63,6 +63,21 @@ function inicioJanelaPrometida(data: DataCalendario, periodo: PeriodoEntrega | n
  * normalizarDataEntregaTexto em funil.ts, chamado antes disso, na
  * confirmação do formulário).
  *
+ * GO-LIVE Parte 4 ("entrega agendada e promessa possível") — bug real
+ * corrigido aqui: a versão anterior calculava `entregaPrometidaEm` uma única
+ * vez (início do período pedido, já clampado pro horário de funcionamento)
+ * e SEPARADAMENTE clampava `despachoEm` pro mesmo horário — se o lead time
+ * não coubesse antes da abertura (ex.: janela pedida às 9h, loja abre às
+ * 9h, lead time de 60min), o despacho ficava preso na mesma hora da
+ * promessa (9h), tornando IMPOSSÍVEL entregar às 9h (a corrida nem foi
+ * criada ainda). Agora, sempre que o lead time não cabe antes da janela
+ * pedida, a PRÓPRIA promessa é deslocada pra frente o suficiente (despacho
+ * viável + lead time) — nunca promete um horário que o despacho calculado
+ * não consegue cumprir. Se o novo horário também não couber no expediente
+ * do dia, desloca pro próximo dia útil (repete o ajuste; Parte 3 já garante
+ * que todo dia tem alguma janela comercial, então converge em poucas
+ * iterações mesmo com lead times grandes).
+ *
  * Regras (Parte 2): "hoje" fora do horário já vira o próximo dia útil antes
  * de chegar aqui (Parte 4, funil.ts) — este cálculo nunca precisa saber
  * disso, só recebe a data já corrigida. Data futura nunca cria corrida antes
@@ -76,14 +91,38 @@ export function calcularAgendamentoEntrega(
   agora: Date,
   config: ConfigAgendamentoEntrega,
 ): ResultadoAgendamentoEntrega {
-  const entregaPrometidaEm = inicioJanelaPrometida(dataEntrega, periodoEntrega);
+  const leadTimeMs = config.leadTimeMinutos * 60_000;
+  let entregaPrometidaEm = inicioJanelaPrometida(dataEntrega, periodoEntrega);
+  let despachoEm = agora;
 
-  const despachoBruto = new Date(entregaPrometidaEm.getTime() - config.leadTimeMinutos * 60_000);
-  const despachoCandidato = despachoBruto.getTime() > agora.getTime() ? despachoBruto : agora;
-  // O despacho em si também precisa cair dentro do horário comercial — não
-  // dá pra despachar um motorista fora do expediente da loja, mesmo que o
-  // lead time sozinho apontasse pra um horário fechado.
-  const despachoEm = proximaAberturaComercial(despachoCandidato);
+  // No máximo 4 tentativas: cada volta só desloca a promessa pro próximo dia
+  // útil quando o ajuste do lead time ultrapassa o fechamento do dia atual —
+  // todo dia tem uma janela comercial (Parte 3), então sempre converge.
+  for (let tentativa = 0; tentativa < 4; tentativa++) {
+    const despachoIdeal = new Date(entregaPrometidaEm.getTime() - leadTimeMs);
+    const pisoDespacho = despachoIdeal.getTime() > agora.getTime() ? despachoIdeal : agora;
+    // O despacho em si também precisa cair dentro do horário comercial —
+    // não dá pra despachar um motorista fora do expediente da loja.
+    despachoEm = proximaAberturaComercial(pisoDespacho);
+
+    const promessaViavel = new Date(despachoEm.getTime() + leadTimeMs);
+    if (promessaViavel.getTime() <= entregaPrometidaEm.getTime()) {
+      // O lead time cabe inteiro antes da janela pedida — cumpre a promessa
+      // original tal como o cliente pediu.
+      break;
+    }
+    // Não coube: a promessa real passa a ser despacho + lead time. Se isso
+    // ainda cair dentro do horário comercial do dia do despacho, já
+    // convergiu; senão, a próxima volta desloca pro dia seguinte.
+    const camposPromessa = camposBRT(promessaViavel);
+    const { fechamentoMin } = janelaDoDia(camposPromessa);
+    const minutosPromessa = camposPromessa.hora * 60 + camposPromessa.minuto;
+    if (minutosPromessa < fechamentoMin) {
+      entregaPrometidaEm = promessaViavel;
+      break;
+    }
+    entregaPrometidaEm = proximaAberturaComercial(instanteDeBRT(camposPromessa.ano, camposPromessa.mes, camposPromessa.dia + 1, 0, 0));
+  }
 
   const imediato = despachoEm.getTime() <= agora.getTime() && dentroDoHorarioComercial(agora);
   return { entregaPrometidaEm, despachoEm: imediato ? agora : despachoEm, imediato };

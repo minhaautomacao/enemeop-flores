@@ -29,6 +29,9 @@ import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
 import { mensagemDuplicada } from '../_shared/dedup.ts';
 import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPorTermoReal, revalidarProdutoReal } from '../_shared/catalogo-woocommerce.ts';
 import { dentroDoHorarioComercial, textoProximaAberturaComercial } from '../_shared/horario-comercial.ts';
+import { type DadosClientePedido, criarOuReusarPedido, gerarOuReusarPreference, buscarFormasPagamentoReal } from '../_shared/pedido-repositorio.ts';
+import { type OrigemHandoff, criarOuReusarAtendimento } from '../_shared/handoff.ts';
+import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -38,13 +41,13 @@ import {
   type ResultadoFrete,
   type FreteDetalhes,
   estadoInicial,
+  reiniciarJornada,
   classificarIntencao,
   intencaoInterrompeFluxo,
   mensagemForaDeEscopo,
   mensagemTransferencia,
   mensagemTransferenciaLimitacaoTecnica,
   avancarFunil,
-  dataCalendarioParaISO,
 } from '../_shared/funil.ts';
 
 const VERIFY_TOKEN   = Deno.env.get('META_VERIFY_TOKEN') ?? '';
@@ -56,6 +59,11 @@ const WORKSPACE_ID   = Deno.env.get('SAAS_WORKSPACE_ID') ?? '';
 const SUPABASE_URL   = Deno.env.get('SUPABASE_URL') ?? '';
 const IG_TOKEN       = Deno.env.get('META_IG_ACCESS_TOKEN') ?? '';
 const PAGE_TOKEN     = Deno.env.get('META_PAGE_ACCESS_TOKEN') ?? '';
+// Minutos de antecedência necessários pra preparar/coletar o pedido antes do
+// início da janela de entrega prometida (Parte 2/4 — mesma config usada em
+// webhook-mercadopago, mas calculada aqui ANTES da aprovação do frete/
+// pagamento, pra nunca prometer uma janela impossível — ver GO-LIVE Parte 4).
+const LEAD_TIME_MINUTOS = Number(Deno.env.get('LOGISTICA_LEAD_TIME_MINUTOS') ?? '30');
 const WHATSAPP_NUM   = Deno.env.get('STORE_WHATSAPP_NUMBER') ?? '';
 
 // ── Supabase client ───────────────────────────────────────────────────────
@@ -229,172 +237,9 @@ async function calcularFreteReal(cep: string): Promise<ResultadoFrete> {
   }
 }
 
-// ── Pedido (rascunho) e pagamento real (Mercado Pago, via _shared/mercadopago.ts) ────
-
-interface DadosClientePedido { nome: string; telefone?: string; canal: string; canalId?: string; }
-
-async function criarPedidoProvisorio(dados: DadosPedido, cliente: DadosClientePedido): Promise<{ pedidoId: string } | null> {
-  const produto = dados.produto;
-  if (!produto || dados.valorTotal == null) {
-    console.error('[webhook-meta] criarPedidoProvisorio chamado sem produto/valorTotal');
-    return null;
-  }
-  const enderecoTexto = dados.endereco
-    ? [dados.endereco.rua, dados.endereco.numero, dados.endereco.bairro, dados.endereco.cidade].filter(Boolean).join(', ')
-    : null;
-  // Gerado aqui (em vez de esperar o default do banco) porque o external_reference
-  // enviado ao Mercado Pago precisa existir já na criação do pedido.
-  const pedidoId = crypto.randomUUID();
-  try {
-    const { data, error } = await getDb()
-      .from('pedidos')
-      .insert({
-        id: pedidoId,
-        cliente_nome: cliente.nome || 'Cliente',
-        cliente_telefone: cliente.telefone ?? '',
-        canal: cliente.canal,
-        canal_id: cliente.canalId ?? null,
-        canal_origem: cliente.canal,
-        produto: produto.nome,
-        produtos: [{ nome: produto.nome, codigo: produto.codigo, woocommerce_product_id: produto.idExterno ?? null, preco: produto.preco, quantidade: produto.quantidade ?? 1 }],
-        valor: dados.valorTotal,
-        valor_frete: dados.valorFrete ?? null,
-        status: 'aguardando_pagamento',
-        provedor_pagamento: 'mercadopago',
-        external_reference: `enemeop-${pedidoId}`,
-        horario_entrega: produto.dataEntrega ?? null,
-        // Data/período tipados (Parte 2 "agendar pela data prometida") —
-        // nunca o texto livre acima é usado pra decisão operacional de
-        // quando despachar a corrida real; ver webhook-mercadopago.
-        data_entrega_solicitada: dados.dataEntregaSolicitada ? dataCalendarioParaISO(dados.dataEntregaSolicitada) : null,
-        periodo_entrega: dados.periodoEntrega ?? null,
-        nome_destinatario: dados.endereco?.nomeDestinatario ?? null,
-        telefone_destinatario: dados.endereco?.telefoneDestinatario ?? null,
-        endereco_entrega: enderecoTexto,
-        cep: dados.endereco?.cep ?? null,
-        numero: dados.endereco?.numero ?? null,
-        complemento: dados.endereco?.complemento ?? null,
-        bairro: dados.endereco?.bairro ?? null,
-        cidade: dados.endereco?.cidade ?? null,
-        uf: dados.endereco?.uf ?? null,
-        nome_comprador: dados.nomeComprador ?? null,
-        mensagem_cartao: produto.mensagemCartao ?? null,
-        workspace_id: WORKSPACE_ID,
-        // Cotação real usada para valor_frete — nunca o preço real "puro" da
-        // Lalamove (que fica em frete_preco_real, sem markup) é confundido
-        // com o valor cobrado do cliente (valor_frete, com markup).
-        lalamove_quotation_id: dados.freteDetalhes?.quotationId ?? null,
-        frete_transportadora: dados.freteDetalhes?.transportadora ?? null,
-        frete_servico: dados.freteDetalhes?.servico ?? null,
-        frete_preco_real: dados.freteDetalhes?.precoReal ?? null,
-        frete_markup: dados.freteDetalhes?.markup ?? null,
-        frete_moeda: dados.freteDetalhes?.moeda ?? null,
-        frete_expires_at: dados.freteDetalhes?.expiresAt ?? null,
-        frete_cotado_em: dados.freteDetalhes?.cotadoEm ?? null,
-        frete_ambiente: dados.freteDetalhes?.ambiente ?? null,
-        frete_mercado: dados.freteDetalhes?.mercado ?? null,
-        frete_origem: dados.freteDetalhes?.origem ?? null,
-        frete_destino: dados.freteDetalhes?.destino ?? null,
-        lalamove_stop_id_origem: dados.freteDetalhes?.stopIdOrigem ?? null,
-        lalamove_stop_id_destino: dados.freteDetalhes?.stopIdDestino ?? null,
-      })
-      .select('id')
-      .single();
-    if (error || !data) {
-      console.error('[webhook-meta] falha ao criar pedido provisorio:', error?.message);
-      return null;
-    }
-    return { pedidoId: data.id as string };
-  } catch (e) {
-    console.error('[webhook-meta] excecao ao criar pedido provisorio:', e);
-    return null;
-  }
-}
-
-/**
- * Cria (ou reaproveita) a preference de pagamento do pedido no Mercado Pago.
- * Idempotente: se o pedido já tem mp_preference_id (chamada repetida do
- * funil pra mesma confirmação), reusa o link salvo em vez de criar uma
- * preference nova — nunca duas cobranças pro mesmo pedido. Produto e frete
- * usados no cálculo do total vêm sempre do que já foi persistido no pedido
- * (nunca de valores repassados pelo cliente).
- */
-async function gerarPagamentoReal(pedidoId: string, _valorTotal: number): Promise<{ link: string; paymentId: string } | null> {
-  const { data: pedido, error } = await getDb()
-    .from('pedidos')
-    .select('produtos, valor_frete, external_reference, mp_preference_id, link_pagamento')
-    .eq('id', pedidoId)
-    .single();
-  if (error || !pedido) {
-    console.error('[webhook-meta] gerarPagamentoReal: pedido nao encontrado:', error?.message);
-    return null;
-  }
-
-  if (pedido.mp_preference_id && pedido.link_pagamento) {
-    return { link: pedido.link_pagamento as string, paymentId: pedido.mp_preference_id as string };
-  }
-
-  const produtos = (pedido.produtos as Array<{ nome: string; preco: number; quantidade?: number }> | null) ?? [];
-  const itens = produtos
-    .filter(p => p.preco > 0)
-    .map(p => ({ titulo: p.nome, quantidade: p.quantidade ?? 1, precoUnitarioReais: p.preco }));
-  const frete = Number(pedido.valor_frete ?? 0);
-  if (frete > 0) itens.push({ titulo: 'Frete', quantidade: 1, precoUnitarioReais: frete });
-  if (itens.length === 0) {
-    console.error('[webhook-meta] gerarPagamentoReal: pedido sem itens cobraveis, preference nao criada');
-    return null;
-  }
-
-  const externalReference = (pedido.external_reference as string | null) ?? `enemeop-${pedidoId}`;
-  const resultado = await criarPreferenciaMercadoPago(WORKSPACE_ID, {
-    externalReference,
-    itens,
-    notificationUrl: `${SUPABASE_URL}/functions/v1/webhook-mercadopago`,
-    backUrls: {
-      success: 'https://enemeopflores.com.br/pagamento/sucesso',
-      failure: 'https://enemeopflores.com.br/pagamento/falha',
-      pending: 'https://enemeopflores.com.br/pagamento/pendente',
-    },
-    metadata: { pedido_id: pedidoId, workspace_id: WORKSPACE_ID },
-  });
-  if (!resultado.criado || !resultado.initPoint || !resultado.preferenceId) {
-    console.error('[webhook-meta] falha ao criar preference Mercado Pago:', resultado.erro);
-    return null;
-  }
-
-  try {
-    await getDb().from('pedidos').update({
-      mp_preference_id: resultado.preferenceId,
-      external_reference: externalReference,
-      link_pagamento: resultado.initPoint,
-      link_pagamento_id: resultado.preferenceId,
-    }).eq('id', pedidoId);
-  } catch (e) {
-    console.error('[webhook-meta] falha ao registrar preference no pedido:', e);
-  }
-  return { link: resultado.initPoint, paymentId: resultado.preferenceId };
-}
-
-// Formas de pagamento realmente habilitadas agora — checa a mesma
-// credencial (workspace_credentials, tipo='financeiro', chave='mp_access_token')
-// que gerarPagamentoReal usa de verdade pra criar a preference. Nunca
-// inventa Pix/cartão/dinheiro sem uma integração real configurada por trás.
-async function buscarFormasPagamentoReal(): Promise<string[]> {
-  try {
-    const { data } = await getDb()
-      .from('workspace_credentials')
-      .select('chave')
-      .eq('workspace_id', WORKSPACE_ID)
-      .eq('tipo', 'financeiro')
-      .eq('ativo', true);
-    const chaves = new Set((data ?? []).map((r: { chave: string }) => r.chave));
-    return chaves.has('mp_access_token')
-      ? ['Pix', 'cartão de crédito', 'cartão de débito']
-      : [];
-  } catch {
-    return [];
-  }
-}
+// ── Pedido (rascunho) e pagamento real (Mercado Pago) — implementação
+// compartilhada com webhook-whatsapp, ver _shared/pedido-repositorio.ts
+// (GO-LIVE Parte 1: idempotência real contra aprovações concorrentes). ────
 
 function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFunil {
   return {
@@ -403,9 +248,13 @@ function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFu
     buscarProdutosPorCategoria: (categoriaId) => buscarProdutosPorCategoriaReal(WORKSPACE_ID, categoriaId),
     revalidarProduto: (idExterno) => revalidarProdutoReal(WORKSPACE_ID, idExterno),
     calcularFrete: calcularFreteReal,
-    gerarPagamento: gerarPagamentoReal,
-    criarPedido: (dados) => criarPedidoProvisorio(dados, cliente),
-    buscarFormasPagamento: buscarFormasPagamentoReal,
+    calcularAgendamento: (dataEntrega, periodoEntrega) => {
+      const r = calcularAgendamentoEntrega(dataEntrega, periodoEntrega, new Date(), { leadTimeMinutos: LEAD_TIME_MINUTOS });
+      return { entregaPrometidaEmISO: r.entregaPrometidaEm.toISOString(), despachoEmISO: r.despachoEm.toISOString(), imediato: r.imediato };
+    },
+    gerarPagamento: (pedidoId) => gerarOuReusarPreference(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'webhook-meta', criarPreferenciaMercadoPago),
+    criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'webhook-meta'),
+    buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
   };
 }
 
@@ -474,51 +323,8 @@ async function enviarTextoInstagramOuFacebook(canal: string, canalId: string, te
 }
 
 // ── Handoff humano — cria (ou reusa) o atendimentos_humanos aberto ──────
-//
-// Índice único parcial (conversa_id) WHERE status IN ('aguardando_humano',
-// 'em_atendimento') garante no banco que só existe um ticket aberto por
-// conversa. Se duas chamadas concorrentes tentarem criar ao mesmo tempo
-// (ex.: duas mensagens seguidas do cliente disparando handoff), a segunda
-// recebe violação de unicidade (23505) e cai no fallback: busca o ticket
-// já aberto e reusa o código — nunca gera um segundo.
-
-type OrigemHandoff = 'cliente_solicitou' | 'flora_sem_confianca' | 'limite_tecnico';
-
-async function criarOuReusarAtendimento(
-  conversaId: string,
-  canal: string,
-  canalId: string,
-  nomeCliente: string | null,
-  origem: OrigemHandoff,
-  motivo: string,
-): Promise<string | null> {
-  const db = getDb();
-  const { data: inserted, error: insertError } = await db
-    .from('atendimentos_humanos')
-    .insert({
-      conversa_id: conversaId,
-      canal,
-      canal_cliente_id: canalId,
-      nome_cliente: nomeCliente,
-      origem_handoff: origem,
-      motivo_transferencia: motivo,
-    })
-    .select('codigo')
-    .single();
-
-  if (!insertError && inserted) return (inserted as { codigo: string }).codigo;
-
-  const { data: existente } = await db
-    .from('atendimentos_humanos')
-    .select('codigo')
-    .eq('conversa_id', conversaId)
-    .in('status', ['aguardando_humano', 'em_atendimento'])
-    .order('criado_em', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  return (existente as { codigo: string } | null)?.codigo ?? null;
-}
+// Implementação compartilhada com webhook-whatsapp, ver _shared/handoff.ts
+// (GO-LIVE Parte 2: "reutilizar o módulo compartilhado de handoff").
 
 async function iniciarHandoffHumano(
   conversaRow: ConversaRow,
@@ -526,7 +332,20 @@ async function iniciarHandoffHumano(
   canalId: string,
   origem: OrigemHandoff,
   motivo: string,
-): Promise<string> {
+): Promise<{ mensagem: string; sucesso: boolean }> {
+  const resultado = await criarOuReusarAtendimento(getDb(), conversaRow.id, canal, canalId, conversaRow.nome_cliente, origem, motivo, null, 'webhook-meta');
+
+  if (!resultado.ok) {
+    // Nunca declara handoff concluído se o INSERT falhou de verdade (e não
+    // achou nenhum ticket já aberto pra reaproveitar) — informa
+    // indisponibilidade honesta e não muda modo_atendimento, deixando a
+    // conversa num estado recuperável pra próxima mensagem tentar de novo.
+    console.error(`[webhook-meta] handoff_falhou conversa=${conversaRow.id} motivo="${motivo}"`);
+    return { mensagem: 'No momento não consegui abrir seu atendimento com um humano — pode tentar de novo em instantes, por favor.', sucesso: false };
+  }
+
+  // Só muda modo_atendimento depois do INSERT (ou reaproveitamento)
+  // confirmado — nunca antes.
   await salvarConversa(conversaRow.id, {
     modo_atendimento: 'humano',
     status_atendimento: 'aguardando_humano',
@@ -538,10 +357,8 @@ async function iniciarHandoffHumano(
   // WhatsApp com link clicável — qualquer outro motivo de transferência
   // continua no mesmo canal, sem sair por padrão.
   const mensagemBase = origem === 'limite_tecnico' ? mensagemTransferenciaLimitacaoTecnica() : mensagemTransferencia();
-  const codigo = await criarOuReusarAtendimento(conversaRow.id, canal, canalId, conversaRow.nome_cliente, origem, motivo);
-  return codigo
-    ? `${mensagemBase} Seu código de atendimento é ${codigo}.`
-    : mensagemBase;
+  const mensagem = resultado.codigo ? `${mensagemBase} Seu código de atendimento é ${resultado.codigo}.` : mensagemBase;
+  return { mensagem, sucesso: true };
 }
 
 // ── Processar DM — usa o funil determinístico compartilhado ─────────────
@@ -584,16 +401,22 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
 
   if (estado.fase === 'pedido_criado' || estado.fase === 'encerrado_sem_venda') {
     console.log(`[webhook-meta] conversa_reaberta canal_id=${canalId} canal=${canal}`);
-    estado = estadoInicial();
+    // reiniciarJornada (não estadoInicial puro) marca uma nova fronteira de
+    // jornada em jornadaIniciadaEm — é o que dá ao próximo pedido desta
+    // conversa uma jornada_key diferente da do pedido anterior (GO-LIVE
+    // Parte 1: idempotência real do pedido).
+    estado = reiniciarJornada(mensagemCliente);
   } else if (estado.fase === 'transferido_humano') {
     // Chegamos aqui só porque o gate de "modo_atendimento === 'humano'" já
     // passou acima — ou seja, não existe (mais) um handoff real ativo pra
     // essa conversa (nunca existiu, ou foi concluído/devolvido/cancelado).
     // fase="transferido_humano" órfã é estado fantasma: nunca deve travar o
     // cliente recebendo a mesma mensagem de transferência pra sempre — repara
-    // e devolve a conversa pra Flora.
+    // e devolve a conversa pra Flora. Também marca nova jornada: se um
+    // pedido já tinha sido criado antes da transferência, a tentativa
+    // seguinte não pode colidir com a jornada_key dele.
     console.log(`[webhook-meta] fase_transferido_humano_orfa_reparada canal_id=${canalId} canal=${canal}`);
-    estado = estadoInicial();
+    estado = reiniciarJornada(mensagemCliente);
   }
 
   let nomeCliente = conversaRow.nome_cliente ?? null;
@@ -622,8 +445,14 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     } else {
       const motivo = `${intencao}: "${mensagemCliente}"`;
       const origem: OrigemHandoff = intencao === 'atendimento_humano' ? 'cliente_solicitou' : 'flora_sem_confianca';
-      respostaFinal = await iniciarHandoffHumano(conversaRow, canal, canalId, origem, motivo);
-      estado = { ...estado, fase: 'transferido_humano', dados: { ...estado.dados, motivoTransferencia: motivo } };
+      const handoff = await iniciarHandoffHumano(conversaRow, canal, canalId, origem, motivo);
+      respostaFinal = handoff.mensagem;
+      // Só marca transferido_humano se o ticket realmente foi criado —
+      // numa falha de banco a conversa fica como estava, recuperável na
+      // próxima mensagem.
+      if (handoff.sucesso) {
+        estado = { ...estado, fase: 'transferido_humano', dados: { ...estado.dados, motivoTransferencia: motivo } };
+      }
     }
   } else {
     const primeiraMensagem = (conversaRow.historico ?? []).length === 0;
@@ -636,7 +465,7 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     if (primeiraMensagem && !nomeCliente && !foraDoHorario) {
       respostaFinal = 'Oi! Pode me dizer seu nome pra eu te atender melhor?';
     } else {
-      const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', canal, canalId });
+      const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', canal, canalId, conversaId: conversaRow.id });
       const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps, foraDoHorario, proximoHorarioTexto);
       estado = resultado.estado;
       if (estado.fase === 'transferido_humano') {
@@ -646,7 +475,13 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
         // real é criado, nunca como texto solto sem ticket. Mesmo mecanismo
         // do portão externo, pra nunca duplicar nem deixar órfã de novo.
         const motivo = estado.dados.motivoTransferencia ?? 'transferencia solicitada pelo funil';
-        respostaFinal = await iniciarHandoffHumano(conversaRow, canal, canalId, 'flora_sem_confianca', motivo);
+        const handoff = await iniciarHandoffHumano(conversaRow, canal, canalId, 'flora_sem_confianca', motivo);
+        respostaFinal = handoff.mensagem;
+        // O funil já decidiu que não pode prosseguir sozinho (fase virou
+        // transferido_humano internamente) mesmo que o ticket falhe — a
+        // falha aqui só significa modo_atendimento não vira 'humano', então
+        // o reparo de fase órfã (handoffRealmenteAtivo=false) reinicia a
+        // jornada sozinho na próxima mensagem, nunca finge handoff concluído.
       } else {
         const saudacaoNome = primeiraMensagem && nomeCliente && estado.fase !== 'aviso_fora_horario' ? `Oi, ${nomeCliente}! ` : '';
         respostaFinal = `${saudacaoNome}${resultado.mensagem}`;
@@ -681,8 +516,8 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     if (!algumaFalhou) {
       await enviarTextoInstagramOuFacebook(canal, canalId, respostaFinal);
     } else {
-      const mensagemFalha = await iniciarHandoffHumano(conversaRow, canal, canalId, 'limite_tecnico', 'falha ao enviar mídia do produto');
-      await enviarTextoInstagramOuFacebook(canal, canalId, mensagemFalha);
+      const handoffFalhaMidia = await iniciarHandoffHumano(conversaRow, canal, canalId, 'limite_tecnico', 'falha ao enviar mídia do produto');
+      await enviarTextoInstagramOuFacebook(canal, canalId, handoffFalhaMidia.mensagem);
     }
   } else if (fotoUrl) {
     console.log(`[webhook-meta] enviando foto avulsa url=${fotoUrl}`);
@@ -692,8 +527,8 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
     } else {
       // Falha definitiva no envio de mídia: nunca finge que enviou —
       // encaminha para atendimento humano.
-      const mensagemFalha = await iniciarHandoffHumano(conversaRow, canal, canalId, 'limite_tecnico', 'falha ao enviar mídia do produto');
-      await enviarTextoInstagramOuFacebook(canal, canalId, mensagemFalha);
+      const handoffFalhaMidia = await iniciarHandoffHumano(conversaRow, canal, canalId, 'limite_tecnico', 'falha ao enviar mídia do produto');
+      await enviarTextoInstagramOuFacebook(canal, canalId, handoffFalhaMidia.mensagem);
     }
   } else {
     await enviarTextoInstagramOuFacebook(canal, canalId, respostaFinal);

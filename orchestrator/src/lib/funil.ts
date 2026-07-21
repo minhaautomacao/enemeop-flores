@@ -162,6 +162,20 @@ export interface DadosPedido {
   dataEntregaSolicitada?: DataCalendario
   /** Período preferido (manhã/tarde/noite), se informado e reconhecido — null/ausente usa o horário operacional padrão configurado. */
   periodoEntrega?: PeriodoEntrega | null
+  /**
+   * Janela de entrega já corrigida pra sempre ser cumprível (nunca promete um
+   * horário que o lead time operacional não permite cumprir dado o horário
+   * de funcionamento) — calculada UMA ÚNICA VEZ na cotação de frete (ver
+   * etapaCalculoFrete / GO-LIVE Parte 4 "entrega agendada e promessa
+   * possível") e mostrada ao cliente antes da aprovação do frete/pagamento.
+   * O pedido persiste exatamente isto — nunca recalculado depois do
+   * pagamento, pra nunca alterar silenciosamente a promessa já feita.
+   */
+  entregaPrometidaEmISO?: string
+  /** Instante técnico (ISO) em que a corrida deve ser despachada — calculado junto com o campo acima. */
+  despachoEmISO?: string
+  /** true quando o despacho já pode acontecer assim que o pagamento for confirmado (sem precisar de agendamento). */
+  entregaImediata?: boolean
 }
 
 export interface EstadoConversa {
@@ -1085,6 +1099,14 @@ export interface DependenciasFunil {
   /** Revalida preço/estoque/nome/foto de um produto direto na fonte pelo ID técnico (idExterno) — nunca pelo código comercial, que pode ser duplicado. Sempre chamado antes de criar o pedido. */
   revalidarProduto: (idExterno: string) => Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string; nome?: string } | null>
   calcularFrete: CalculadorFrete
+  /**
+   * Calcula a janela de entrega prometível (já corrigida pro horário de
+   * funcionamento + lead time operacional) e o instante técnico de despacho
+   * — síncrono e puro do lado de quem implementa (ver
+   * _shared/agendamento-entrega.ts), injetado aqui pra funil.ts continuar
+   * sem nenhum import externo (Parte 4 GO-LIVE).
+   */
+  calcularAgendamento: (dataEntrega: DataCalendario, periodoEntrega: PeriodoEntrega | null) => { entregaPrometidaEmISO: string; despachoEmISO: string; imediato: boolean }
   /** Recebe o pedido já criado (pedidoId) e o valor total, devolve link + identificador de pagamento. */
   gerarPagamento: (pedidoId: string, valorTotal: number) => Promise<{ link: string; paymentId: string } | null>
   /** Cria o registro do pedido (rascunho, ainda sem pagamento) e devolve o id. */
@@ -1549,9 +1571,32 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
   const valorFrete = resultado.valor ?? 0
   const subtotal = precoProduto * quantidade
   const valorTotal = subtotal + valorFrete
-  const dados = { ...estado.dados, valorFrete, valorTotal, freteDetalhes: resultado.detalhes }
+  let dados: DadosPedido = { ...estado.dados, valorFrete, valorTotal, freteDetalhes: resultado.detalhes }
+  // Calcula (uma única vez) a janela de entrega já corrigida pro horário de
+  // funcionamento + lead time operacional — GO-LIVE Parte 4 "nunca prometer
+  // uma janela impossível". Só quando a data já foi tipada (sempre o caso
+  // vindo de etapaConfirmandoFormulario; o atalho de "e o frete?" antes do
+  // formulário completo ainda não tem isso, e o guard de dados incompletos
+  // em etapaAguardandoAprovacaoFrete pede o formulário antes de prosseguir).
+  if (dados.dataEntregaSolicitada) {
+    const agendamento = deps.calcularAgendamento(dados.dataEntregaSolicitada, dados.periodoEntrega ?? null)
+    dados = {
+      ...dados,
+      entregaPrometidaEmISO: agendamento.entregaPrometidaEmISO,
+      despachoEmISO: agendamento.despachoEmISO,
+      entregaImediata: agendamento.imediato,
+    }
+  }
   const novoEstado: EstadoConversa = { ...estado, fase: 'aguardando_aprovacao_frete', dados }
   return { estado: novoEstado, mensagem: montarMensagemAprovacaoFrete(dados) }
+}
+
+/** Formata a janela de entrega prometida (BRT) pra exibição — texto simples, sem depender de nenhum import de horário (Parte 4). */
+function textoJanelaPrometida(entregaPrometidaEmISO: string): string {
+  const d = new Date(entregaPrometidaEmISO)
+  const dataFmt = d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit' })
+  const horaFmt = d.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
+  return `${dataFmt}, a partir das ${horaFmt}`
 }
 
 /** Nunca cobra antes de cotar e aprovar o frete — esta mensagem é o único lugar que apresenta subtotal/frete/total antes do link de pagamento (Parte 3). */
@@ -1561,13 +1606,15 @@ function montarMensagemAprovacaoFrete(dados: DadosPedido): string {
   const transportadora = dados.freteDetalhes?.transportadora
   const servico = dados.freteDetalhes?.servico
   const linhaFrete = `Frete${transportadora ? ` (${transportadora}${servico ? ` — ${servico}` : ''})` : ''}: ${formatarPreco(dados.valorFrete)}`
+  const linhaEntrega = dados.entregaPrometidaEmISO ? `Entrega prevista: ${textoJanelaPrometida(dados.entregaPrometidaEmISO)}` : null
   return [
     `Subtotal: ${formatarPreco(subtotal)}`,
     linhaFrete,
+    linhaEntrega,
     `Total: ${formatarPreco(dados.valorTotal)}`,
     '',
     'Você aprova o frete e o total?',
-  ].join('\n')
+  ].filter((l): l is string => l !== null).join('\n')
 }
 
 /** Coleta a confirmação dos dados do formulário — nunca cota frete antes disso (Parte 3.3/3.4). Cliente pode corrigir um campo em vez de confirmar; nunca perde os dados já certos. */

@@ -16,8 +16,8 @@ Email: cieloecommerce@cielo.com.br
 
 | Chave | Valor |
 |---|---|
-| client_id (Merchant ID) | 429e98c5-43c9-4f9d-954f-890d98c1e865 |
-| client_secret (Merchant Key) | (enviado por email para enemeopflores@gmail.com — ver email gerado em 2026-06-18) |
+| client_id (Merchant ID) | **SANITIZADO — GO-LIVE 2026-07-21.** Este arquivo é versionado no Git (histórico não reescrito nesta tarefa) e chegou a conter o client_id real em texto puro — achado registrado em `docs/SECURITY_INCIDENTS.md` e `docs/CREDENTIAL_ROTATION_PLAN.md` (item 6: rotação pendente, baixa prioridade, requer contato com suporte Cielo). **O valor antigo precisa ser tratado como comprometido e rotacionado** antes de qualquer uso; nunca reintroduzir o valor real aqui. Valor atual: obter com o suporte Cielo e guardar só em `.credentials/cielo/.env` (gitignored, nunca commitado — ver `.credentials/cielo/README.md`). |
+| client_secret (Merchant Key) | (enviado por email para enemeopflores@gmail.com — ver email gerado em 2026-06-18; nunca foi versionado neste arquivo) |
 
 ## Como cadastrar no painel da Fábrica
 

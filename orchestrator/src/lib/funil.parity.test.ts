@@ -66,6 +66,10 @@ test('nucleo Deno (_shared/funil.ts) produz exatamente os mesmos resultados que 
     buscarProdutosPorCategoria: async () => [],
     revalidarProduto: async () => ({ disponivel: true }),
     calcularFrete: async () => ({ ok: true as const, valor: 22.5 }),
+    calcularAgendamento: (dataEntrega: { ano: number; mes: number; dia: number }) => {
+      const iso = new Date(Date.UTC(dataEntrega.ano, dataEntrega.mes, dataEntrega.dia, 12, 0)).toISOString()
+      return { entregaPrometidaEmISO: iso, despachoEmISO: iso, imediato: true }
+    },
     gerarPagamento: async (pedidoId: string) => ({ link: `https://pag/${pedidoId}`, paymentId: pedidoId }),
     criarPedido: async () => ({ pedidoId: 'pedido_x' }),
     buscarFormasPagamento: async () => ['Pix'],

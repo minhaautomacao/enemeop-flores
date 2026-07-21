@@ -112,11 +112,19 @@ uma vulnerabilidade de acesso ativa (RLS desabilitado) em produção.
 - **Impacto:** o `client_id` sozinho não permite transação (falta o
   `client_secret`, nunca commitado) — mas é um identificador exposto
   publicamente, associado a dados empresariais reais
-- **Contenção realizada:** nenhuma ainda
-- **Rotação necessária:** avaliar com a Cielo se reemissão é necessária
-- **Status:** pendente, baixa urgência relativa
+- **Contenção realizada:** GO-LIVE 2026-07-21 — `.credentials/cielo.md`
+  sanitizado (valor real do `client_id` substituído por instrução/
+  placeholder). Histórico Git **não** reescrito nesta tarefa (item 7 do
+  `CREDENTIAL_ROTATION_PLAN.md` exige autorização explícita separada) — o
+  valor antigo continua recuperável do histórico e deve ser tratado como
+  permanentemente comprometido.
+- **Rotação necessária:** sim, pendente — contatar suporte Cielo (ver
+  `CREDENTIAL_ROTATION_PLAN.md` item 6) pra emitir um novo `client_id`
+  antes de considerar o valor antigo seguro para uso.
+- **Status:** conteúdo sanitizado; rotação do valor em si continua pendente
+  (baixa urgência relativa, ação humana fora deste repositório)
 - **Teste de encerramento:** confirmar com suporte Cielo se o `client_id`
-  exposto representa risco prático
+  exposto representa risco prático, e emitir um novo se necessário
 
 ## Incidente 7 — RLS desabilitado em tabelas com dado sensível (produção)
 

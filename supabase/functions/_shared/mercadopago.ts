@@ -149,6 +149,38 @@ export async function buscarPagamentoReal(
   }
 }
 
+export interface PreferenciaExistente {
+  encontrada: boolean;
+  preferenceId?: string;
+  initPoint?: string;
+}
+
+/**
+ * Busca DIRETO na API do Mercado Pago se já existe uma preference criada
+ * para este external_reference — nunca cria uma nova. Único uso: reconciliar
+ * um pedido travado em mp_preference_status='criando' (a chamada de criação
+ * pode ter tido sucesso do lado do Mercado Pago mesmo que a persistência
+ * local tenha falhado) — ver função pagamento-reconciliar.
+ */
+export async function buscarPreferenciaPorExternalReference(
+  workspaceId: string | undefined,
+  externalReference: string,
+): Promise<PreferenciaExistente> {
+  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
+  if (!accessToken) return { encontrada: false };
+  try {
+    const url = `${API_BASE}/checkout/preferences/search?external_reference=${encodeURIComponent(externalReference)}`;
+    const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+    if (!resp.ok) return { encontrada: false };
+    const data = await resp.json() as { results?: Array<{ id?: string; init_point?: string }> };
+    const primeira = data.results?.[0];
+    if (!primeira?.id || !primeira?.init_point) return { encontrada: false };
+    return { encontrada: true, preferenceId: primeira.id, initPoint: primeira.init_point };
+  } catch {
+    return { encontrada: false };
+  }
+}
+
 /**
  * Valida a assinatura x-signature do webhook (ver algoritmo em
  * mercadopago-assinatura.ts). 'sem_segredo_configurado' quando a credencial

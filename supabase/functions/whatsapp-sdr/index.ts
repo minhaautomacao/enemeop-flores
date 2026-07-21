@@ -115,6 +115,9 @@ Deno.serve(async (req: Request) => {
     const resultado = JSON.parse(jsonStr);
     const mensagem: string  = resultado.mensagem ?? '';
     const isHandoff: boolean = forcaHandoff || resultado.handoff === true;
+    // true só depois que o INSERT em atendimentos_humanos realmente
+    // confirmar sucesso — nunca reportado como concluído por omissão.
+    let handoffRegistrado = false;
 
     acoes.push(`Mensagem gerada (tipo: ${resultado.tipo})`);
 
@@ -190,12 +193,21 @@ Deno.serve(async (req: Request) => {
       });
 
       const { error: handoffError } = await sb.from('atendimentos_humanos').insert(registro);
-      acoes.push(handoffError
-        ? `Falha ao registrar handoff no CRM: ${handoffError.message}`
-        : `Handoff registrado no CRM (horário comercial: ${horario ? 'sim' : 'não'})`);
+      handoffRegistrado = !handoffError;
 
-      // Atualiza lead com flag de handoff
-      if (payload.lead_id) {
+      if (handoffError) {
+        // Log sanitizado — nunca o payload completo (pode ter dado de
+        // cliente), só código/mensagem do erro do Postgres.
+        console.error(`[whatsapp-sdr] falha ao registrar handoff: code=${handoffError.code} message=${handoffError.message}`);
+        acoes.push('Falha ao registrar handoff no CRM — atendimento humano NAO foi acionado');
+      } else {
+        acoes.push(`Handoff registrado no CRM (horário comercial: ${horario ? 'sim' : 'não'})`);
+      }
+
+      // Só marca o lead como em atendimento humano depois que o handoff foi
+      // de fato criado — um INSERT que falhou nunca pode passar a impressão
+      // de que um humano já foi acionado.
+      if (handoffRegistrado && payload.lead_id) {
         await sb.from('leads')
           .update({ status: 'em_atendimento', notas: `Handoff solicitado: ${registro.motivo_transferencia}` })
           .eq('id', payload.lead_id as string);
@@ -210,7 +222,16 @@ Deno.serve(async (req: Request) => {
     });
 
     return new Response(
-      JSON.stringify({ sucesso: true, mensagem, handoff: isHandoff, acoes_executadas: acoes }),
+      JSON.stringify({
+        sucesso: true,
+        mensagem,
+        handoff: isHandoff,
+        // Nunca confundir "handoff foi acionado" com "handoff foi
+        // registrado com sucesso" — isHandoff é a intenção, handoff_registrado
+        // é o resultado real do INSERT (false se a constraint/DB rejeitou).
+        handoff_registrado: isHandoff ? handoffRegistrado : null,
+        acoes_executadas: acoes,
+      }),
       { headers: { 'Content-Type': 'application/json' } },
     );
   } catch (err: unknown) {

@@ -75,7 +75,12 @@ test('nucleo Deno (_shared/funil.ts) produz exatamente os mesmos resultados que 
     buscarFormasPagamento: async () => ['Pix'],
   }
 
-  const rNode = await nucleoNode.avancarFunil(estadoNode, 'Quero flores para minha mãe', 'recomendacao', deps)
-  const rDeno = await nucleoDeno.avancarFunil(estadoDeno, 'Quero flores para minha mãe', 'recomendacao', deps)
+  // agora fixo e idêntico nas duas chamadas — avancarFunil grava
+  // ultimaInteracaoEm (Parte 3) com o instante real por padrão, e duas
+  // chamadas em momentos ligeiramente diferentes produziriam ISO strings
+  // diferentes, uma divergência de timing e não de comportamento real.
+  const agoraFixo = new Date('2026-07-21T15:00:00Z')
+  const rNode = await nucleoNode.avancarFunil(estadoNode, 'Quero flores para minha mãe', 'recomendacao', deps, false, undefined, agoraFixo)
+  const rDeno = await nucleoDeno.avancarFunil(estadoDeno, 'Quero flores para minha mãe', 'recomendacao', deps, false, undefined, agoraFixo)
   assert.deepEqual(rDeno, rNode)
 })

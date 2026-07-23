@@ -72,6 +72,8 @@ export type Fase =
   | 'pedido_criado'
   | 'transferido_humano'
   | 'encerrado_sem_venda'
+  /** Gate de retomada após intervalo sem interação (Parte 3) — aguardando o cliente escolher entre continuar o pedido anterior ou iniciar uma nova compra. */
+  | 'retomada_apos_intervalo'
 
 export type Intencao =
   | 'compra_produto'
@@ -202,6 +204,10 @@ export interface DadosPedido {
   despachoEmISO?: string
   /** true quando o despacho já pode acontecer assim que o pagamento for confirmado (sem precisar de agendamento). */
   entregaImediata?: boolean
+  /** ISO da última mensagem processada do cliente — usado só para detectar intervalo sem interação (Parte 3), nunca para nenhuma outra decisão de negócio. */
+  ultimaInteracaoEm?: string
+  /** Fase em que a conversa estava antes do gate de retomada após intervalo (Parte 3) — restaurada quando o cliente escolhe continuar. */
+  faseAntesDoIntervalo?: Fase
 }
 
 export interface EstadoConversa {
@@ -236,76 +242,88 @@ export interface FormularioEntregaDados {
   uf?: string
   dataEntrega?: string
   periodo?: string
+  /** Resposta bruta (ex.: "sim"/"não") à pergunta do cartão impresso — interpretada via pareceConfirmacao. Campo opcional: ausência equivale a "não". */
+  querCartaoImpresso?: string
   mensagemCartao?: string
 }
 
+// Cidade/UF nunca são pedidas no formulário (resolvidas pela consulta real
+// do CEP no pipeline de logística, ver agente-logistica/index.ts — já
+// resolve ViaCEP e só sinaliza divergência real); nunca reintroduzidas aqui
+// como pergunta padrão. Ver decisão registrada em SECURITY_INCIDENTS/relato
+// da tarefa: só entrariam como pergunta isolada numa eventual divergência
+// tratada pelo pipeline de logística, não neste formulário conversacional.
 export const CAMPOS_OBRIGATORIOS_FORMULARIO: (keyof FormularioEntregaDados)[] = [
   'nomeComprador', 'nomeDestinatario', 'telefoneDestinatario',
-  'cep', 'rua', 'numero', 'bairro', 'cidade', 'uf', 'dataEntrega',
+  'cep', 'rua', 'numero', 'bairro', 'dataEntrega',
 ]
 
 export const CAMPOS_OPCIONAIS_FORMULARIO: (keyof FormularioEntregaDados)[] = [
-  'complemento', 'periodo', 'mensagemCartao',
+  'complemento', 'cidade', 'uf', 'periodo', 'querCartaoImpresso', 'mensagemCartao',
 ]
 
 const ROTULO_EXIBICAO_FORMULARIO: Record<keyof FormularioEntregaDados, string> = {
-  nomeComprador: 'nome de quem está fazendo o pedido',
-  nomeDestinatario: 'nome de quem vai receber',
-  telefoneDestinatario: 'telefone de quem vai receber (com DDD)',
+  nomeComprador: 'remetente',
+  nomeDestinatario: 'destinatário',
+  telefoneDestinatario: 'telefone do destinatário',
   cep: 'CEP',
-  rua: 'rua ou avenida',
+  rua: 'rua e número',
   numero: 'número',
   complemento: 'complemento',
   bairro: 'bairro',
   cidade: 'cidade',
   uf: 'UF',
-  dataEntrega: 'data desejada para entrega',
+  dataEntrega: 'data de entrega',
   periodo: 'período ou horário preferido',
+  querCartaoImpresso: 'confirmação se quer cartão impresso (sim ou não)',
   mensagemCartao: 'mensagem para o cartão',
 }
 
-export const TEXTO_FORMULARIO_ENTREGA = `📋 Dados para entrega
+// Texto definido para o formulário único (Parte 2): remetente, destinatário,
+// telefone e data de entrega são operacionais (Lalamove/agendamento exigem)
+// e por isso entram aqui — cidade/UF nunca são pedidas (ver decisão acima
+// de CAMPOS_OBRIGATORIOS_FORMULARIO).
+export const TEXTO_FORMULARIO_ENTREGA = `Para calcular a entrega, envie por favor:
 
-Pra agilizar, copie o formulário abaixo, preencha e envie tudo numa única mensagem:
-
-Nome de quem está fazendo o pedido:
-Nome de quem vai receber:
-Telefone de quem vai receber, com DDD:
-CEP:
-Rua ou avenida:
-Número:
-Complemento, se houver:
+Remetente:
+Destinatário:
+Telefone do destinatário:
+Rua e número:
+Complemento:
 Bairro:
-Cidade:
-UF:
-Data desejada para entrega:
-Período ou horário preferido:
-Mensagem para o cartão, se desejar:`
+CEP:
+Data de entrega:
+Quer que enviemos um cartão impresso com uma mensagem personalizada? Sim ou não.
+Se sim, mensagem para o cartão:`
 
 // Rótulos aceitos por campo (já normalizados: sem acento, minúsculo, sem
 // pontuação de marcação). O primeiro de cada lista é o rótulo canônico do
 // formulário — os demais toleram pequenas variações reais de digitação.
 const ROTULOS_ACEITOS_FORMULARIO: Record<keyof FormularioEntregaDados, string[]> = {
   nomeComprador: [
-    'nome de quem esta fazendo o pedido', 'nome do comprador', 'quem esta fazendo o pedido',
-    'quem esta pedindo', 'remetente', 'seu nome', 'nome de quem pede',
+    'remetente', 'nome de quem esta fazendo o pedido', 'nome do comprador', 'quem esta fazendo o pedido',
+    'quem esta pedindo', 'seu nome', 'nome de quem pede',
   ],
   nomeDestinatario: [
-    'nome de quem vai receber', 'nome do destinatario', 'destinatario', 'quem vai receber',
+    'destinatario', 'nome de quem vai receber', 'nome do destinatario', 'quem vai receber',
   ],
   telefoneDestinatario: [
-    'telefone de quem vai receber, com ddd', 'telefone de quem vai receber',
-    'telefone do destinatario', 'telefone com ddd', 'telefone',
+    'telefone do destinatario', 'telefone de quem vai receber, com ddd', 'telefone de quem vai receber',
+    'telefone com ddd', 'telefone',
   ],
   cep: ['cep'],
-  rua: ['rua ou avenida', 'rua/avenida', 'rua', 'avenida', 'logradouro', 'endereco'],
+  rua: ['rua e numero', 'rua ou avenida', 'rua/avenida', 'rua', 'avenida', 'logradouro', 'endereco'],
   numero: ['numero', 'nº', 'n°', 'n.'],
   complemento: ['complemento, se houver', 'complemento'],
   bairro: ['bairro'],
   cidade: ['cidade'],
   uf: ['uf', 'estado'],
-  dataEntrega: ['data desejada para entrega', 'data de entrega', 'data desejada', 'data'],
+  dataEntrega: ['data de entrega', 'data desejada para entrega', 'data desejada', 'data'],
   periodo: ['periodo ou horario preferido', 'periodo/horario', 'periodo', 'horario preferido', 'horario'],
+  querCartaoImpresso: [
+    'quer que enviemos um cartao impresso com uma mensagem personalizada', 'quer cartao impresso',
+    'quer que enviemos um cartao impresso', 'cartao impresso',
+  ],
   mensagemCartao: ['mensagem para o cartao, se desejar', 'mensagem para o cartao', 'mensagem do cartao', 'cartao'],
 }
 
@@ -314,7 +332,7 @@ const ROTULOS_ACEITOS_FORMULARIO: Record<keyof FormularioEntregaDados, string[]>
 // com "nome de quem esta fazendo o pedido" só por conterem "nome" em comum.
 const ORDEM_CAMPOS_FORMULARIO: (keyof FormularioEntregaDados)[] = [
   'telefoneDestinatario', 'nomeDestinatario', 'nomeComprador',
-  'dataEntrega', 'periodo', 'complemento', 'mensagemCartao',
+  'dataEntrega', 'periodo', 'complemento', 'querCartaoImpresso', 'mensagemCartao',
   'cep', 'rua', 'numero', 'bairro', 'cidade', 'uf',
 ]
 
@@ -358,9 +376,16 @@ export function extrairFormularioEntrega(texto: string): FormularioEntregaDados 
   return dados
 }
 
-/** Campos obrigatórios que ainda faltam — nunca considera opcionais. */
+/** true quando o cliente confirmou explicitamente que quer cartão impresso — ausência de resposta nunca bloqueia (equivale a "não"). */
+export function querCartaoImpresso(dados: FormularioEntregaDados): boolean {
+  return dados.querCartaoImpresso != null && pareceConfirmacao(dados.querCartaoImpresso)
+}
+
+/** Campos obrigatórios que ainda faltam — nunca considera opcionais, exceto a mensagem do cartão, que só entra como obrigatória se o cliente confirmou que quer cartão impresso (Parte 2). */
 export function camposFaltandoFormulario(dados: FormularioEntregaDados): (keyof FormularioEntregaDados)[] {
-  return CAMPOS_OBRIGATORIOS_FORMULARIO.filter(c => !dados[c])
+  const faltando = CAMPOS_OBRIGATORIOS_FORMULARIO.filter(c => !dados[c])
+  if (querCartaoImpresso(dados) && !dados.mensagemCartao) faltando.push('mensagemCartao')
+  return faltando
 }
 
 export function formularioCompleto(dados: FormularioEntregaDados): boolean {
@@ -658,6 +683,7 @@ export function pareceSaudacaoSimples(mensagem: string): boolean {
 const FRASES_NOVO_PEDIDO = [
   'novo pedido', 'outro pedido', 'outro produto', 'fazer um novo pedido',
   'quero ver op', 'mostrar op', 'mostra op', 'outras opcoes', 'outras op', 'ver outras op',
+  'nova compra', 'nova jornada',
 ]
 
 const FRASES_CONTINUACAO = [
@@ -696,6 +722,52 @@ export function reiniciarJornada(mensagemCliente: string): EstadoConversa {
     ...estadoInicial(),
     dados: { ...dados, jornadaIniciadaEm: new Date().toISOString() },
   }
+}
+
+// ── Retomada após intervalo sem interação (Parte 3) ───────────────────────
+//
+// Diferente da retomada por saudação simples (acima): aqui o gatilho é
+// puramente temporal — mais de 1h desde a última mensagem processada nesta
+// conversa, com uma compra em andamento. Nunca dispara sozinho (só quando
+// chega uma mensagem nova, ver avancarFunil) e nunca decide por conta
+// própria: sempre pergunta objetivamente antes de continuar ou reiniciar.
+
+const LIMITE_INTERVALO_RETOMADA_MS = 60 * 60_000 // 1 hora
+
+export function mensagemRetomadaAposIntervalo(): string {
+  return 'Você deseja continuar o pedido anterior ou prefere iniciar uma nova compra?'
+}
+
+/** true só quando há uma compra em andamento e mais de 1h já passou desde a última interação real registrada. */
+export function deveGatilharRetomadaAposIntervalo(estado: EstadoConversa, agora: Date): boolean {
+  if (!FASES_COMPRA_EM_ANDAMENTO.includes(estado.fase)) return false
+  const ultima = estado.dados.ultimaInteracaoEm
+  if (!ultima) return false
+  return agora.getTime() - new Date(ultima).getTime() > LIMITE_INTERVALO_RETOMADA_MS
+}
+
+/**
+ * Resolve a resposta do cliente ao gate de retomada — "nova compra" reinicia
+ * a jornada (nunca reaproveita produto/endereço/frete/pagamento antigos);
+ * "continuar"/confirmação restaura a fase salva e mostra o resumo real de
+ * onde a conversa parou; qualquer outra coisa repete a pergunta, sem avançar
+ * sozinho.
+ */
+function resolverRetomadaAposIntervalo(estado: EstadoConversa, mensagemCliente: string, agora: Date): ResultadoEtapa | null {
+  const n = normalizar(mensagemCliente)
+  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p)))) {
+    return null // sinaliza pro chamador reiniciar a jornada e seguir o fluxo normal
+  }
+  const querContinuar = FRASES_CONTINUACAO.some(p => n.includes(normalizar(p))) || pareceConfirmacao(mensagemCliente)
+  if (querContinuar) {
+    const faseAnterior = estado.dados.faseAntesDoIntervalo ?? 'inicio'
+    const dadosRestaurados: DadosPedido = { ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString() }
+    return {
+      estado: { ...estado, fase: faseAnterior, dados: dadosRestaurados },
+      mensagem: montarMensagemRetomada(faseAnterior, dadosRestaurados),
+    }
+  }
+  return { estado, mensagem: mensagemRetomadaAposIntervalo() }
 }
 
 // Pergunta direta de disponibilidade por nome de produto — "tem girassol?",
@@ -770,23 +842,44 @@ export function mensagemTransferenciaLimitacaoTecnica(): string {
   return 'No momento não consigo continuar por aqui devido a uma limitação técnica. Fale com nossa equipe pelo WhatsApp oficial: https://wa.me/5511982829083'
 }
 
+/** Fixa (dentro do horário) — nunca usada quando o pagamento foi confirmado fora do horário (ver mensagemPagamentoConfirmadoForaDoHorario). */
 export function mensagemFinalizacao(): string {
   return 'Pagamento confirmado. Seu pedido foi registrado e será preparado para entrega. Qualquer atualização será enviada por aqui.'
 }
 
-// ── Horário comercial — aviso com opt-in no início de uma jornada (Parte 4) ──
+/**
+ * Pagamento confirmado enquanto a loja está fora do horário (Parte 5) —
+ * nunca cria corrida imediata: preparação e logística ficam agendadas pro
+ * horário comercial do próximo dia, mesmo quando o pagamento acontece antes
+ * da abertura. Texto exato definido na tarefa.
+ */
+export function mensagemPagamentoConfirmadoForaDoHorario(): string {
+  return 'Pagamento confirmado! Como estamos fora do horário da loja, seu pedido será preparado e seguirá para entrega a partir do horário comercial do próximo dia.'
+}
+
+// ── Horário comercial — aviso com opt-in no início de uma jornada (Parte 4/5) ──
 //
 // Texto exato definido na tarefa. Mostrado só uma vez por jornada (nunca
 // repetido a cada mensagem — ver fase 'aviso_fora_horario'), nunca finaliza
 // dizendo só que está fora do horário, nunca transfere pra humano só por
 // isso, e nunca bloqueia pagamento depois que o cliente aceitou continuar.
 export function mensagemAvisoForaDoHorarioComOpcao(): string {
-  return 'Olá! No momento estamos fora do horário de atendimento. Nosso horário é de segunda a sexta, das 9h às 19h, e aos sábados, domingos e feriados, das 10h às 18h. Se desejar, podemos adiantar seu pedido agora para entrega no próximo dia útil, a partir do horário de funcionamento. Deseja continuar?'
+  return 'No momento estamos fora do horário da loja, mas posso adiantar seu pedido por aqui. As cotações e entregas serão processadas a partir do horário comercial do próximo dia. Deseja continuar?'
 }
 
 /** Lembrete curto enquanto o cliente ainda não respondeu sim/continuar ao aviso — nunca repete o texto completo do aviso de novo. */
 export function mensagemAguardandoRespostaForaDoHorario(): string {
   return 'Posso adiantar seu pedido agora mesmo fora do horário — é só confirmar. Deseja continuar?'
+}
+
+/**
+ * Cotação/corrida real nunca acontecem fora do horário (Parte 4/5) — a
+ * conversa segue normalmente (catálogo, formulário), só a cotação de frete
+ * de verdade fica pra quando a loja reabrir. Nunca dispara sozinha: só é
+ * mostrada em resposta a uma mensagem nova do cliente que tentaria cotar.
+ */
+export function mensagemCotacaoForaDoHorario(): string {
+  return 'A loja está fora do horário agora, então ainda não consigo cotar o frete de verdade — assim que reabrirmos, calculo certinho e te mostro o total. Já deixei os dados registrados por aqui.'
 }
 
 /**
@@ -1007,6 +1100,32 @@ export async function calcularFreteEtapa(cep: string, calcular: CalculadorFrete)
     falhou: false,
     detalhes: resultado.detalhes,
   }
+}
+
+// ── Validade da cotação real de frete (Parte 4) ───────────────────────────
+//
+// Validade máxima: o menor valor entre o expiresAt real devolvido pela
+// Lalamove e cotadoEm + 30 minutos — nunca a cotação fica válida por mais
+// tempo que isso, mesmo que a Lalamove informe um expiresAt maior. Sem
+// cotadoEm registrado (nunca deveria acontecer numa cotação real — ver
+// etapaCalculoFrete, que sempre grava), trata como vencida por segurança:
+// nunca gera pagamento sobre uma cotação que não se sabe quando foi feita.
+const VALIDADE_MAXIMA_COTACAO_MS = 30 * 60_000
+
+function cotacaoValidaAteMs(detalhes: FreteDetalhes | undefined): number | null {
+  if (!detalhes?.cotadoEm) return null
+  const cotadoEmMs = new Date(detalhes.cotadoEm).getTime()
+  const limiteMs = cotadoEmMs + VALIDADE_MAXIMA_COTACAO_MS
+  if (!detalhes.expiresAt) return limiteMs
+  const expiresAtMs = new Date(detalhes.expiresAt).getTime()
+  return Math.min(limiteMs, expiresAtMs)
+}
+
+/** true quando a cotação real de frete já venceu (ou nunca foi registrada) — nunca gera link de pagamento nesse caso (Parte 4). */
+export function cotacaoFreteVencida(detalhes: FreteDetalhes | undefined, agora: Date): boolean {
+  const validaAteMs = cotacaoValidaAteMs(detalhes)
+  if (validaAteMs == null) return true
+  return agora.getTime() >= validaAteMs
 }
 
 // ── Etapa 6 — Resumo do pedido ────────────────────────────────────────────
@@ -1573,7 +1692,15 @@ function etapaFormulario(estado: EstadoConversa, mensagemCliente: string): Resul
   return { estado: novoEstado, mensagem: montarResumoFormulario(formularioNormalizado) }
 }
 
-async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil, foraDoHorario: boolean, agora: Date): Promise<ResultadoEtapa> {
+  // Nunca cota (nem recota) fora do horário comercial (Parte 4/5) — a
+  // cotação real da Lalamove fica pro próximo horário comercial; a conversa
+  // continua normalmente, sem transferir pra humano só por isso. Fica em
+  // 'confirmando_formulario' pra uma mensagem nova do cliente (dentro do
+  // horário) refazer a tentativa automaticamente — nunca dispara sozinha.
+  if (foraDoHorario) {
+    return { estado: { ...estado, fase: 'confirmando_formulario' }, mensagem: mensagemCotacaoForaDoHorario() }
+  }
   const cep = estado.dados.endereco?.cep ?? estado.dados.formulario?.cep
   if (!cep) {
     return { estado: transferirParaHumano(estado, 'CEP ausente ao tentar calcular frete'), mensagem: mensagemTransferencia() }
@@ -1597,7 +1724,16 @@ async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil
   const valorFrete = resultado.valor ?? 0
   const subtotal = precoProduto * quantidade
   const valorTotal = subtotal + valorFrete
-  let dados: DadosPedido = { ...estado.dados, valorFrete, valorTotal, freteDetalhes: resultado.detalhes }
+  // cotadoEm é a fonte da validade da cotação (Parte 4, ver
+  // cotacaoFreteVencida) — sempre gravado aqui quando há detalhes reais,
+  // mesmo que o provedor não devolva o campo, pra nunca ficar sem saber
+  // quando a cotação foi feita. Sem detalhes (nunca deveria acontecer numa
+  // cotação real bem-sucedida), freteDetalhes fica undefined como antes —
+  // cotacaoFreteVencida já trata ausência de cotadoEm como vencida.
+  const freteDetalhes: FreteDetalhes | undefined = resultado.detalhes
+    ? { ...resultado.detalhes, cotadoEm: resultado.detalhes.cotadoEm ?? agora.toISOString() }
+    : undefined
+  let dados: DadosPedido = { ...estado.dados, valorFrete, valorTotal, freteDetalhes }
   // Calcula (uma única vez) a janela de entrega já corrigida pro horário de
   // funcionamento + lead time operacional — GO-LIVE Parte 4 "nunca prometer
   // uma janela impossível". Só quando a data já foi tipada (sempre o caso
@@ -1644,13 +1780,22 @@ function montarMensagemAprovacaoFrete(dados: DadosPedido): string {
 }
 
 /** Coleta a confirmação dos dados do formulário — nunca cota frete antes disso (Parte 3.3/3.4). Cliente pode corrigir um campo em vez de confirmar; nunca perde os dados já certos. */
-async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, foraDoHorario: boolean, agora: Date): Promise<ResultadoEtapa> {
   if (!pareceConfirmacao(mensagemCliente)) {
     const correcao = extrairFormularioEntrega(mensagemCliente)
     if (Object.keys(correcao).length > 0) {
       const formularioAtualizado = { ...(estado.dados.formulario ?? {}), ...correcao }
+      // Corrigir qualquer campo do formulário invalida uma cotação anterior
+      // (Parte 4: "mudança de endereço invalida a cotação") — nunca deixa
+      // uma cotação de um endereço/data diferente sobreviver pra aprovação.
+      const dadosSemCotacaoAntiga: DadosPedido = {
+        ...estado.dados,
+        formulario: formularioAtualizado,
+        valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined,
+        entregaPrometidaEmISO: undefined, despachoEmISO: undefined, entregaImediata: undefined,
+      }
       return {
-        estado: { ...estado, dados: { ...estado.dados, formulario: formularioAtualizado } },
+        estado: { ...estado, dados: dadosSemCotacaoAntiga },
         mensagem: montarResumoFormulario(formularioAtualizado),
       }
     }
@@ -1681,10 +1826,22 @@ async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemClient
     dataEntregaSolicitada: dataParseada!,
     periodoEntrega: normalizarPeriodoEntregaTexto(estado.dados.formulario.periodo),
   }
-  return etapaCalculoFrete({ ...estadoSincronizado, dados: dadosComDataTipada, fase: 'calculando_frete' }, deps)
+  return etapaCalculoFrete({ ...estadoSincronizado, dados: dadosComDataTipada, fase: 'calculando_frete' }, deps, foraDoHorario, agora)
 }
 
-async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, foraDoHorario: boolean, agora: Date): Promise<ResultadoEtapa> {
+  // Cotação vencida nunca pode gerar pagamento (Parte 4) — checado antes de
+  // interpretar a resposta do cliente, pra nunca aprovar um total calculado
+  // sobre uma cotação já vencida. Dentro do horário, recota e apresenta o
+  // total atualizado; fora do horário, informa que a nova cotação fica pro
+  // próximo horário comercial (nunca cota nem cria corrida fora dele).
+  if (cotacaoFreteVencida(estado.dados.freteDetalhes, agora)) {
+    if (foraDoHorario) {
+      return { estado: { ...estado, fase: 'confirmando_formulario' }, mensagem: mensagemCotacaoForaDoHorario() }
+    }
+    return etapaCalculoFrete({ ...estado, fase: 'calculando_frete' }, deps, foraDoHorario, agora)
+  }
+
   if (!pareceConfirmacao(mensagemCliente)) {
     return { estado, mensagem: `Sem problemas — me avisa quando quiser seguir.\n\n${montarMensagemAprovacaoFrete(estado.dados)}` }
   }
@@ -1803,6 +1960,9 @@ export function estadoComPedidoInconsistente(estado: EstadoConversa): boolean {
  *   fonte única do horário) — funil.ts nunca calcula hora sozinho (zero imports).
  * @param proximoHorarioTexto Texto pronto ("amanhã (terça-feira), a partir das
  *   9h") pra ajustar "hoje" quando a jornada foi aceita fora do horário (Parte 4).
+ * @param agora Instante atual — injetável só pra testes determinísticos (Parte
+ *   3/4: retomada após intervalo e validade da cotação); em produção sempre o
+ *   padrão (agora real).
  */
 export async function avancarFunil(
   estadoRecebido: EstadoConversa,
@@ -1811,8 +1971,35 @@ export async function avancarFunil(
   deps: DependenciasFunil,
   foraDoHorario = false,
   proximoHorarioTexto?: string,
+  agora: Date = new Date(),
 ): Promise<ResultadoEtapa> {
   let estado: EstadoConversa = { ...estadoRecebido, dados: extrairDadosQualificacao(mensagemCliente, estadoRecebido.dados) }
+
+  // Gate de retomada após intervalo sem interação (Parte 3): verificado
+  // antes de qualquer outro gate. Nunca dispara sozinho — só quando chega
+  // esta mensagem nova. "nova compra" segue pro reinício normal de jornada
+  // logo abaixo (estadoComPedidoInconsistente/pareceNovaIntencaoDeCompra
+  // nunca disparam aqui pois a fase é 'retomada_apos_intervalo').
+  if (estado.fase === 'retomada_apos_intervalo') {
+    const resolucao = resolverRetomadaAposIntervalo(estado, mensagemCliente, agora)
+    if (resolucao) return resolucao
+    estado = reiniciarJornada(mensagemCliente)
+    intencao = classificarIntencao(mensagemCliente, estado.fase)
+  } else if (deveGatilharRetomadaAposIntervalo(estado, agora)) {
+    return {
+      estado: {
+        ...estado,
+        fase: 'retomada_apos_intervalo',
+        dados: { ...estado.dados, faseAntesDoIntervalo: estado.fase, ultimaInteracaoEm: agora.toISOString() },
+      },
+      mensagem: mensagemRetomadaAposIntervalo(),
+    }
+  }
+  // Marca esta mensagem como a última interação real — sempre, em qualquer
+  // caminho que chegue até aqui (nunca só num dos ramos acima), pra o gate
+  // de intervalo continuar funcionando em mensagens futuras desta mesma
+  // conversa (Parte 3).
+  estado = { ...estado, dados: { ...estado.dados, ultimaInteracaoEm: agora.toISOString() } }
 
   // Gate de horário (Parte 4): só é resolvido respondendo sim/continuar —
   // nunca avança sozinho, nunca repete o aviso completo de novo (só um
@@ -1926,7 +2113,7 @@ export async function avancarFunil(
       ...estado,
       dados: { ...estado.dados, endereco: { ...(estado.dados.endereco ?? { cep: '' }), cep: cepConhecido } },
     }
-    return etapaCalculoFrete(estadoComCep, deps)
+    return etapaCalculoFrete(estadoComCep, deps, foraDoHorario, agora)
   }
 
   // Pergunta direta de forma de pagamento: responde com o que está
@@ -1970,11 +2157,11 @@ export async function avancarFunil(
     case 'aguardando_formulario':
       return etapaFormulario(estado, mensagemCliente)
     case 'confirmando_formulario':
-      return etapaConfirmandoFormulario(estado, mensagemCliente, deps)
+      return etapaConfirmandoFormulario(estado, mensagemCliente, deps, foraDoHorario, agora)
     case 'calculando_frete':
-      return etapaCalculoFrete(estado, deps)
+      return etapaCalculoFrete(estado, deps, foraDoHorario, agora)
     case 'aguardando_aprovacao_frete':
-      return etapaAguardandoAprovacaoFrete(estado, mensagemCliente, deps)
+      return etapaAguardandoAprovacaoFrete(estado, mensagemCliente, deps, foraDoHorario, agora)
     // Fases antigas (fluxo campo-a-campo, substituído pelo formulário único
     // — Parte 2/3): nunca travam uma conversa que ainda esteja numa delas,
     // sempre reencaminham pro novo fluxo. 'aguardando_endereco'/
@@ -1991,7 +2178,7 @@ export async function avancarFunil(
       }
     case 'aguardando_confirmacao':
       if (estado.dados.valorFrete != null && estado.dados.freteDetalhes) {
-        return etapaAguardandoAprovacaoFrete({ ...estado, fase: 'aguardando_aprovacao_frete' }, mensagemCliente, deps)
+        return etapaAguardandoAprovacaoFrete({ ...estado, fase: 'aguardando_aprovacao_frete' }, mensagemCliente, deps, foraDoHorario, agora)
       }
       return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA }
     case 'aguardando_pagamento':
@@ -2009,13 +2196,34 @@ export async function avancarFunil(
  * Pago — integração real fora do escopo deste módulo, ver
  * docs/DEPLOYMENT.md). Nunca deve ser chamado a partir de uma mensagem do
  * cliente — só um provedor de pagamento real pode confirmar.
+ *
+ * @param foraDoHorario Calculado pelo chamador no instante real da
+ *   confirmação (ver _shared/horario-comercial.ts) — Parte 5: pagamento
+ *   confirmado fora do horário nunca cria corrida imediata, mesmo que a
+ *   cotação/aprovação tenha acontecido dentro do horário; a preparação e a
+ *   logística ficam agendadas pro horário comercial do próximo dia, mesmo
+ *   quando o pagamento acontece antes da abertura.
+ * @param proximaAberturaComercialISO Instante ISO da próxima abertura,
+ *   calculado pelo chamador — só usado quando foraDoHorario é true.
  */
 export async function processarConfirmacaoPagamento(
   estado: EstadoConversa,
   paymentIdConfirmadoPeloProvedor: string,
   criar: CriadorPedido,
+  foraDoHorario = false,
+  proximaAberturaComercialISO?: string,
 ): Promise<ResultadoEtapa> {
-  const confirmado = confirmarPagamento(estado, paymentIdConfirmadoPeloProvedor)
+  let confirmado = confirmarPagamento(estado, paymentIdConfirmadoPeloProvedor)
+  if (foraDoHorario) {
+    confirmado = {
+      ...confirmado,
+      dados: {
+        ...confirmado.dados,
+        entregaImediata: false,
+        ...(proximaAberturaComercialISO ? { despachoEmISO: proximaAberturaComercialISO } : {}),
+      },
+    }
+  }
   const finalizado = await criarPedidoEtapa(confirmado, criar)
-  return { estado: finalizado, mensagem: mensagemFinalizacao() }
+  return { estado: finalizado, mensagem: foraDoHorario ? mensagemPagamentoConfirmadoForaDoHorario() : mensagemFinalizacao() }
 }

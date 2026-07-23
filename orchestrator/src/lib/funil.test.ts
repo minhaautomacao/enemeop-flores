@@ -45,6 +45,15 @@ import {
   dataEntregaValida,
   dataCalendarioParaISO,
   normalizarPeriodoEntregaTexto,
+  mensagemRetomadaAposIntervalo,
+  deveGatilharRetomadaAposIntervalo,
+  cotacaoFreteVencida,
+  mensagemCotacaoForaDoHorario,
+  mensagemAvisoForaDoHorarioComOpcao,
+  mensagemPagamentoConfirmadoForaDoHorario,
+  querCartaoImpresso,
+  camposFaltandoFormulario,
+  montarMensagemCamposFaltando,
 } from './funil.js'
 
 // 1. cliente pede buquê para aniversário
@@ -630,7 +639,9 @@ function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
     buscarCategorias: async () => [],
     buscarProdutosPorCategoria: async () => [],
     revalidarProduto: async () => ({ disponivel: true }),
-    calcularFrete: async () => ({ ok: true, valor: 22.5 }),
+    // detalhes: {} garante que etapaCalculoFrete grava cotadoEm (cotação real
+    // sempre traz detalhes reais em produção — ver cotacaoFreteVencida/Parte 4).
+    calcularFrete: async () => ({ ok: true, valor: 22.5, detalhes: {} }),
     // Fake determinístico e simples (não precisa reproduzir a lógica real de
     // horário comercial de _shared/agendamento-entrega.ts, usada só pelas
     // Edge Functions Deno) — só devolve datas ISO válidas e coerentes pra
@@ -743,6 +754,7 @@ test('dispatcher: nao confirma resumo com resposta ambigua/negativa', async () =
       produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' },
       valorFrete: 22.5,
       valorTotal: 162.5,
+      freteDetalhes: { cotadoEm: new Date().toISOString() },
       formulario: formularioFixture(),
     },
     perguntasFeitas: [],
@@ -783,6 +795,7 @@ test('dispatcher: falha ao gerar pagamento -> transfere para humano', async () =
       produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' },
       valorFrete: 22.5,
       valorTotal: 162.5,
+      freteDetalhes: { cotadoEm: new Date().toISOString() },
       formulario: formularioFixture(),
     },
     perguntasFeitas: [],
@@ -972,7 +985,7 @@ test('regressão completa 2026-07-17: qualificação -> 2 opções com fotos cor
   ]
   const deps = depsFake({
     buscarCatalogo: async () => CATALOGO_2,
-    calcularFrete: async () => ({ ok: true, valor: 18 }),
+    calcularFrete: async () => ({ ok: true, valor: 18, detalhes: {} }),
     buscarFormasPagamento: async () => ['Pix', 'cartão de crédito'],
     gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
     criarPedido: async () => ({ pedidoId: 'pedido_regressao_001' }),
@@ -1152,7 +1165,7 @@ test('revalidação antes do pedido: produto que saiu de disponibilidade nunca c
   })
   const estado: EstadoConversa = {
     fase: 'aguardando_aprovacao_frete',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, formulario: formularioFixture() },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, freteDetalhes: { cotadoEm: new Date().toISOString() }, formulario: formularioFixture() },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1170,7 +1183,7 @@ test('revalidação antes do pedido: preço mudou -> avisa o novo total e não c
   })
   const estado: EstadoConversa = {
     fase: 'aguardando_aprovacao_frete',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, formulario: formularioFixture() },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, freteDetalhes: { cotadoEm: new Date().toISOString() }, formulario: formularioFixture() },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1184,7 +1197,7 @@ test('revalidação antes do pedido: preço e disponibilidade confirmados na fon
   const deps = depsFake({ revalidarProduto: async () => ({ disponivel: true, preco: 140 }) })
   const estado: EstadoConversa = {
     fase: 'aguardando_aprovacao_frete',
-    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, formulario: formularioFixture() },
+    dados: { produto: { nome: 'Buquê X', preco: 140, codigo: '032', idExterno: '999', quantidade: 1, dataEntrega: 'hoje' }, valorTotal: 162.5, valorFrete: 22.5, freteDetalhes: { cotadoEm: new Date().toISOString() }, formulario: formularioFixture() },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim, confirmo', 'compra_produto', deps)
@@ -1198,7 +1211,7 @@ test('continuidade completa: categoria -> produto por código -> quantidade/data
     buscarCategorias: async () => categorias,
     buscarProdutosPorCategoria: async () => CATALOGO_ANIVERSARIO,
     revalidarProduto: async () => ({ disponivel: true, preco: 105 }),
-    calcularFrete: async () => ({ ok: true, valor: 18 }),
+    calcularFrete: async () => ({ ok: true, valor: 18, detalhes: {} }),
     criarPedido: async () => ({ pedidoId: 'pedido_catalogo_dinamico_001' }),
   })
   let estado: EstadoConversa = { fase: 'escolha_categoria', dados: { categoriasApresentadas: ['10'] }, perguntasFeitas: [] }
@@ -1243,7 +1256,7 @@ test('revalidação antes do pedido chama revalidarProduto com o ID técnico (id
     fase: 'aguardando_aprovacao_frete',
     dados: {
       produto: { nome: '002 - Arranjo A', preco: 105, codigo: '002', idExterno: '100', quantidade: 1, dataEntrega: 'hoje' },
-      valorTotal: 127.5, valorFrete: 22.5, formulario: formularioFixture(),
+      valorTotal: 127.5, valorFrete: 22.5, freteDetalhes: { cotadoEm: new Date().toISOString() }, formulario: formularioFixture(),
     },
     perguntasFeitas: [],
   }
@@ -1400,7 +1413,7 @@ test('21. endereço incompleto bloqueia a confirmação/pagamento — nunca gera
     fase: 'aguardando_aprovacao_frete',
     dados: {
       produto: { nome: 'Arranjo 2 Rosas', preco: 105, quantidade: 1, dataEntrega: 'hoje' },
-      valorFrete: 40.13, valorTotal: 145.13,
+      valorFrete: 40.13, valorTotal: 145.13, freteDetalhes: { cotadoEm: new Date().toISOString() },
       formulario: formularioFixture({ rua: undefined, numero: undefined, bairro: undefined, cidade: undefined }), // endereço incompleto
     },
     perguntasFeitas: [],
@@ -1416,7 +1429,7 @@ test('22. confirmação sem destinatário bloqueia o pagamento', async () => {
     fase: 'aguardando_aprovacao_frete',
     dados: {
       produto: { nome: 'Arranjo 2 Rosas', preco: 105, quantidade: 1, dataEntrega: 'hoje' },
-      valorFrete: 40.13, valorTotal: 145.13,
+      valorFrete: 40.13, valorTotal: 145.13, freteDetalhes: { cotadoEm: new Date().toISOString() },
       formulario: formularioFixture({ nomeDestinatario: undefined }), // sem nomeDestinatario
     },
     perguntasFeitas: [],
@@ -1431,7 +1444,7 @@ test('23. dados completos (produto, quantidade, data, frete, destinatário, ende
     fase: 'aguardando_aprovacao_frete',
     dados: {
       produto: { nome: 'Arranjo 2 Rosas', preco: 105, quantidade: 1, dataEntrega: 'hoje', idExterno: '3656' },
-      valorFrete: 40.13, valorTotal: 145.13,
+      valorFrete: 40.13, valorTotal: 145.13, freteDetalhes: { cotadoEm: new Date().toISOString() },
       formulario: formularioFixture({ cep: '01040-010', rua: 'Rua X', numero: '10', bairro: 'Centro', cidade: 'São Paulo', nomeDestinatario: 'Camila', telefoneDestinatario: '+5511999990000' }),
     },
     perguntasFeitas: [],
@@ -1517,7 +1530,7 @@ test('Parte 4: fora do horário mostra o aviso com opt-in na primeira mensagem, 
   const deps = depsFake()
   const r = await avancarFunil(estadoInicial(), 'Quero um buquê para hoje', 'recomendacao', deps, true, 'amanhã (terça-feira), a partir das 09h')
   assert.equal(r.estado.fase, 'aviso_fora_horario')
-  assert.match(r.mensagem, /fora do hor[aá]rio de atendimento/i)
+  assert.match(r.mensagem, /fora do hor[aá]rio da loja/i)
   assert.match(r.mensagem, /Deseja continuar\?/)
 })
 
@@ -1721,4 +1734,197 @@ test('Parte 7: ponta a ponta mockado — produto WooCommerce -> formulário -> c
   // real após consultar a API) avança pra pedido_criado (produção).
   const rPago = await processarConfirmacaoPagamento(estado, estado.dados.paymentId!, deps.criarPedido)
   assert.equal(rPago.estado.fase, 'pedido_criado')
+})
+
+// ── Parte 3 — retomada após intervalo sem interação ───────────────────────
+
+test('retomada apos intervalo 1: mais de 1h sem interacao com compra em andamento pergunta se continua ou inicia nova compra; ate 1h segue normalmente', async () => {
+  const deps = depsFake()
+  const agora = new Date('2026-07-21T15:00:00Z')
+  const maisDeUmaHoraAtras = new Date(agora.getTime() - 61 * 60_000).toISOString()
+  const ateUmaHoraAtras = new Date(agora.getTime() - 59 * 60_000).toISOString()
+  const estadoBase: EstadoConversa = {
+    fase: 'aguardando_formulario',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' } },
+    perguntasFeitas: [],
+  }
+
+  const rMaisDeUmaHora = await avancarFunil(
+    { ...estadoBase, dados: { ...estadoBase.dados, ultimaInteracaoEm: maisDeUmaHoraAtras } },
+    'Oi, ainda quero o buquê',
+    'compra_produto',
+    deps, false, undefined, agora,
+  )
+  assert.equal(rMaisDeUmaHora.estado.fase, 'retomada_apos_intervalo')
+  assert.equal(rMaisDeUmaHora.mensagem, mensagemRetomadaAposIntervalo())
+  assert.equal(rMaisDeUmaHora.estado.dados.faseAntesDoIntervalo, 'aguardando_formulario')
+  assert.equal(rMaisDeUmaHora.estado.dados.produto?.nome, 'Buquê de Rosas', 'nunca perde os dados enquanto aguarda a resposta')
+
+  const rAteUmaHora = await avancarFunil(
+    { ...estadoBase, dados: { ...estadoBase.dados, ultimaInteracaoEm: ateUmaHoraAtras } },
+    'coloquei os dados certinho',
+    'compra_produto',
+    deps, false, undefined, agora,
+  )
+  assert.notEqual(rAteUmaHora.estado.fase, 'retomada_apos_intervalo', 'até 1h sem interação, segue normalmente')
+
+  assert.equal(deveGatilharRetomadaAposIntervalo({ fase: 'aguardando_formulario', dados: {}, perguntasFeitas: [] }, agora), false, 'sem ultimaInteracaoEm registrada nunca dispara')
+  assert.equal(deveGatilharRetomadaAposIntervalo({ fase: 'recomendacao', dados: { ultimaInteracaoEm: maisDeUmaHoraAtras }, perguntasFeitas: [] }, agora), false, 'fora de uma compra em andamento nunca dispara')
+})
+
+test('retomada apos intervalo 2: "continuar" restaura a fase e os dados salvos; "nova compra" reinicia sem reaproveitar produto/endereço/frete', async () => {
+  const deps = depsFake()
+  const estadoAguardando: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      valorFrete: 22.5, valorTotal: 162.5,
+      freteDetalhes: { cotadoEm: new Date().toISOString() },
+      faseAntesDoIntervalo: 'aguardando_aprovacao_frete',
+    },
+    perguntasFeitas: [],
+  }
+
+  const rContinuar = await avancarFunil(estadoAguardando, 'quero continuar o pedido anterior', 'compra_produto', deps)
+  assert.equal(rContinuar.estado.fase, 'aguardando_aprovacao_frete', 'restaura exatamente a fase salva')
+  assert.equal(rContinuar.estado.dados.produto?.nome, 'Buquê de Rosas', 'recupera o contexto real, nunca reinventa')
+  assert.equal(rContinuar.estado.dados.faseAntesDoIntervalo, undefined)
+  assert.match(rContinuar.mensagem, /Buquê de Rosas/)
+
+  const rNovaCompra = await avancarFunil(estadoAguardando, 'quero iniciar uma nova compra', 'compra_produto', deps)
+  assert.notEqual(rNovaCompra.estado.fase, 'aguardando_aprovacao_frete')
+  assert.equal(rNovaCompra.estado.dados.produto, undefined, 'nunca reaproveita produto da jornada anterior')
+  assert.equal(rNovaCompra.estado.dados.valorFrete, undefined, 'nunca reaproveita frete da jornada anterior')
+  assert.equal(rNovaCompra.estado.dados.freteDetalhes, undefined, 'nunca reaproveita cotação da jornada anterior')
+
+  const rAmbiguo = await avancarFunil(estadoAguardando, 'hein?', 'compra_produto', deps)
+  assert.equal(rAmbiguo.estado.fase, 'retomada_apos_intervalo', 'resposta que não escolhe nenhuma opção repete a pergunta, nunca avança sozinho')
+  assert.equal(rAmbiguo.mensagem, mensagemRetomadaAposIntervalo())
+})
+
+// ── Parte 4 — validade da cotação real de frete ───────────────────────────
+
+test('cotacao 29 minutos ainda valida, 30 minutos ja vencida — nunca gera pagamento sobre cotação vencida', async () => {
+  const cotadoEm = new Date('2026-07-21T15:00:00Z')
+  const detalhes = { cotadoEm: cotadoEm.toISOString() }
+
+  assert.equal(cotacaoFreteVencida(detalhes, new Date(cotadoEm.getTime() + 29 * 60_000)), false, '29 minutos ainda dentro da validade')
+  assert.equal(cotacaoFreteVencida(detalhes, new Date(cotadoEm.getTime() + 30 * 60_000)), true, '30 minutos já vencida')
+  assert.equal(cotacaoFreteVencida(undefined, cotadoEm), true, 'sem cotação real registrada, trata como vencida')
+
+  // expiresAt real da Lalamove menor que 30min prevalece (menor dos dois valores).
+  const detalhesExpiraCedo = { cotadoEm: cotadoEm.toISOString(), expiresAt: new Date(cotadoEm.getTime() + 10 * 60_000).toISOString() }
+  assert.equal(cotacaoFreteVencida(detalhesExpiraCedo, new Date(cotadoEm.getTime() + 15 * 60_000)), true, 'expiresAt da Lalamove vence antes dos 30 minutos e prevalece')
+
+  // Fim a fim: cotação vencida em aguardando_aprovacao_frete nunca aprova o total antigo — recota e pede aprovação de novo.
+  const deps = depsFake({ calcularFrete: async () => ({ ok: true, valor: 30, detalhes: {} }) })
+  const estadoVencido: EstadoConversa = {
+    fase: 'aguardando_aprovacao_frete',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'hoje' },
+      valorFrete: 22.5, valorTotal: 162.5,
+      freteDetalhes: { cotadoEm: new Date(Date.now() - 31 * 60_000).toISOString() },
+      formulario: formularioFixture(),
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estadoVencido, 'sim, confirmo', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_aprovacao_frete', 'recota e volta a pedir aprovação, nunca gera pagamento direto')
+  assert.equal(r.estado.dados.valorFrete, 30, 'novo valor cotado, nunca o total antigo vencido')
+  assert.equal(r.estado.dados.pedidoId, undefined, 'nunca gera pedido/pagamento sobre a cotação vencida')
+})
+
+// ── Parte 4/5 — cotação e pagamento fora do horário comercial ────────────
+
+test('cotacao fora do horario: nunca cota nem cria corrida, avisa que a cotação fica pro próximo horário comercial', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' }, formulario: formularioFixture() },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim', 'compra_produto', deps, true)
+  assert.equal(r.estado.fase, 'confirmando_formulario', 'conversa continua, nunca trava nem transfere pra humano só por isso')
+  assert.equal(r.estado.dados.valorFrete, undefined, 'nunca cota fora do horário')
+  assert.equal(r.mensagem, mensagemCotacaoForaDoHorario())
+
+  // Aviso inicial (Parte 4) usa o texto exato definido, sem citar horários fixos.
+  assert.match(mensagemAvisoForaDoHorarioComOpcao(), /fora do hor[aá]rio da loja/i)
+  assert.match(mensagemAvisoForaDoHorarioComOpcao(), /Deseja continuar\?/)
+})
+
+test('pagamento confirmado fora do horario: nunca cria corrida imediata, agenda para o horário comercial do próximo dia', async () => {
+  const proximaAbertura = '2026-07-22T12:00:00.000Z' // 09h BRT do próximo dia útil
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      paymentId: 'pay_real_fora_horario',
+      valorTotal: 162.5,
+      entregaImediata: true, // cotado dentro do horário, mas o pagamento só confirma depois de fechar
+      despachoEmISO: '2026-07-21T13:00:00.000Z',
+    },
+    perguntasFeitas: [],
+  }
+  const criar = async () => ({ pedidoId: 'pedido_fora_horario_001' })
+
+  const r = await processarConfirmacaoPagamento(estado, 'pay_real_fora_horario', criar, true, proximaAbertura)
+  assert.equal(r.estado.fase, 'pedido_criado')
+  assert.equal(r.estado.dados.entregaImediata, false, 'nunca cria corrida imediata fora do horário, mesmo cotada como imediata antes')
+  assert.equal(r.estado.dados.despachoEmISO, proximaAbertura, 'despacho agendado pro próximo horário comercial')
+  assert.equal(r.mensagem, mensagemPagamentoConfirmadoForaDoHorario())
+
+  // Dentro do horário, comportamento de sempre (mensagem padrão, sem forçar agendamento).
+  const rDentroDoHorario = await processarConfirmacaoPagamento(
+    { ...estado, dados: { ...estado.dados, paymentId: 'pay_real_dentro_horario' } },
+    'pay_real_dentro_horario', criar,
+  )
+  assert.equal(rDentroDoHorario.mensagem, mensagemFinalizacao())
+  assert.equal(rDentroDoHorario.estado.dados.entregaImediata, true, 'dentro do horário nunca sobrescreve o agendamento já calculado na cotação')
+})
+
+// ── Parte 2 — formulário único (novo texto) e cartão impresso condicional ──
+
+test('formulario unico: pede so o campo isolado que falta, nunca reenvia o formulario completo', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = { fase: 'aguardando_formulario', dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' } }, perguntasFeitas: [] }
+
+  // Envia tudo no formato novo (Remetente/Destinatário/Rua e número/...), exceto o telefone do destinatário.
+  const respostaSemTelefone = [
+    'Remetente: Ana',
+    'Destinatário: Camila',
+    'Rua e número: Rua das Flores',
+    'Número: 123',
+    'Bairro: Ipiranga',
+    'CEP: 04204-030',
+    'Data de entrega: amanhã',
+  ].join('\n')
+  const r = await avancarFunil(estado, respostaSemTelefone, 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_formulario')
+  assert.match(r.mensagem, /telefone do destinat[áa]rio/i, 'único campo obrigatório que ainda falta')
+  assert.doesNotMatch(r.mensagem, /Remetente:/i, 'nunca reenvia o formulário completo, só o campo isolado que falta')
+  assert.equal(r.estado.dados.formulario?.rua, 'Rua das Flores', '"Rua e número" reconhecido como alias do campo rua')
+  assert.equal(r.estado.dados.formulario?.numero, '123')
+
+  // Cidade/UF nunca são pedidas — não aparecem nem no texto inicial nem como pendência.
+  assert.doesNotMatch(TEXTO_FORMULARIO_ENTREGA, /\bcidade\b/i)
+  assert.doesNotMatch(TEXTO_FORMULARIO_ENTREGA, /\bUF\b/)
+})
+
+test('formulario unico: cartão impresso é opcional; mensagem só é obrigatória quando o cliente confirma que quer cartão', async () => {
+  assert.equal(querCartaoImpresso({}), false, 'ausência de resposta nunca bloqueia — equivale a não')
+  assert.equal(querCartaoImpresso({ querCartaoImpresso: 'não' }), false)
+  assert.equal(querCartaoImpresso({ querCartaoImpresso: 'sim' }), true)
+
+  assert.deepEqual(camposFaltandoFormulario(formularioFixture()), [], 'formulário completo sem cartão nunca exige mensagem')
+  assert.deepEqual(
+    camposFaltandoFormulario(formularioFixture({ querCartaoImpresso: 'sim' })),
+    ['mensagemCartao'],
+    'confirmou que quer cartão sem informar a mensagem -> só esse campo fica faltando',
+  )
+  assert.deepEqual(
+    camposFaltandoFormulario(formularioFixture({ querCartaoImpresso: 'sim', mensagemCartao: 'Com carinho, Ana' })),
+    [],
+  )
+  assert.match(montarMensagemCamposFaltando(['mensagemCartao']), /mensagem para o cart[ãa]o/i)
 })

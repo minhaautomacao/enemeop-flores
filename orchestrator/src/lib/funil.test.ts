@@ -2063,3 +2063,79 @@ test('6. dados já fornecidos nunca são pedidos de novo ao longo das duas etapa
   const r3 = await avancarFunil(r2.estado, 'Data de entrega: amanhã', 'compra_produto', deps)
   assert.equal(r3.estado.fase, 'confirmando_formulario', 'formulário completo -> segue direto pra confirmação/cotação, sem reenviar nada')
 })
+
+// ── Telefone do destinatário — resposta isolada, sem o rótulo "Telefone:" ─
+//
+// Bug real: quando a Flora pedia o telefone e o cliente respondia só com o
+// número (sem "Telefone:"), extrairFormularioEntrega nunca reconhecia (só
+// entende linhas "Rótulo: valor") e a pergunta repetia em loop. Números
+// sintéticos abaixo (nunca o número real usado no teste).
+
+test('1. resposta isolada com parênteses e hífen é reconhecida como telefone', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, '(11) 91234-5678', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+})
+
+test('2. resposta isolada só com dígitos é reconhecida como telefone', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, '11912345678', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+})
+
+test('3. resposta isolada com prefixo +55 é reconhecida como telefone', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, '+55 11 91234-5678', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+})
+
+test('4. formato rotulado "Telefone:" continua funcionando normalmente', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, 'Telefone: 11 91234-5678', 'compra_produto', deps)
+  assert.doesNotMatch(r.mensagem, /telefone/i, 'telefone reconhecido via rótulo — nunca pede de novo')
+  assert.match(r.mensagem, /CEP/i, 'avança pro próximo campo faltante')
+})
+
+test('5. telefone isolado é normalizado em E.164 e, com o resto do formulário completo, segue direto pra confirmação', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({
+    nomeComprador: 'Ana', nomeDestinatario: 'Camila',
+    cep: '04204-030', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', dataEntrega: 'amanhã',
+  })
+  const r = await avancarFunil(estado, '(11) 91234-5678', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+  assert.equal(r.estado.fase, 'confirmando_formulario')
+})
+
+test('6. CEP de 8 dígitos isolado nunca é interpretado como telefone', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, '04204030', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, undefined, 'CEP de 8 dígitos nunca vira telefone')
+  assert.doesNotMatch(r.mensagem, /incompleto/i, 'nunca acusa erro de telefone pra um CEP')
+})
+
+test('7. telefone válido avança pro próximo campo faltante, sem repetir a pergunta de telefone', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, '(11) 91234-5678', 'compra_produto', deps)
+  assert.match(r.mensagem, /CEP/i, 'avança pro próximo campo faltante (CEP), nunca repete telefone')
+  assert.doesNotMatch(r.mensagem, /telefone/i)
+})
+
+test('8. telefone isolado incompleto é rejeitado com a mensagem correta, sem travar em loop', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, '11 9123-456', 'compra_produto', deps)
+  assert.equal(r.mensagem, 'O telefone parece incompleto. Pode enviar novamente com o DDD?')
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, undefined)
+
+  // Agora responde certo — nunca mais repete o erro nem a pergunta.
+  const r2 = await avancarFunil(r.estado, '(11) 91234-5678', 'compra_produto', deps)
+  assert.equal(r2.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+  assert.doesNotMatch(r2.mensagem, /incompleto/i)
+})

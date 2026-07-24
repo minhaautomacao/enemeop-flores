@@ -1641,6 +1641,25 @@ function sincronizarFormularioParaEndereco(estado: EstadoConversa): EstadoConver
   return { ...estado, dados: { ...estado.dados, endereco, produto, nomeComprador: f.nomeComprador } }
 }
 
+/**
+ * Interpreta uma resposta SEM rótulo ("Telefone: ...") como telefone do
+ * destinatário — usado só quando o campo ainda está faltando, pra
+ * reconhecer "(11) 91234-5678" isolado sem exigir o rótulo (bug real: sem
+ * isso a Flora nunca reconhecia a resposta e repetia a pergunta em loop).
+ * Nunca confunde um CEP de 8 dígitos com telefone. 'incompleto' só quando a
+ * contagem de dígitos está na faixa plausível de um telefone BR (com ou sem
+ * DDI) mas não fecha um número válido — nunca reage a uma mensagem
+ * claramente de outro tipo (nome, endereço, data).
+ */
+function interpretarTelefoneLivre(texto: string): { tipo: 'valido'; valor: string } | { tipo: 'incompleto' } | null {
+  const digitos = texto.replace(/\D/g, '')
+  if (digitos.length === 0 || digitos.length === 8) return null
+  const normalizado = normalizarTelefoneDestinatarioBR(texto)
+  if (normalizado) return { tipo: 'valido', valor: normalizado }
+  if (digitos.length >= 9 && digitos.length <= 13) return { tipo: 'incompleto' }
+  return null
+}
+
 /** Extrai "123" ou "123, apto 45" / "123 bloco B" de uma resposta livre (sem rótulos) à pergunta do número — usado só quando o CEP já foi resolvido em turno anterior e a mensagem atual não trouxe nenhum campo no formato "Rótulo: valor". Nunca inventa um número: mensagem que não começa com dígitos devolve null e o número continua sendo pedido. */
 function extrairNumeroComplementoLivre(texto: string): { numero: string; complemento?: string } | null {
   const m = texto.trim().match(/^(\d+[a-zA-Z]?)\s*[,.\-–]?\s*(.*)$/)
@@ -1684,6 +1703,21 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
     mensagem,
   })
 
+  // Telefone do destinatário ainda faltando: aceita uma resposta isolada
+  // (sem o rótulo "Telefone:"), não só o formato rotulado. Só tenta
+  // interpretar a mensagem inteira como telefone quando ela não trouxe
+  // NENHUM campo rotulado reconhecido — nunca confunde dígitos soltos de
+  // outros campos (CEP, número...) numa resposta rotulada de vários campos
+  // com um telefone isolado.
+  if (!formularioAtual.telefoneDestinatario && Object.keys(extraido).length === 0) {
+    const tentativaTelefone = interpretarTelefoneLivre(mensagemCliente)
+    if (tentativaTelefone?.tipo === 'valido') {
+      formularioAtual = { ...formularioAtual, telefoneDestinatario: tentativaTelefone.valor }
+    } else if (tentativaTelefone?.tipo === 'incompleto') {
+      return responder('O telefone parece incompleto. Pode enviar novamente com o DDD?')
+    }
+  }
+
   const cepInformadoInvalido = !!formularioAtual.cep && !cepValido(formularioAtual.cep)
   const telefoneInformadoInvalido = !!formularioAtual.telefoneDestinatario && !normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario)
 
@@ -1691,7 +1725,7 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
     return responder('O CEP informado não parece válido — pode confirmar (8 dígitos)?')
   }
   if (telefoneInformadoInvalido) {
-    return responder('O telefone de quem vai receber não ficou claro — pode informar de novo, com DDD?')
+    return responder('O telefone parece incompleto. Pode enviar novamente com o DDD?')
   }
 
   if (formularioAtual.cep && cepValido(formularioAtual.cep) && cepConsultadoViaApi !== formularioAtual.cep) {

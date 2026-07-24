@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento } from './logica.ts';
+import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento, mensagemPagamentoNaoAprovado } from './logica.ts';
 import { decidirProcessamentoEvento } from '../_shared/pagamento-evento-decisao.ts';
 
 test('mapearStatusPagamento: approved -> pago', () => {
@@ -175,4 +175,20 @@ test('4. evento repetido: decisao nunca reprocessa notificacao/handoff, e o agen
   const primeira = decidirAgendamentoPagamento(params, TERCA_20H_BRT);
   const segunda = decidirAgendamentoPagamento(params, TERCA_20H_BRT);
   assert.deepEqual(segunda, primeira, 'evento repetido nunca produz um agendamento diferente do primeiro');
+});
+
+// ── mensagemPagamentoNaoAprovado — aviso ao cliente em rejected/cancelled ─
+
+test('5. mensagemPagamentoNaoAprovado: com link, convida a tentar de novo pelo MESMO link (reaproveita a preference)', () => {
+  const link = 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=123-abc';
+  const texto = mensagemPagamentoNaoAprovado(link);
+  assert.match(texto, /não foi aprovado/);
+  assert.ok(texto.includes(link), 'reenvia o mesmo link em vez de pedir pra gerar um novo');
+  assert.doesNotMatch(texto, /recusa|insuficiente|bloqueado|suspeit/i, 'nunca atribui ao cliente um motivo que o Mercado Pago nao forneceu a nossa integracao');
+});
+
+test('6. mensagemPagamentoNaoAprovado: sem link persistido, oferece gerar um novo em vez de referenciar um link inexistente', () => {
+  const texto = mensagemPagamentoNaoAprovado(null);
+  assert.match(texto, /não foi aprovado/);
+  assert.doesNotMatch(texto, /https?:\/\//, 'nunca inclui uma URL quando nao ha link_pagamento persistido');
 });

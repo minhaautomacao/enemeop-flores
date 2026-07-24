@@ -34,7 +34,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { buscarPagamentoReal, validarAssinaturaWebhook } from '../_shared/mercadopago.ts';
 import { enviarWhatsApp } from '../_shared/whatsapp.ts';
-import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento } from './logica.ts';
+import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento, mensagemPagamentoNaoAprovado } from './logica.ts';
 import { processarLogisticaAposPagamento, SELECT_PEDIDO_PARA_LOGISTICA, type PedidoParaEntrega } from '../_shared/logistica-processamento.ts';
 import { decidirProcessamentoEvento, type EventoExistente } from '../_shared/pagamento-evento-decisao.ts';
 import { camposBRT } from '../_shared/horario-comercial.ts';
@@ -112,6 +112,7 @@ interface PedidoRow extends PedidoParaEntrega {
   data_entrega_solicitada: string | null; // AAAA-MM-DD, ver funil.ts dataCalendarioParaISO
   periodo_entrega: string | null;
   entrega_prometida_em: string | null;
+  link_pagamento: string | null;
 }
 
 type Db = ReturnType<typeof getDb>;
@@ -295,7 +296,7 @@ Deno.serve(async (req: Request) => {
   async function processarNotificacao(): Promise<Response> {
   const { data: pedido, error: pedidoError } = await db
     .from('pedidos')
-    .select(`canal, canal_id, cliente_telefone, valor, external_reference, data_entrega_solicitada, periodo_entrega, entrega_prometida_em, ${SELECT_PEDIDO_PARA_LOGISTICA}`)
+    .select(`canal, canal_id, cliente_telefone, valor, external_reference, data_entrega_solicitada, periodo_entrega, entrega_prometida_em, link_pagamento, ${SELECT_PEDIDO_PARA_LOGISTICA}`)
     .eq('external_reference', pagamento.externalReference)
     .maybeSingle();
 
@@ -463,8 +464,14 @@ Deno.serve(async (req: Request) => {
   }
 
   // pending/in_process/authorized/rejected/cancelled/refunded/charged_back
-  // — só atualiza o status do pedido, sem confirmação nem notificação (e
-  // sem tentar logistica, que só faz sentido para 'pago').
+  // — só atualiza o status do pedido (nunca toca status_producao nem tenta
+  // logistica, que só fazem sentido para 'pago'). rejected/cancelled são os
+  // únicos estados terminais negativos aqui (pending/in_process/authorized
+  // ainda podem virar 'pago'; refunded/charged_back só acontecem depois de
+  // uma aprovação anterior, fora do escopo desta notificação) — avisamos o
+  // cliente só pra esses dois, e só na primeira vez que o evento é
+  // processado (mesma trava de idempotência usada em todo o resto do
+  // handler, nunca reenvia a mesma notificação numa reentrega do MP).
   const { error: statusUpdateError } = await db.from('pedidos').update({ status: statusMapeado, mp_payment_id: paymentId }).eq('id', pedido.id);
   if (statusUpdateError) {
     console.error(`[webhook-mp] falha ao atualizar status do pedido para ${statusMapeado}: ${statusUpdateError.message} pedido=${pedido.id}`);
@@ -472,7 +479,12 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { status: 200 });
   }
   console.log(`[webhook-mp] pedido ${pedido.id} atualizado para status=${statusMapeado} (mp status=${pagamento.status})`);
-  if (decisaoEvento.acao === 'processar_completo') await marcarEventoOk();
+  if (decisaoEvento.acao === 'processar_completo') {
+    if (statusMapeado === 'pagamento_recusado' || statusMapeado === 'cancelado') {
+      await notificarCliente(pedido as PedidoRow, mensagemPagamentoNaoAprovado((pedido as PedidoRow).link_pagamento));
+    }
+    await marcarEventoOk();
+  }
   return new Response('ok', { status: 200 });
   }
 });

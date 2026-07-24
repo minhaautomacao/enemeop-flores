@@ -56,6 +56,23 @@ export function mapearStatusPagamento(statusMercadoPago: string): string | null 
 }
 
 /**
+ * Texto pro cliente quando o pagamento é definitivamente recusado ou
+ * cancelado (nunca chamado para pending/in_process/authorized, que ainda
+ * podem virar aprovados — ver STATUS_MAP acima). Nunca inventa um motivo que
+ * o Mercado Pago não forneceu à nossa integração — só informa o fato e
+ * convida a tentar de novo, reaproveitando o mesmo link (a preference
+ * continua válida pra uma nova tentativa — ver gerarOuReusarPreference em
+ * _shared/pedido-repositorio.ts, que nunca cria uma segunda cobrança
+ * enquanto mp_preference_id/link_pagamento já existirem no pedido).
+ */
+export function mensagemPagamentoNaoAprovado(linkPagamento: string | null): string {
+  const convite = linkPagamento
+    ? `Você pode tentar novamente pelo mesmo link: ${linkPagamento}\nSe preferir, tente outro cartão, Pix ou o meio de pagamento que você costuma usar em compras online.`
+    : 'Me chama por aqui que eu gero um novo link de pagamento pra você.';
+  return `Seu pagamento não foi aprovado. ${convite}`;
+}
+
+/**
  * Tolerância de 1 centavo pra arredondamento de ponto flutuante; qualquer
  * coisa acima disso é tratada como divergência real (pagamento não deve ser
  * confirmado automaticamente).

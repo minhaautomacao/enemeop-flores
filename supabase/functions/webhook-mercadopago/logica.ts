@@ -9,8 +9,31 @@
  * não quebra a testabilidade deste módulo com node:test/tsx.
  */
 
-import { dentroDoHorarioComercial, proximaAberturaComercial } from '../_shared/horario-comercial.ts';
+import { camposBRT, instanteDeBRT, dentroDoHorarioComercial, proximaAberturaComercial } from '../_shared/horario-comercial.ts';
 import { calcularAgendamentoEntrega, type PeriodoEntrega, type DataCalendario } from '../_shared/agendamento-entrega.ts';
+
+/** true quando `a` e `b` caem no mesmo dia de calendário em BRT. */
+function mesmoDiaBRT(a: Date, b: Date): boolean {
+  const ca = camposBRT(a);
+  const cb = camposBRT(b);
+  return ca.ano === cb.ano && ca.mes === cb.mes && ca.dia === cb.dia;
+}
+
+/**
+ * Abertura do PRÓXIMO dia de funcionamento, nunca a de hoje — mesmo quando
+ * `agora` for minutos antes de abrir hoje (ex.: 08h59 com abertura às 09h).
+ * Diferente de proximaAberturaComercial(agora) sozinha, que devolve a
+ * abertura de HOJE nesse caso (correto pra "já vai abrir, pode considerar
+ * pronto"; errado pra "pagamento confirmado fora do horário nunca usa a
+ * abertura do mesmo dia" — regra explícita do negócio). Mesmo truque já
+ * usado em _shared/agendamento-entrega.ts (força o cálculo a partir da meia-
+ * noite do dia seguinte, que sempre tem alguma janela comercial).
+ */
+function aberturaProximoDiaUtil(agora: Date): Date {
+  const campos = camposBRT(agora);
+  const meiaNoiteAmanha = instanteDeBRT(campos.ano, campos.mes, campos.dia + 1, 0, 0);
+  return proximaAberturaComercial(meiaNoiteAmanha);
+}
 
 // Mapeia status real do Mercado Pago -> status do pedido. Nunca inclui um
 // status novo aqui sem decidir explicitamente o que ele significa pro
@@ -84,15 +107,16 @@ export function decidirAgendamentoPagamento(
   if (entregaPrometidaFixada) {
     // despachoEm técnico: se por algum motivo não foi persistido junto (não
     // deveria acontecer — ver _shared/pedido-repositorio.ts), nunca despacha
-    // antes de agora nem fora do horário comercial. Se o despacho persistido
-    // já ficou no passado (cliente demorou pra pagar depois de cotar) e a
-    // confirmação chegou fora do horário, nunca reaproveita esse horário
-    // vencido como "pronto pra agora" — recalcula pro próximo horário
-    // comercial (senão o próximo tick de logistica-agendada-processar
-    // dispararia a corrida imediatamente, mesmo fora do expediente).
+    // antes de agora nem fora do horário comercial. Pagamento confirmado
+    // FORA do horário NUNCA usa a abertura do MESMO dia como despacho — nem
+    // quando esse horário já ficou no passado (fechou e o cliente demorou
+    // pra pagar), nem quando ainda está no futuro de hoje (confirmou minutos
+    // antes de abrir): em ambos os casos pula direto pro próximo dia de
+    // funcionamento (senão o próximo tick de logistica-agendada-processar
+    // dispararia a corrida no mesmo dia, mesmo fora do expediente).
     const despachoBase = despachoFixado ?? proximaAberturaComercial(agora);
-    const despachoVencidoForaDoHorario = !dentroDoHorarioAgora && despachoBase.getTime() <= agora.getTime();
-    const despachoEm = despachoVencidoForaDoHorario ? proximaAberturaComercial(agora) : despachoBase;
+    const despachoNoMesmoDiaForaDoHorario = !dentroDoHorarioAgora && mesmoDiaBRT(despachoBase, agora);
+    const despachoEm = despachoNoMesmoDiaForaDoHorario ? aberturaProximoDiaUtil(agora) : despachoBase;
     return {
       entregaPrometidaEm: entregaPrometidaFixada,
       despachoEm,
@@ -100,8 +124,17 @@ export function decidirAgendamentoPagamento(
     };
   }
   if (params.dataEntregaTipada) {
-    return calcularAgendamentoEntrega(params.dataEntregaTipada, params.periodoEntregaTipado, agora, { leadTimeMinutos: params.leadTimeMinutos });
+    const resultado = calcularAgendamentoEntrega(params.dataEntregaTipada, params.periodoEntregaTipado, agora, { leadTimeMinutos: params.leadTimeMinutos });
+    // Mesma regra acima aplicada ao caminho legado (sem entrega_prometida_em/
+    // logistica_executar_em persistidos): despacho não pode cair no mesmo
+    // dia da confirmação quando o pagamento veio fora do horário.
+    if (!dentroDoHorarioAgora && mesmoDiaBRT(resultado.despachoEm, agora)) {
+      const proximaAbertura = aberturaProximoDiaUtil(agora);
+      return { entregaPrometidaEm: proximaAbertura, despachoEm: proximaAbertura, imediato: false };
+    }
+    return resultado;
   }
   const despacho = dentroDoHorarioAgora ? agora : proximaAberturaComercial(agora);
-  return { entregaPrometidaEm: despacho, despachoEm: despacho, imediato: dentroDoHorarioAgora };
+  const despachoFinal = !dentroDoHorarioAgora && mesmoDiaBRT(despacho, agora) ? aberturaProximoDiaUtil(agora) : despacho;
+  return { entregaPrometidaEm: despachoFinal, despachoEm: despachoFinal, imediato: dentroDoHorarioAgora };
 }

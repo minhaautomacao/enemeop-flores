@@ -90,7 +90,7 @@ test('2. pagamento confirmado apos o fechamento: nunca despacha imediatamente, a
   assert.equal(resultado.despachoEm.toISOString(), '2026-07-22T12:00:00.000Z', 'agendado para a abertura do proximo dia util (quarta 09h BRT)');
 });
 
-test('3. pagamento confirmado antes da abertura: tambem nunca despacha imediatamente', () => {
+test('3. pagamento confirmado antes da abertura: nunca despacha imediatamente e nunca usa a abertura do mesmo dia', () => {
   const resultado = decidirAgendamentoPagamento({
     entregaPrometidaFixadaISO: '2026-07-21T15:00:00.000Z',
     despachoFixadoISO: null, // caminho legado, sem despacho persistido
@@ -99,7 +99,51 @@ test('3. pagamento confirmado antes da abertura: tambem nunca despacha imediatam
     leadTimeMinutos: 30,
   }, TERCA_07H_BRT);
   assert.equal(resultado.imediato, false, 'pagamento antes da abertura nunca despacha imediatamente');
-  assert.equal(resultado.despachoEm.toISOString(), '2026-07-21T12:00:00.000Z', 'agendado para a abertura do mesmo dia (09h BRT), nao pulado pro dia seguinte');
+  assert.equal(resultado.despachoEm.toISOString(), '2026-07-22T12:00:00.000Z', 'agendado para a abertura do PROXIMO dia util (quarta 09h BRT), nunca a abertura de hoje');
+});
+
+// ── Limite 1: 08h59 de um dia com abertura as 09h -> pula pro dia seguinte ─
+
+test('3b. limite: pagamento as 08h59 (1 minuto antes de abrir) nunca usa a abertura de hoje (09h), pula pra amanha', () => {
+  const TERCA_08H59_BRT = new Date('2026-07-21T11:59:00Z'); // 08h59 BRT, loja abre as 09h
+  const resultado = decidirAgendamentoPagamento({
+    entregaPrometidaFixadaISO: '2026-07-21T15:00:00.000Z',
+    despachoFixadoISO: '2026-07-21T12:00:00.000Z', // 09h BRT hoje — persistido na cotacao, ainda no futuro em relacao ao pagamento
+    dataEntregaTipada: null,
+    periodoEntregaTipado: null,
+    leadTimeMinutos: 30,
+  }, TERCA_08H59_BRT);
+  assert.equal(resultado.imediato, false);
+  assert.equal(resultado.despachoEm.toISOString(), '2026-07-22T12:00:00.000Z', 'mesmo com a abertura de hoje a 1 minuto de distancia, nunca usa o mesmo dia — pula pra quarta 09h BRT');
+});
+
+// ── Limite 2: pagamento apos o fechamento -> pula pro dia seguinte ────────
+
+test('3c. limite: pagamento confirmado apos o fechamento, sem despacho persistido, tambem pula pro dia seguinte', () => {
+  const resultado = decidirAgendamentoPagamento({
+    entregaPrometidaFixadaISO: '2026-07-21T20:00:00.000Z',
+    despachoFixadoISO: null, // caminho legado, sem despacho persistido
+    dataEntregaTipada: null,
+    periodoEntregaTipado: null,
+    leadTimeMinutos: 30,
+  }, TERCA_20H_BRT);
+  assert.equal(resultado.imediato, false);
+  assert.equal(resultado.despachoEm.toISOString(), '2026-07-22T12:00:00.000Z', 'agendado para a abertura do proximo dia util (quarta 09h BRT)');
+});
+
+test('3d. despacho persistido para um dia futuro legitimo (nao hoje) nunca e adiado — so a regra do "mesmo dia" se aplica', () => {
+  // Pedido cotado para entrega daqui a 2 dias (quinta) — pagamento confirma
+  // fora do horario hoje (terca a noite), mas o despacho ja agendado pra
+  // quinta nao deve ser "empurrado" ainda mais pra frente.
+  const resultado = decidirAgendamentoPagamento({
+    entregaPrometidaFixadaISO: '2026-07-23T15:00:00.000Z',
+    despachoFixadoISO: '2026-07-23T12:00:00.000Z', // quinta 09h BRT
+    dataEntregaTipada: null,
+    periodoEntregaTipado: null,
+    leadTimeMinutos: 30,
+  }, TERCA_20H_BRT);
+  assert.equal(resultado.imediato, false);
+  assert.equal(resultado.despachoEm.toISOString(), '2026-07-23T12:00:00.000Z', 'despacho de um dia futuro legitimo permanece intacto, nao e mais um "mesmo dia"');
 });
 
 test('4. evento repetido: decisao nunca reprocessa notificacao/handoff, e o agendamento e deterministico (nunca duplica pedido nem corrida)', () => {

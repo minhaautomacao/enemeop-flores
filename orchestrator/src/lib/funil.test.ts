@@ -1539,6 +1539,96 @@ test('Parte 1: "Mudei de ideia. Quero trocar o produto." em aguardando_pagamento
   assert.doesNotMatch(r.mensagem, /pref_id=xyz-456/, 'nunca reenvia o link do produto que o cliente pediu pra trocar')
 })
 
+// ── Reaproveitamento de dados ao reiniciar/trocar o produto ──────────────
+// Feedback direto do usuário em monitoramento real, 2026-07-24: reiniciar
+// um pedido ou trocar o produto deve perguntar se o cliente quer reusar o
+// endereço/destinatário já informados, em vez de descartar tudo direto.
+
+test('1. reaproveitamento: "trocar o produto" com formulário completo pergunta antes de reiniciar, nunca reseta direto', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140 },
+      linkPagamento: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=abc-789',
+      formulario: formularioFixture(),
+    },
+    perguntasFeitas: [],
+  }
+  const mensagem = 'Mudei de ideia. Quero trocar o produto.'
+  const r = await avancarFunil(estado, mensagem, classificarIntencao(mensagem, estado.fase), deps)
+  assert.equal(r.estado.fase, 'aguardando_reaproveitar_dados')
+  assert.match(r.mensagem, /mesmos dados de entrega do pedido anterior/i)
+  assert.doesNotMatch(r.mensagem, /pref_id=abc-789/, 'nunca reenvia o link antigo')
+  assert.deepEqual(r.estado.dados.formularioAnterior, formularioFixture(), 'guarda o formulário completo pra decidir depois')
+})
+
+test('2. reaproveitamento: "sim" restaura o formulário completo e segue o fluxo normal a partir do início', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_reaproveitar_dados',
+    dados: { formularioAnterior: formularioFixture() },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'sim', 'compra_produto', deps)
+  assert.deepEqual(r.estado.dados.formulario, formularioFixture(), 'restaura o formulário completo salvo antes do reinício')
+  assert.equal(r.estado.dados.formularioAnterior, undefined, 'nunca deixa o formulário anterior pendurado depois da decisão')
+  assert.notEqual(r.estado.fase, 'aguardando_reaproveitar_dados', 'segue o fluxo normal, nunca trava no gate')
+})
+
+test('3. reaproveitamento: "não" descarta os dados antigos e segue pedindo tudo de novo (padrão anterior a esta correção)', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_reaproveitar_dados',
+    dados: { formularioAnterior: formularioFixture() },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'não, quero informar dados novos', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario, undefined, 'nunca reaproveita os dados quando o cliente recusa')
+  assert.equal(r.estado.dados.formularioAnterior, undefined)
+  assert.notEqual(r.estado.fase, 'aguardando_reaproveitar_dados')
+})
+
+test('4. reaproveitamento: resposta ambígua repete a pergunta, nunca avança sozinho', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_reaproveitar_dados',
+    dados: { formularioAnterior: formularioFixture() },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quero um buquê de rosas', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_reaproveitar_dados', 'nunca decide sozinho sem sim/não explícito')
+  assert.match(r.mensagem, /mesmos dados de entrega do pedido anterior/i)
+})
+
+test('5. reaproveitamento: formulário já completo (reaproveitado) pula direto pro resumo ao escolher o novo produto, nunca pede o formulário de novo', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'produto_selecionado',
+    dados: {
+      produto: { nome: 'Orquídea Branca', preco: 190, quantidade: 1, dataEntrega: 'amanhã' },
+      formulario: formularioFixture(),
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'confirmo', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'confirmando_formulario', 'pula direto pro resumo, nunca pede o formulário de novo')
+  assert.doesNotMatch(r.mensagem, /Nome do remetente:/, 'nunca reenvia o formulário quando os dados já são conhecidos')
+  assert.match(r.mensagem, /Confere os dados de entrega/i)
+})
+
+test('6. reaproveitamento: sem formulário completo antes, "outro produto" continua reiniciando direto, sem o gate (comportamento anterior preservado)', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_aprovacao_frete',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'hoje' }, valorFrete: 22.5, valorTotal: 162.5 },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quero outro produto', 'compra_produto', deps)
+  assert.notEqual(r.estado.fase, 'aguardando_reaproveitar_dados', 'sem formulário completo salvo, nunca pergunta sobre reaproveitamento')
+  assert.equal(r.estado.dados.produto, undefined, 'reinicia normalmente, como antes desta correção')
+})
+
 test('Parte 1: "continuar" preserva a compra em andamento, nunca reinicia', async () => {
   const deps = depsFake()
   const estadoEmAndamento: EstadoConversa = {

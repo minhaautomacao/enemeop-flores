@@ -48,6 +48,8 @@ export type Fase =
   | 'encerrado_sem_venda'
   /** Gate de retomada após intervalo sem interação (Parte 3) — aguardando o cliente escolher entre continuar o pedido anterior ou iniciar uma nova compra. */
   | 'retomada_apos_intervalo'
+  /** Gate de reaproveitamento de dados ao reiniciar/trocar o produto de um pedido — aguardando o cliente confirmar se quer reusar o formulário de entrega (destinatário/endereço/telefone) já coletado antes, ou informar dados novos (feedback direto do usuário, monitoramento 2026-07-24). */
+  | 'aguardando_reaproveitar_dados'
 
 export type Intencao =
   | 'compra_produto'
@@ -184,6 +186,8 @@ export interface DadosPedido {
   faseAntesDoIntervalo?: Fase
   /** CEP (valor exato) para o qual a consulta real ao ViaCEP (deps.consultarCep) já foi feita nesta jornada — evita reconsultar a cada mensagem; muda quando o cliente corrige o CEP, disparando nova consulta (ver etapaFormulario, coleta em duas etapas). */
   cepConsultadoViaApi?: string
+  /** Formulário de entrega completo salvo antes de reiniciar a jornada (troca de produto/novo pedido) — só existe durante a fase 'aguardando_reaproveitar_dados', enquanto aguarda o cliente decidir se reaproveita esses dados ou informa dados novos. Nunca persiste além dessa decisão. */
+  formularioAnterior?: FormularioEntregaDados
 }
 
 export interface EstadoConversa {
@@ -942,6 +946,17 @@ function reconhecimentoAberturaForaDoHorario(mensagemCliente: string): string {
   return ''
 }
 
+/**
+ * Pergunta do gate 'aguardando_reaproveitar_dados' — feedback direto do
+ * usuário em monitoramento real, 2026-07-24: reiniciar um pedido ou trocar
+ * o produto não deve obrigar o cliente a redigitar destinatário/endereço/
+ * telefone quando esses dados já foram informados antes. Texto fixo, nunca
+ * gerado por IA.
+ */
+function mensagemPerguntaReaproveitarDados(): string {
+  return 'Você quer usar os mesmos dados de entrega do pedido anterior (destinatário, endereço e telefone)? Responda "sim" para reaproveitar, ou "não" para informar dados novos.'
+}
+
 export function mensagemAvisoForaDoHorarioComOpcao(mensagemCliente = ''): string {
   const reconhecimento = reconhecimentoAberturaForaDoHorario(mensagemCliente)
   return `${reconhecimento}Podemos concluir seu pedido agora. Como estamos fora do horário da loja, ele será preparado e entregue no próximo dia de funcionamento, dentro do horário comercial. Deseja continuar?`
@@ -1452,6 +1467,12 @@ function pareceConfirmacao(mensagem: string): boolean {
   return PALAVRAS_CONFIRMACAO.some(p => lower === p || lower.startsWith(p + ' ') || lower.includes(` ${p} `) || lower.endsWith(` ${p}`))
 }
 
+/** Usado só no gate de reaproveitamento de dados (sim/não é a única decisão ali) — nunca confundido com pareceRejeicaoSemCampo (que é sobre rejeitar um resumo específico, contexto diferente). */
+function pareceNegacao(mensagem: string): boolean {
+  const lower = mensagem.toLowerCase().trim()
+  return PALAVRAS_NEGACAO.some(p => lower.includes(p))
+}
+
 // ── Catálogo conversacional dinâmico (categorias reais, ao vivo) ──────────
 
 export interface CategoriaCatalogo { id: string; nome: string }
@@ -1715,6 +1736,22 @@ function etapaConfirmacaoDetalhesProduto(estado: EstadoConversa, mensagemCliente
       return { estado: estadoAtualizado, mensagem: 'Quantas unidades você quer?' }
     }
     return { estado: estadoAtualizado, mensagem: 'Pra quando você precisa da entrega?' }
+  }
+
+  // Formulário de entrega reaproveitado (cliente reiniciou o pedido/trocou
+  // o produto e escolheu manter destinatário/endereço/telefone — ver gate
+  // 'aguardando_reaproveitar_dados') já está completo: pula direto pro
+  // resumo, nunca pede o formulário de novo.
+  const formularioReaproveitado = estadoAtualizado.dados.formulario
+  if (formularioReaproveitado && camposFaltandoFormulario(formularioReaproveitado).length === 0) {
+    const telefoneE164 = normalizarTelefoneDestinatarioBR(formularioReaproveitado.telefoneDestinatario!)
+    if (telefoneE164) {
+      const formularioNormalizado = { ...formularioReaproveitado, telefoneDestinatario: telefoneE164 }
+      return {
+        estado: { ...estadoAtualizado, fase: 'confirmando_formulario', dados: { ...estadoAtualizado.dados, formulario: formularioNormalizado } },
+        mensagem: `${avisoData}${montarResumoFormulario(formularioNormalizado)}`,
+      }
+    }
   }
 
   return {
@@ -2349,6 +2386,29 @@ export async function avancarFunil(
     }
   }
 
+  // Gate de reaproveitamento de dados (feedback direto do usuário,
+  // monitoramento 2026-07-24): só é resolvido respondendo sim/não — nunca
+  // avança sozinho. "sim" restaura o formulário completo salvo antes do
+  // reinício (destinatário/endereço/telefone) e segue o fluxo normal a
+  // partir do início (escolha do novo produto, formulário já preenchido);
+  // "não" descarta os dados antigos e segue pedindo tudo de novo, como já
+  // acontecia antes desta correção.
+  if (estado.fase === 'aguardando_reaproveitar_dados') {
+    if (pareceConfirmacao(mensagemCliente)) {
+      estado = {
+        ...estado,
+        fase: 'inicio',
+        dados: { ...estado.dados, formulario: estado.dados.formularioAnterior, formularioAnterior: undefined },
+      }
+      // segue o fluxo normal abaixo, agora com o formulário reaproveitado.
+    } else if (pareceNegacao(mensagemCliente)) {
+      estado = { ...estado, fase: 'inicio', dados: { ...estado.dados, formularioAnterior: undefined } }
+      // segue o fluxo normal abaixo, pedindo o formulário do zero.
+    } else {
+      return { estado, mensagem: mensagemPerguntaReaproveitarDados() }
+    }
+  }
+
   if (estadoComPedidoInconsistente(estado)) {
     // Cliente voltou só com uma saudação (sem informação nova) — pergunta
     // objetivamente se quer retomar ou começar de novo, em vez de inventar
@@ -2367,7 +2427,24 @@ export async function avancarFunil(
   } else if (pareceNovaIntencaoDeCompra(mensagemCliente, estado.fase)) {
     // Nova intenção comercial explícita numa fase de compra já avançada —
     // nunca reaproveita CEP/cotação/endereço/pagamento antigos (Parte 1;
-    // caso real observado em monitoramento 2026-07-21).
+    // caso real observado em monitoramento 2026-07-21). Mas se já havia um
+    // formulário de entrega COMPLETO, pergunta antes se o cliente quer
+    // reaproveitar esses dados (destinatário/endereço/telefone) em vez de
+    // descartar direto e obrigar a redigitar tudo — feedback direto do
+    // usuário em monitoramento real, 2026-07-24.
+    const formularioAnterior = estado.dados.formulario
+    const enderecoCompleto = !!formularioAnterior && camposFaltandoFormulario(formularioAnterior).length === 0
+    if (enderecoCompleto) {
+      const jornadaReiniciada = reiniciarJornada(mensagemCliente)
+      return {
+        estado: {
+          ...jornadaReiniciada,
+          fase: 'aguardando_reaproveitar_dados',
+          dados: { ...jornadaReiniciada.dados, formularioAnterior },
+        },
+        mensagem: mensagemPerguntaReaproveitarDados(),
+      }
+    }
     estado = reiniciarJornada(mensagemCliente)
     intencao = classificarIntencao(mensagemCliente, estado.fase)
   }

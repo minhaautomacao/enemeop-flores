@@ -34,11 +34,11 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { buscarPagamentoReal, validarAssinaturaWebhook } from '../_shared/mercadopago.ts';
 import { enviarWhatsApp } from '../_shared/whatsapp.ts';
-import { mapearStatusPagamento, valoresDivergem } from './logica.ts';
+import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento } from './logica.ts';
 import { processarLogisticaAposPagamento, SELECT_PEDIDO_PARA_LOGISTICA, type PedidoParaEntrega } from '../_shared/logistica-processamento.ts';
 import { decidirProcessamentoEvento, type EventoExistente } from '../_shared/pagamento-evento-decisao.ts';
-import { dentroDoHorarioComercial, proximaAberturaComercial, camposBRT } from '../_shared/horario-comercial.ts';
-import { calcularAgendamentoEntrega, type PeriodoEntrega, type DataCalendario } from '../_shared/agendamento-entrega.ts';
+import { camposBRT } from '../_shared/horario-comercial.ts';
+import { type PeriodoEntrega, type DataCalendario } from '../_shared/agendamento-entrega.ts';
 
 const SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
@@ -369,24 +369,18 @@ Deno.serve(async (req: Request) => {
       : null;
     const periodoEntregaTipado = (pedidoRow.periodo_entrega as PeriodoEntrega | null) ?? null;
 
-    const entregaPrometidaFixada = pedidoRow.entrega_prometida_em ? new Date(pedidoRow.entrega_prometida_em) : null;
-    const despachoFixado = pedidoRow.logistica_executar_em ? new Date(pedidoRow.logistica_executar_em) : null;
-
-    const agendamento = entregaPrometidaFixada
-      ? {
-          entregaPrometidaEm: entregaPrometidaFixada,
-          // despachoEm técnico: se por algum motivo não foi persistido junto
-          // (não deveria acontecer — ver _shared/pedido-repositorio.ts),
-          // nunca despacha antes de agora nem fora do horário comercial.
-          despachoEm: despachoFixado ?? proximaAberturaComercial(agora),
-          imediato: (despachoFixado ?? proximaAberturaComercial(agora)).getTime() <= agora.getTime() && dentroDoHorarioComercial(agora),
-        }
-      : dataEntregaTipada
-      ? calcularAgendamentoEntrega(dataEntregaTipada, periodoEntregaTipado, agora, { leadTimeMinutos: LEAD_TIME_MINUTOS })
-      : (() => {
-          const despacho = dentroDoHorarioComercial(agora) ? agora : proximaAberturaComercial(agora);
-          return { entregaPrometidaEm: despacho, despachoEm: despacho, imediato: dentroDoHorarioComercial(agora) };
-        })();
+    // Decisão pura extraída pra logica.ts (decidirAgendamentoPagamento) —
+    // testável isoladamente (ver webhook.test.ts), mesma regra de sempre:
+    // pagamento dentro do horário mantém despacho imediato; fora do horário
+    // (depois de fechar OU antes de abrir) nunca despacha na hora, fica
+    // agendado pro próximo horário comercial.
+    const agendamento = decidirAgendamentoPagamento({
+      entregaPrometidaFixadaISO: pedidoRow.entrega_prometida_em,
+      despachoFixadoISO: pedidoRow.logistica_executar_em,
+      dataEntregaTipada,
+      periodoEntregaTipado,
+      leadTimeMinutos: LEAD_TIME_MINUTOS,
+    }, agora);
 
     const foraDoHorarioPagamento = !agendamento.imediato;
     let logisticaAgendadaOk = true;

@@ -1525,6 +1525,20 @@ test('Parte 1: "cancele este pedido. Vamos fazer um novo" em aguardando_pagament
   assert.doesNotMatch(r.mensagem, /pref_id=abc-123/, 'nunca reenvia o link do pedido que o cliente pediu pra cancelar')
 })
 
+test('Parte 1: "Mudei de ideia. Quero trocar o produto." em aguardando_pagamento reinicia a jornada, nunca reenvia o link antigo (2ª ocorrência real, monitoramento 2026-07-24)', async () => {
+  const deps = depsFake({ buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'] })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140 }, linkPagamento: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=xyz-456' },
+    perguntasFeitas: [],
+  }
+  const mensagem = 'Mudei de ideia. Quero trocar o produto. os demais dados serão os mesmo'
+  const r = await avancarFunil(estado, mensagem, classificarIntencao(mensagem, estado.fase), deps)
+  assert.notEqual(r.estado.fase, 'aguardando_pagamento', 'deveria reiniciar a jornada, nunca continuar aguardando o pagamento do produto que o cliente quer trocar')
+  assert.equal(r.estado.dados.produto, undefined, 'nunca reaproveita o produto que o cliente quer trocar')
+  assert.doesNotMatch(r.mensagem, /pref_id=xyz-456/, 'nunca reenvia o link do produto que o cliente pediu pra trocar')
+})
+
 test('Parte 1: "continuar" preserva a compra em andamento, nunca reinicia', async () => {
   const deps = depsFake()
   const estadoEmAndamento: EstadoConversa = {

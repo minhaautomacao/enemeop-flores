@@ -691,6 +691,14 @@ const FRASES_NOVO_PEDIDO = [
   // pedido explícito de cancelar/recomeçar.
   'cancelar pedido', 'cancele o pedido', 'cancele este pedido', 'cancelar este pedido',
   'vamos fazer um novo',
+  // Caso real observado em monitoramento 2026-07-24 (2ª ocorrência, agora em
+  // aguardando_pagamento com link já gerado): "Quero trocar o produto"
+  // também caía no case fase-específico que sempre reenvia o link antigo,
+  // ignorando o pedido explícito de trocar. Nunca "mudar o produto" — essa
+  // frase, numa resposta negativa ao resumo do frete (aguardando_aprovacao_
+  // frete), tem que continuar SEM reiniciar a jornada (comportamento já
+  // coberto por teste existente); "trocar" não colide com esse caso.
+  'trocar o produto', 'trocar produto',
 ]
 
 const FRASES_CONTINUACAO = [
@@ -926,22 +934,9 @@ export function mensagemPagamentoConfirmadoForaDoHorario(): string {
 // real observado em monitoramento 2026-07-24: "quero escolher outro
 // produto" reiniciou a jornada corretamente, mas a resposta ignorava o que
 // o cliente pediu e soava fora de contexto.
-//
-// Lista separada de FRASES_NOVO_PEDIDO de propósito: esta função só produz
-// texto informativo dentro do próprio gate de horário (nunca decide
-// reiniciar a jornada nem é usada fora daqui) — adicionar uma frase aqui
-// nunca afeta pareceNovaIntencaoDeCompra em outras fases (ex.: "não, quero
-// mudar o produto" durante aguardando_aprovacao_frete tem que continuar
-// SEM reiniciar a jornada, comportamento já coberto por teste; misturar as
-// duas listas causaria esse tipo de regressão).
-const FRASES_TROCA_PRODUTO_RECONHECIMENTO = ['trocar o produto', 'trocar produto']
-
 function reconhecimentoAberturaForaDoHorario(mensagemCliente: string): string {
   const n = normalizar(mensagemCliente)
-  if (
-    FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p))) ||
-    FRASES_TROCA_PRODUTO_RECONHECIMENTO.some(p => n.includes(normalizar(p)))
-  ) return 'Claro, vamos montar um novo pedido! '
+  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p)))) return 'Claro, vamos montar um novo pedido! '
   const tipo = TIPOS_PRODUTO.find(t => t.regex.test(n))
   if (tipo) return `Claro, vamos cuidar do seu pedido de ${tipo.termo}! `
   return ''

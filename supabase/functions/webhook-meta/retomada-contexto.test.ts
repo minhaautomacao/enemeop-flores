@@ -38,6 +38,7 @@ const depsFake: DependenciasFunil = {
   buscarProdutosPorCategoria: async () => [],
   revalidarProduto: async () => ({ disponivel: true }),
   calcularFrete: async () => ({ ok: true, valor: 22.5 }),
+  consultarCep: async () => ({ rua: 'Rua das Flores', bairro: 'Ipiranga', cidade: 'São Paulo', uf: 'SP' }),
   gerarPagamento: async (pedidoId: string) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
   criarPedido: async () => ({ pedidoId: 'pedido_x' }),
   buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'],

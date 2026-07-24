@@ -66,6 +66,7 @@ test('nucleo Deno (_shared/funil.ts) produz exatamente os mesmos resultados que 
     buscarProdutosPorCategoria: async () => [],
     revalidarProduto: async () => ({ disponivel: true }),
     calcularFrete: async () => ({ ok: true as const, valor: 22.5 }),
+    consultarCep: async () => ({ rua: 'Rua das Flores', bairro: 'Ipiranga', cidade: 'São Paulo', uf: 'SP' }),
     calcularAgendamento: (dataEntrega: { ano: number; mes: number; dia: number }) => {
       const iso = new Date(Date.UTC(dataEntrega.ano, dataEntrega.mes, dataEntrega.dia, 12, 0)).toISOString()
       return { entregaPrometidaEmISO: iso, despachoEmISO: iso, imediato: true }

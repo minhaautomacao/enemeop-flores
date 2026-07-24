@@ -641,6 +641,11 @@ function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
     // detalhes: {} garante que etapaCalculoFrete grava cotadoEm (cotação real
     // sempre traz detalhes reais em produção — ver cotacaoFreteVencida/Parte 4).
     calcularFrete: async () => ({ ok: true, valor: 22.5, detalhes: {} }),
+    // ViaCEP fake: por padrão sempre localiza um endereço completo — testes
+    // que já informam rua/bairro no formulário mantêm o valor do cliente
+    // (só preenche o que estiver vazio, ver etapaFormulario); testes que
+    // exercitam CEP inválido/parcial sobrescrevem isso explicitamente.
+    consultarCep: async () => ({ rua: 'Rua das Flores', bairro: 'Ipiranga', cidade: 'São Paulo', uf: 'SP' }),
     // Fake determinístico e simples (não precisa reproduzir a lógica real de
     // horário comercial de _shared/agendamento-entrega.ts, usada só pelas
     // Edge Functions Deno) — só devolve datas ISO válidas e coerentes pra
@@ -1953,4 +1958,108 @@ test('formulario unico: cartão impresso é opcional; mensagem só é obrigatór
     [],
   )
   assert.match(montarMensagemCamposFaltando(['mensagemCartao']), /mensagem para o cart[ãa]o/i)
+})
+
+// ── Parte 3 — coleta de entrega em duas etapas (ViaCEP) ───────────────────
+
+function estadoAguardandoFormulario(formulario?: Partial<FormularioEntregaDados>): EstadoConversa {
+  return {
+    fase: 'aguardando_formulario',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' },
+      ...(formulario ? { formulario: formulario as FormularioEntregaDados } : {}),
+    },
+    perguntasFeitas: [],
+  }
+}
+
+test('1. etapa 1 pede so os quatro campos iniciais, em qualquer ordem, sem repetir o que ja foi informado', async () => {
+  assert.match(TEXTO_FORMULARIO_ENTREGA, /Nome do remetente:/i)
+  assert.match(TEXTO_FORMULARIO_ENTREGA, /Nome do destinat[áa]rio:/i)
+  assert.match(TEXTO_FORMULARIO_ENTREGA, /Telefone do destinat[áa]rio:/i)
+  assert.match(TEXTO_FORMULARIO_ENTREGA, /CEP da entrega:/i)
+  assert.doesNotMatch(TEXTO_FORMULARIO_ENTREGA, /\brua\b|\bn[úu]mero\b|\bbairro\b|data de entrega/i, 'etapa 1 nunca mistura endereço/data com os quatro campos iniciais')
+
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario()
+
+  // Ordem invertida (telefone e destinatário antes do remetente/CEP) — aceita igual.
+  const r1 = await avancarFunil(estado, 'Telefone do destinatário: 11999990000\nNome do destinatário: Camila', 'compra_produto', deps)
+  assert.equal(r1.estado.fase, 'aguardando_formulario')
+  assert.match(r1.mensagem, /remetente/i)
+  assert.doesNotMatch(r1.mensagem, /destinat[áa]rio/i, 'nunca repete o que já foi informado')
+
+  const r2 = await avancarFunil(r1.estado, 'Nome do remetente: Ana\nCEP da entrega: 04204-030', 'compra_produto', deps)
+  assert.match(r2.mensagem, /Localizei o endere[çc]o/i, 'CEP válido dispara a etapa 2 (ViaCEP) automaticamente')
+})
+
+test('2. CEP valido consulta o ViaCEP e preenche rua/bairro/cidade/UF automaticamente no formulário', async () => {
+  const deps = depsFake({
+    consultarCep: async (cep) => {
+      assert.equal(cep, '04204-030')
+      return { rua: 'Rua das Flores', bairro: 'Ipiranga', cidade: 'São Paulo', uf: 'SP' }
+    },
+  })
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000' })
+
+  const r = await avancarFunil(estado, 'CEP da entrega: 04204-030', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.rua, 'Rua das Flores')
+  assert.equal(r.estado.dados.formulario?.bairro, 'Ipiranga')
+  assert.equal(r.estado.dados.formulario?.cidade, 'São Paulo')
+  assert.equal(r.estado.dados.formulario?.uf, 'SP')
+  assert.equal(r.estado.dados.cepConsultadoViaApi, '04204-030', 'marca o CEP como já consultado, pra nunca reconsultar a cada mensagem')
+})
+
+test('3. endereço completo via ViaCEP pergunta apenas número e complemento, sem repetir nenhum outro campo', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000' })
+
+  const r = await avancarFunil(estado, 'CEP da entrega: 04204-030', 'compra_produto', deps)
+  assert.equal(
+    r.mensagem,
+    'Localizei o endereço em Rua das Flores, Ipiranga, São Paulo–SP. Qual é o número? Se houver apartamento, bloco ou outro complemento, informe também.',
+  )
+})
+
+test('4. ViaCEP sem rua (CEP geral) pede somente rua e número, numa única mensagem curta', async () => {
+  const deps = depsFake({ consultarCep: async () => ({ bairro: 'Centro', cidade: 'Poá', uf: 'SP' }) }) // logradouro ausente
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000' })
+
+  const r = await avancarFunil(estado, 'CEP da entrega: 08550-000', 'compra_produto', deps)
+  assert.match(r.mensagem, /rua/i)
+  assert.match(r.mensagem, /n[úu]mero/i)
+  assert.doesNotMatch(r.mensagem, /bairro/i, 'bairro já veio do ViaCEP, nunca é pedido de novo')
+  assert.equal(r.estado.dados.formulario?.bairro, 'Centro', 'bairro preenchido automaticamente mesmo com rua ausente')
+})
+
+test('5. CEP não localizado pelo ViaCEP pede pro cliente reenviar, sem travar a conversa', async () => {
+  const deps = depsFake({ consultarCep: async () => null })
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila', telefoneDestinatario: '11999990000' })
+
+  const r = await avancarFunil(estado, 'CEP da entrega: 99999-999', 'compra_produto', deps)
+  assert.equal(r.mensagem, 'Não consegui localizar esse CEP. Pode conferir e enviar novamente?')
+  assert.equal(r.estado.dados.formulario?.cep, undefined, 'CEP inválido nunca fica preso no estado — cliente pode reenviar')
+  assert.equal(r.estado.fase, 'aguardando_formulario')
+})
+
+test('6. dados já fornecidos nunca são pedidos de novo ao longo das duas etapas', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario()
+
+  const r1 = await avancarFunil(
+    estado,
+    'Nome do remetente: Ana\nNome do destinatário: Camila\nTelefone do destinatário: 11999990000\nCEP da entrega: 04204-030',
+    'compra_produto',
+    deps,
+  )
+  assert.match(r1.mensagem, /Qual é o número/i)
+
+  // Responde só com o número, em texto livre (sem rótulo "Número:") — nunca perde o dado.
+  const r2 = await avancarFunil(r1.estado, '123', 'compra_produto', deps)
+  assert.equal(r2.estado.dados.formulario?.numero, '123')
+  assert.match(r2.mensagem, /data de entrega/i, 'só falta a data — único campo pedido agora')
+  assert.doesNotMatch(r2.mensagem, /remetente|destinat[áa]rio|CEP|rua|bairro|n[úu]mero/i, 'nunca repete nenhum campo já coletado')
+
+  const r3 = await avancarFunil(r2.estado, 'Data de entrega: amanhã', 'compra_produto', deps)
+  assert.equal(r3.estado.fase, 'confirmando_formulario', 'formulário completo -> segue direto pra confirmação/cotação, sem reenviar nada')
 })

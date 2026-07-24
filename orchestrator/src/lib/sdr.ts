@@ -216,6 +216,35 @@ function calcularAgendamentoMinimo(dataEntrega: { ano: number; mes: number; dia:
   return { entregaPrometidaEmISO: entregaPrometidaEm.toISOString(), despachoEmISO: entregaPrometidaEm.toISOString(), imediato: entregaPrometidaEm.getTime() <= agora.getTime() }
 }
 
+// CEP real (ViaCEP) — resolve rua/bairro/cidade/UF antes de pedir esses
+// campos ao cliente (coleta de entrega em duas etapas), mesma consulta usada
+// pelas Edge Functions Deno (webhook-meta/webhook-whatsapp).
+const TIMEOUT_VIACEP_MS = 5_000
+
+interface RespostaViaCep {
+  logradouro?: string
+  bairro?: string
+  localidade?: string
+  uf?: string
+  erro?: boolean
+}
+
+async function consultarCepReal(cep: string): Promise<{ rua?: string; bairro?: string; cidade?: string; uf?: string } | null> {
+  const cepLimpo = cep.replace(/\D/g, '')
+  if (cepLimpo.length !== 8) return null
+  try {
+    const res = await fetch(`https://viacep.com.br/ws/${cepLimpo}/json/`, { signal: AbortSignal.timeout(TIMEOUT_VIACEP_MS) })
+    if (!res.ok) return null
+    const data = await res.json() as RespostaViaCep
+    if (data.erro) return null
+    return { rua: data.logradouro || undefined, bairro: data.bairro || undefined, cidade: data.localidade || undefined, uf: data.uf || undefined }
+  } catch (e) {
+    const motivo = e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : String(e)
+    console.error(`[SDR] falha ao consultar CEP real: ${motivo} cep=${cepLimpo}`)
+    return null
+  }
+}
+
 function construirDependenciasFunil(opts: {
   estado: EstadoConversa
   cliente: { nome: string; telefone?: string; canal: CanalAtendimento; canalId?: string }
@@ -227,6 +256,7 @@ function construirDependenciasFunil(opts: {
     buscarProdutosPorCategoria: buscarProdutosPorCategoriaParaFunil,
     revalidarProduto: revalidateProductFromSite,
     calcularFrete: (cep: string) => calcularFreteReal(cep, valorProduto),
+    consultarCep: consultarCepReal,
     calcularAgendamento: calcularAgendamentoMinimo,
     gerarPagamento: gerarPagamentoReal,
     criarPedido: (dados) => criarPedidoProvisorio(dados, opts.cliente),

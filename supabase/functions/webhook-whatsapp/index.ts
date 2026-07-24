@@ -254,6 +254,38 @@ async function calcularFreteReal(cep: string): Promise<ResultadoFrete> {
   }
 }
 
+// ── CEP real (ViaCEP) — resolve rua/bairro/cidade/UF antes de pedir esses
+// campos ao cliente (coleta de entrega em duas etapas); consulta direta e
+// rápida, independente do pipeline de frete/Lalamove (agente-logistica). ──
+
+const TIMEOUT_VIACEP_MS = 5_000;
+
+interface RespostaViaCep {
+  logradouro?: string;
+  bairro?: string;
+  localidade?: string;
+  uf?: string;
+  erro?: boolean;
+}
+
+async function consultarCepReal(cep: string): Promise<{ rua?: string; bairro?: string; cidade?: string; uf?: string } | null> {
+  const cepLimpo = cep.replace(/\D/g, '');
+  if (cepLimpo.length !== 8) return null;
+  try {
+    const res = await fetch(`https://viacep.com.br/ws/${cepLimpo}/json/`, {
+      signal: AbortSignal.timeout(TIMEOUT_VIACEP_MS),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as RespostaViaCep;
+    if (data.erro) return null;
+    return { rua: data.logradouro || undefined, bairro: data.bairro || undefined, cidade: data.localidade || undefined, uf: data.uf || undefined };
+  } catch (e) {
+    const motivo = e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : String(e);
+    console.error(`[webhook-whatsapp] falha ao consultar CEP real: ${motivo} cep=${cepLimpo}`);
+    return null;
+  }
+}
+
 // ── Pedido (rascunho) e pagamento real — implementação compartilhada com
 // webhook-meta, ver _shared/pedido-repositorio.ts (GO-LIVE Parte 1). ───────
 
@@ -264,6 +296,7 @@ function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFu
     buscarProdutosPorCategoria: (categoriaId) => buscarProdutosPorCategoriaReal(WORKSPACE_ID, categoriaId),
     revalidarProduto: (idExterno) => revalidarProdutoReal(WORKSPACE_ID, idExterno),
     calcularFrete: calcularFreteReal,
+    consultarCep: consultarCepReal,
     calcularAgendamento: (dataEntrega, periodoEntrega) => {
       const r = calcularAgendamentoEntrega(dataEntrega, periodoEntrega, new Date(), { leadTimeMinutos: LEAD_TIME_MINUTOS });
       return { entregaPrometidaEmISO: r.entregaPrometidaEm.toISOString(), despachoEmISO: r.despachoEm.toISOString(), imediato: r.imediato };

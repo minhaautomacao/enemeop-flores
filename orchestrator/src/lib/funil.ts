@@ -182,6 +182,8 @@ export interface DadosPedido {
   ultimaInteracaoEm?: string
   /** Fase em que a conversa estava antes do gate de retomada após intervalo (Parte 3) — restaurada quando o cliente escolhe continuar. */
   faseAntesDoIntervalo?: Fase
+  /** CEP (valor exato) para o qual a consulta real ao ViaCEP (deps.consultarCep) já foi feita nesta jornada — evita reconsultar a cada mensagem; muda quando o cliente corrige o CEP, disparando nova consulta (ver etapaFormulario, coleta em duas etapas). */
+  cepConsultadoViaApi?: string
 }
 
 export interface EstadoConversa {
@@ -253,22 +255,20 @@ const ROTULO_EXIBICAO_FORMULARIO: Record<keyof FormularioEntregaDados, string> =
   mensagemCartao: 'mensagem para o cartão',
 }
 
-// Texto definido para o formulário único (Parte 2): remetente, destinatário,
-// telefone e data de entrega são operacionais (Lalamove/agendamento exigem)
-// e por isso entram aqui — cidade/UF nunca são pedidas (ver decisão acima
-// de CAMPOS_OBRIGATORIOS_FORMULARIO).
+// Coleta de entrega em duas etapas (substituiu o formulário único de 8
+// campos numa mensagem só): a Etapa 1 pede só o operacional mínimo pra
+// localizar o CEP; assim que o CEP chega, a Etapa 2 consulta o ViaCEP real
+// (deps.consultarCep) e preenche rua/bairro/cidade/UF automaticamente — só
+// pede número/complemento e o que a consulta não trouxer (ver etapaFormulario
+// abaixo). Data de entrega e cartão continuam pedidos depois, pelo mecanismo
+// já existente de campos faltantes (camposFaltandoFormulario) — nunca
+// misturados com os quatro campos iniciais.
 export const TEXTO_FORMULARIO_ENTREGA = `Para calcular a entrega, envie por favor:
 
-Remetente:
-Destinatário:
+Nome do remetente:
+Nome do destinatário:
 Telefone do destinatário:
-Rua e número:
-Complemento:
-Bairro:
-CEP:
-Data de entrega:
-Quer que enviemos um cartão impresso com uma mensagem personalizada? Sim ou não.
-Se sim, mensagem para o cartão:`
+CEP da entrega:`
 
 // Rótulos aceitos por campo (já normalizados: sem acento, minúsculo, sem
 // pontuação de marcação). O primeiro de cada lista é o rótulo canônico do
@@ -1214,6 +1214,14 @@ export interface DependenciasFunil {
   revalidarProduto: (idExterno: string) => Promise<{ disponivel: boolean; preco?: number; fotoUrl?: string; nome?: string } | null>
   calcularFrete: CalculadorFrete
   /**
+   * Consulta real do CEP (ViaCEP) — preenche rua/bairro/cidade/UF
+   * automaticamente antes de pedir esses campos ao cliente (coleta de
+   * entrega em duas etapas). null = CEP sintaticamente válido mas não
+   * localizado; campos ausentes no retorno (ex.: CEP "geral" de cidade
+   * pequena, sem logradouro) são pedidos ao cliente isoladamente.
+   */
+  consultarCep: (cep: string) => Promise<{ rua?: string; bairro?: string; cidade?: string; uf?: string } | null>
+  /**
    * Calcula a janela de entrega prometível (já corrigida pro horário de
    * funcionamento + lead time operacional) e o instante técnico de despacho
    * — síncrono e puro do lado de quem implementa (ver
@@ -1633,31 +1641,106 @@ function sincronizarFormularioParaEndereco(estado: EstadoConversa): EstadoConver
   return { ...estado, dados: { ...estado.dados, endereco, produto, nomeComprador: f.nomeComprador } }
 }
 
-/** Coleta o formulário único — aceita todos os campos numa mensagem só, pede só os que faltarem (nunca um por vez), e nunca sobrescreve um campo já válido com um valor vazio. */
-function etapaFormulario(estado: EstadoConversa, mensagemCliente: string): ResultadoEtapa {
+/** Extrai "123" ou "123, apto 45" / "123 bloco B" de uma resposta livre (sem rótulos) à pergunta do número — usado só quando o CEP já foi resolvido em turno anterior e a mensagem atual não trouxe nenhum campo no formato "Rótulo: valor". Nunca inventa um número: mensagem que não começa com dígitos devolve null e o número continua sendo pedido. */
+function extrairNumeroComplementoLivre(texto: string): { numero: string; complemento?: string } | null {
+  const m = texto.trim().match(/^(\d+[a-zA-Z]?)\s*[,.\-–]?\s*(.*)$/)
+  if (!m) return null
+  const complemento = m[2].trim()
+  return { numero: m[1], complemento: complemento || undefined }
+}
+
+/** Mensagem da Etapa 2 quando o ViaCEP devolve rua/bairro/cidade/UF completos — nunca pede confirmação do endereço em si (já veio de fonte real), só o que a consulta não pode saber: número e complemento. */
+function mensagemEnderecoLocalizado(rua: string, bairro: string, cidade: string, uf: string): string {
+  return `Localizei o endereço em ${rua}, ${bairro}, ${cidade}–${uf}. Qual é o número? Se houver apartamento, bloco ou outro complemento, informe também.`
+}
+
+/**
+ * Coleta os dados de entrega em duas etapas (substituiu o formulário único
+ * de 8 campos numa mensagem só):
+ *
+ * Etapa 1 — aceita nome do remetente/destinatário, telefone e CEP em
+ * qualquer ordem, nunca repete o que já foi informado.
+ *
+ * Etapa 2 — assim que o CEP é sintaticamente válido e ainda não foi
+ * consultado nesta jornada (ou foi corrigido pra um valor diferente),
+ * consulta o ViaCEP real (deps.consultarCep) e preenche rua/bairro/cidade/UF
+ * automaticamente; pede só número/complemento e os campos que a consulta não
+ * trouxer (nunca pergunta o que o CEP já respondeu). CEP não localizado pede
+ * pro cliente reenviar.
+ *
+ * Data de entrega e cartão personalizado continuam pedidos depois, pelo
+ * mecanismo já existente de campos faltantes (camposFaltandoFormulario) —
+ * nunca misturados com os quatro campos iniciais nem repetidos.
+ */
+async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
+  const formularioAnterior = estado.dados.formulario ?? {}
   const extraido = extrairFormularioEntrega(mensagemCliente)
-  const formularioAtual: FormularioEntregaDados = { ...(estado.dados.formulario ?? {}), ...extraido }
-  const estadoAtualizado: EstadoConversa = { ...estado, dados: { ...estado.dados, formulario: formularioAtual } }
+  let formularioAtual: FormularioEntregaDados = { ...formularioAnterior, ...extraido }
+  let cepConsultadoViaApi = estado.dados.cepConsultadoViaApi
+  const cepJaConsultadoAntesDesteTurno = !!formularioAnterior.cep && cepConsultadoViaApi === formularioAnterior.cep && formularioAnterior.cep === formularioAtual.cep
+
+  const responder = (mensagem: string): ResultadoEtapa => ({
+    estado: { ...estado, fase: 'aguardando_formulario', dados: { ...estado.dados, formulario: formularioAtual, cepConsultadoViaApi } },
+    mensagem,
+  })
 
   const cepInformadoInvalido = !!formularioAtual.cep && !cepValido(formularioAtual.cep)
   const telefoneInformadoInvalido = !!formularioAtual.telefoneDestinatario && !normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario)
-  const faltando = camposFaltandoFormulario(formularioAtual)
 
   if (cepInformadoInvalido) {
-    return { estado: { ...estadoAtualizado, fase: 'aguardando_formulario' }, mensagem: 'O CEP informado não parece válido — pode confirmar (8 dígitos)?' }
+    return responder('O CEP informado não parece válido — pode confirmar (8 dígitos)?')
   }
   if (telefoneInformadoInvalido) {
-    return { estado: { ...estadoAtualizado, fase: 'aguardando_formulario' }, mensagem: 'O telefone de quem vai receber não ficou claro — pode informar de novo, com DDD?' }
+    return responder('O telefone de quem vai receber não ficou claro — pode informar de novo, com DDD?')
   }
+
+  if (formularioAtual.cep && cepValido(formularioAtual.cep) && cepConsultadoViaApi !== formularioAtual.cep) {
+    const endereco = await deps.consultarCep(formularioAtual.cep)
+    if (!endereco) {
+      formularioAtual = { ...formularioAtual, cep: undefined }
+      cepConsultadoViaApi = undefined
+      return responder('Não consegui localizar esse CEP. Pode conferir e enviar novamente?')
+    }
+    formularioAtual = {
+      ...formularioAtual,
+      rua: formularioAtual.rua || endereco.rua || undefined,
+      bairro: formularioAtual.bairro || endereco.bairro || undefined,
+      cidade: formularioAtual.cidade || endereco.cidade || undefined,
+      uf: formularioAtual.uf || endereco.uf || undefined,
+    }
+    cepConsultadoViaApi = formularioAtual.cep
+
+    if (endereco.rua && endereco.bairro && endereco.cidade && endereco.uf && !formularioAtual.numero) {
+      return responder(mensagemEnderecoLocalizado(endereco.rua, endereco.bairro, endereco.cidade, endereco.uf))
+    }
+  } else if (cepJaConsultadoAntesDesteTurno && !formularioAtual.numero && Object.keys(extraido).length === 0) {
+    // CEP já resolvido num turno anterior e ainda esperando o número —
+    // resposta livre (sem rótulos "Campo: valor"), nunca ignora um número
+    // informado só porque não veio no formato do formulário.
+    const numeroLivre = extrairNumeroComplementoLivre(mensagemCliente)
+    if (numeroLivre) {
+      formularioAtual = { ...formularioAtual, numero: numeroLivre.numero, complemento: formularioAtual.complemento || numeroLivre.complemento }
+    }
+  }
+
+  // Endereço ainda incompleto após a consulta ao CEP: pede só o que falta
+  // (rua e/ou bairro, quando o ViaCEP não trouxe, sempre junto do número),
+  // isolado dos demais campos — nunca junto de remetente/destinatário/data.
+  const faltandoEndereco = (['rua', 'numero', 'bairro'] as const).filter(c => !formularioAtual[c])
+  if (!!formularioAtual.cep && cepConsultadoViaApi === formularioAtual.cep && faltandoEndereco.length > 0) {
+    return responder(montarMensagemCamposFaltando(faltandoEndereco))
+  }
+
+  const faltando = camposFaltandoFormulario(formularioAtual)
   if (faltando.length > 0) {
-    return { estado: { ...estadoAtualizado, fase: 'aguardando_formulario' }, mensagem: montarMensagemCamposFaltando(faltando) }
+    return responder(montarMensagemCamposFaltando(faltando))
   }
 
   // Telefone sempre normalizado pra E.164 antes de seguir — é o formato que
   // a Lalamove exige (Parte 2), nunca enviado "cru" pra frente.
   const telefoneE164 = normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario!)!
   const formularioNormalizado = { ...formularioAtual, telefoneDestinatario: telefoneE164 }
-  const novoEstado: EstadoConversa = { ...estadoAtualizado, fase: 'confirmando_formulario', dados: { ...estadoAtualizado.dados, formulario: formularioNormalizado } }
+  const novoEstado: EstadoConversa = { ...estado, fase: 'confirmando_formulario', dados: { ...estado.dados, formulario: formularioNormalizado, cepConsultadoViaApi } }
   return { estado: novoEstado, mensagem: montarResumoFormulario(formularioNormalizado) }
 }
 
@@ -2123,7 +2206,7 @@ export async function avancarFunil(
     case 'produto_selecionado':
       return etapaConfirmacaoDetalhesProduto(estado, mensagemCliente)
     case 'aguardando_formulario':
-      return etapaFormulario(estado, mensagemCliente)
+      return etapaFormulario(estado, mensagemCliente, deps)
     case 'confirmando_formulario':
       return etapaConfirmandoFormulario(estado, mensagemCliente, deps, agora)
     case 'calculando_frete':

@@ -1512,6 +1512,19 @@ test('Parte 1: nova intenção de compra durante conversa antiga em frete não r
   assert.notEqual(r.estado.fase, 'aguardando_aprovacao_frete', 'nunca retoma a fase antiga de frete')
 })
 
+test('Parte 1: "cancele este pedido. Vamos fazer um novo" em aguardando_pagamento reinicia a jornada, nunca reenvia o link antigo (caso real observado em monitoramento 2026-07-24)', async () => {
+  const deps = depsFake({ buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'] })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: { produto: { nome: 'Arranjo de Orquídeas', preco: 269.63 }, linkPagamento: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=abc-123' },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'cancele este pedido. Vamos fazer um novo', classificarIntencao('cancele este pedido. Vamos fazer um novo', estado.fase), deps)
+  assert.notEqual(r.estado.fase, 'aguardando_pagamento', 'deveria reiniciar a jornada, nunca permanecer aguardando o pagamento cancelado')
+  assert.equal(r.estado.dados.produto, undefined, 'nunca reaproveita o produto do pedido cancelado')
+  assert.doesNotMatch(r.mensagem, /pref_id=abc-123/, 'nunca reenvia o link do pedido que o cliente pediu pra cancelar')
+})
+
 test('Parte 1: "continuar" preserva a compra em andamento, nunca reinicia', async () => {
   const deps = depsFake()
   const estadoEmAndamento: EstadoConversa = {

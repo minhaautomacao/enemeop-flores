@@ -710,6 +710,13 @@ const FRASES_NOVO_PEDIDO = [
   'novo pedido', 'outro pedido', 'outro produto', 'fazer um novo pedido',
   'quero ver op', 'mostrar op', 'mostra op', 'outras opcoes', 'outras op', 'ver outras op',
   'nova compra', 'nova jornada', 'nova encomenda', 'comecar de novo', 'iniciar novamente',
+  // Caso real observado em monitoramento 2026-07-24 (retomada de pagamento
+  // recusado): "cancele este pedido. Vamos fazer um novo" não batia com
+  // nenhuma frase acima — caía no case fase-específico de
+  // aguardando_pagamento, que sempre reenvia o link antigo, ignorando o
+  // pedido explícito de cancelar/recomeçar.
+  'cancelar pedido', 'cancele o pedido', 'cancele este pedido', 'cancelar este pedido',
+  'vamos fazer um novo',
 ]
 
 const FRASES_CONTINUACAO = [

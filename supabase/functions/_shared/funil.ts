@@ -1929,6 +1929,27 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
     return responder(montarMensagemCamposFaltando(faltandoEndereco))
   }
 
+  // Data de entrega: aceita o rótulo "Data de entrega:" OU uma resposta
+  // isolada, sem rótulo — mesma regra já aplicada a telefone/número
+  // isolados acima. Bug real observado em monitoramento 2026-07-24: "Só
+  // faltou completar... Data de entrega:" era a única pergunta pendente, e
+  // qualquer resposta sem rótulo ("amanhã", "25/07/2026", "amanhã às 10 da
+  // manhã") era ignorada por extrairFormularioEntrega (que só reconhece
+  // linhas "Rótulo: valor") — o campo nunca era preenchido e a mesma
+  // pergunta se repetia indefinidamente. Só ativa quando data de entrega é
+  // literalmente o único campo obrigatório faltando (nunca engole uma
+  // resposta destinada a outro campo) e a mensagem parece mesmo uma data —
+  // a validação real (reconhecida ou não, passado ou futuro) continua
+  // acontecendo depois, em etapaConfirmandoFormulario (Parte 2).
+  if (
+    Object.keys(extraido).length === 0 &&
+    !formularioAtual.dataEntrega &&
+    /hoje|amanh[ãa]|\d{1,2}\/\d{1,2}/i.test(mensagemCliente) &&
+    camposFaltandoFormulario(formularioAtual).every(c => c === 'dataEntrega')
+  ) {
+    formularioAtual = { ...formularioAtual, dataEntrega: mensagemCliente.trim() }
+  }
+
   const faltando = camposFaltandoFormulario(formularioAtual)
   if (faltando.length > 0) {
     return responder(montarMensagemCamposFaltando(faltando))

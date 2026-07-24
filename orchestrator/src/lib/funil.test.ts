@@ -2295,6 +2295,44 @@ test('10. depois de aceitar o telefone válido, pede somente o nome do remetente
   assert.doesNotMatch(r2.mensagem, /destinat[áa]rio|CEP|rua|bairro|data de entrega|n[úu]mero/i, 'pede somente o remetente, nenhum outro campo')
 })
 
+// ── Data de entrega — resposta isolada, sem o rótulo "Data de entrega:" ──
+// (bug real observado em monitoramento 2026-07-24: quando data de entrega
+// era o único campo faltando, qualquer resposta sem rótulo era ignorada e
+// a mesma pergunta se repetia indefinidamente — o cliente nunca conseguia
+// concluir o formulário)
+
+test('1. data de entrega isolada em formato DD/MM/AAAA é reconhecida quando é o único campo faltando', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }))
+  const r = await avancarFunil(estado, '25/07/2026', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.dataEntrega, '25/07/2026')
+  assert.equal(r.estado.fase, 'confirmando_formulario', 'formulário completo avança para confirmação, nunca repete a pergunta')
+})
+
+test('2. "amanhã" isolado é reconhecido quando data de entrega é o único campo faltando', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }))
+  const r = await avancarFunil(estado, 'amanhã', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.dataEntrega, 'amanhã')
+  assert.equal(r.estado.fase, 'confirmando_formulario')
+})
+
+test('3. "amanhã às 10 da manhã" (com texto extra) é reconhecido, nunca ignorado', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }))
+  const r = await avancarFunil(estado, 'amanha as 10 da manha', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.dataEntrega, 'amanha as 10 da manha')
+  assert.equal(r.estado.fase, 'confirmando_formulario')
+})
+
+test('4. resposta isolada de data nunca é aceita quando outro campo obrigatório também falta (nunca engole resposta destinada a outro campo)', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined, nomeComprador: undefined }))
+  const r = await avancarFunil(estado, '25/07/2026', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.dataEntrega, undefined, 'nao preenche data quando ainda falta outro campo obrigatorio')
+  assert.equal(r.estado.fase, 'aguardando_formulario')
+})
+
 // ── Etapa 2 — número/complemento em linguagem natural (bug real) ─────────
 // "Número 105" e "numero 105 apto 61" (sem dois-pontos) eram descartados
 // inteiramente pelo parser antigo, que só aceitava "105" puro ou o formato

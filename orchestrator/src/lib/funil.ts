@@ -926,9 +926,22 @@ export function mensagemPagamentoConfirmadoForaDoHorario(): string {
 // real observado em monitoramento 2026-07-24: "quero escolher outro
 // produto" reiniciou a jornada corretamente, mas a resposta ignorava o que
 // o cliente pediu e soava fora de contexto.
+//
+// Lista separada de FRASES_NOVO_PEDIDO de propósito: esta função só produz
+// texto informativo dentro do próprio gate de horário (nunca decide
+// reiniciar a jornada nem é usada fora daqui) — adicionar uma frase aqui
+// nunca afeta pareceNovaIntencaoDeCompra em outras fases (ex.: "não, quero
+// mudar o produto" durante aguardando_aprovacao_frete tem que continuar
+// SEM reiniciar a jornada, comportamento já coberto por teste; misturar as
+// duas listas causaria esse tipo de regressão).
+const FRASES_TROCA_PRODUTO_RECONHECIMENTO = ['trocar o produto', 'trocar produto']
+
 function reconhecimentoAberturaForaDoHorario(mensagemCliente: string): string {
   const n = normalizar(mensagemCliente)
-  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p)))) return 'Claro, vamos montar um novo pedido! '
+  if (
+    FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p))) ||
+    FRASES_TROCA_PRODUTO_RECONHECIMENTO.some(p => n.includes(normalizar(p)))
+  ) return 'Claro, vamos montar um novo pedido! '
   const tipo = TIPOS_PRODUTO.find(t => t.regex.test(n))
   if (tipo) return `Claro, vamos cuidar do seu pedido de ${tipo.termo}! `
   return ''
@@ -939,9 +952,18 @@ export function mensagemAvisoForaDoHorarioComOpcao(mensagemCliente = ''): string
   return `${reconhecimento}Podemos concluir seu pedido agora. Como estamos fora do horário da loja, ele será preparado e entregue no próximo dia de funcionamento, dentro do horário comercial. Deseja continuar?`
 }
 
-/** Lembrete curto enquanto o cliente ainda não respondeu sim/continuar ao aviso — nunca repete o texto completo do aviso de novo. */
-export function mensagemAguardandoRespostaForaDoHorario(): string {
-  return 'Posso adiantar seu pedido agora mesmo fora do horário — é só confirmar. Deseja continuar?'
+/**
+ * Lembrete curto enquanto o cliente ainda não respondeu sim/continuar ao
+ * aviso — nunca repete o texto completo do aviso de novo, nunca avança
+ * sozinho (ainda exige sim/continuar explícito, mesma regra do gate). Só
+ * reconhece o que o cliente disse desta vez (mesmos sinais de
+ * reconhecimentoAberturaForaDoHorario) pra não soar fora de contexto quando
+ * ele pede algo concreto (ex.: "quero trocar o produto") em vez de
+ * responder sim/não — caso real observado em monitoramento 2026-07-24.
+ */
+export function mensagemAguardandoRespostaForaDoHorario(mensagemCliente = ''): string {
+  const reconhecimento = reconhecimentoAberturaForaDoHorario(mensagemCliente)
+  return `${reconhecimento}Posso adiantar seu pedido agora mesmo fora do horário — é só confirmar. Deseja continuar?`
 }
 
 /**
@@ -2307,7 +2329,7 @@ export async function avancarFunil(
       }
       // segue o fluxo normal abaixo, agora liberado.
     } else {
-      return { estado, mensagem: mensagemAguardandoRespostaForaDoHorario() }
+      return { estado, mensagem: mensagemAguardandoRespostaForaDoHorario(mensagemCliente) }
     }
   }
 

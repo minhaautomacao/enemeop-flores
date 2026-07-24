@@ -1585,6 +1585,16 @@ test('Parte 4: aviso fora do horário reconhece o que o cliente pediu, nunca res
   assert.match(rGenerico.mensagem, /^Podemos concluir seu pedido agora/, 'sem sinal reconhecível, mantém o texto exato original, sem prefixo inventado')
 })
 
+test('Parte 4: preso em aviso_fora_horario, "quero trocar o produto" e reconhecido no lembrete curto, mas ainda exige sim/continuar (caso real observado em monitoramento 2026-07-24)', async () => {
+  const deps = depsFake()
+  const estadoAvisado: EstadoConversa = { fase: 'aviso_fora_horario', dados: {}, perguntasFeitas: [] }
+  const r = await avancarFunil(estadoAvisado, 'quero trocar o produto', 'compra_produto', deps, true, 'amanhã, a partir das 09h')
+  assert.equal(r.estado.fase, 'aviso_fora_horario', 'nunca avanca sozinho so por reconhecer o pedido, ainda exige sim/continuar')
+  assert.match(r.mensagem, /^Claro, vamos montar um novo pedido!/, 'reconhece o pedido de trocar produto em vez do lembrete generico')
+  assert.match(r.mensagem, /Deseja continuar\?/)
+  assert.doesNotMatch(r.mensagem, /9h às 19h|Podemos concluir seu pedido agora\. Como/, 'nunca repete o aviso completo de novo')
+})
+
 test('Parte 4: fora do horário aguarda sim/continuar antes de avançar, nunca repete o aviso completo de novo', async () => {
   const deps = depsFake()
   const estadoAvisado: EstadoConversa = { fase: 'aviso_fora_horario', dados: {}, perguntasFeitas: [] }

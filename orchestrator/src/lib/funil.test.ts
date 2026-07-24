@@ -670,13 +670,13 @@ test('dispatcher: qualificacao pergunta um campo por vez, sem repetir, e nunca p
   const r1 = await avancarFunil(estado, 'Oi, gostaria de fazer um pedido', 'recomendacao', deps)
   estado = r1.estado
   assert.equal(estado.fase, 'qualificacao')
-  assert.match(r1.mensagem, /Pra qual ocasião/i)
+  assert.match(r1.mensagem, /Para qual ocasião/i)
   assert.doesNotMatch(r1.mensagem, /orçamento|orcamento/i, 'orcamento nunca deve ser perguntado')
 
   // A pergunta ja feita nao pode repetir mesmo em rodadas seguintes.
   const r2 = await avancarFunil(estado, 'é pra aniversário', 'recomendacao', deps)
   estado = r2.estado
-  assert.doesNotMatch(r2.mensagem, /Pra qual ocasião/i, 'nao deve repetir pergunta ja feita')
+  assert.doesNotMatch(r2.mensagem, /Para qual ocasião/i, 'nao deve repetir pergunta ja feita')
   assert.doesNotMatch(r2.mensagem, /orçamento|orcamento/i, 'orcamento nunca deve ser perguntado')
 })
 
@@ -1806,6 +1806,58 @@ test('retomada apos intervalo 2: "continuar" restaura a fase e os dados salvos; 
   assert.equal(rAmbiguo.mensagem, mensagemRetomadaAposIntervalo())
 })
 
+// ── Retomada após intervalo — bug real: espaço duplo não era reconhecido ──
+
+test('1. retomada: "nova  compra" (espaço duplo) avança sem repetir a pergunta', async () => {
+  const deps = depsFake()
+  const estadoAguardando: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      valorFrete: 22.5, valorTotal: 162.5,
+      freteDetalhes: { cotadoEm: new Date().toISOString() },
+      faseAntesDoIntervalo: 'aguardando_aprovacao_frete',
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estadoAguardando, 'nova  compra', 'compra_produto', deps)
+  assert.notEqual(r.estado.fase, 'retomada_apos_intervalo', 'espaço duplo nunca trava no gate de retomada')
+  assert.notEqual(r.mensagem, mensagemRetomadaAposIntervalo(), 'nunca repete a mesma pergunta')
+  assert.equal(r.estado.dados.produto, undefined, 'reinicia a jornada, nunca reaproveita produto anterior')
+})
+
+test('2. retomada: variações claras de "nova compra" avançam sem repetir', async () => {
+  const deps = depsFake()
+  const estadoAguardando: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 }, faseAntesDoIntervalo: 'aguardando_formulario' },
+    perguntasFeitas: [],
+  }
+  const variacoes = ['novo pedido', 'nova encomenda', 'começar de novo', 'iniciar novamente', 'quero fazer uma nova compra']
+  for (const texto of variacoes) {
+    const r = await avancarFunil(estadoAguardando, texto, 'compra_produto', deps)
+    assert.notEqual(r.estado.fase, 'retomada_apos_intervalo', `"${texto}" deveria reiniciar a jornada`)
+    assert.equal(r.estado.dados.produto, undefined, `"${texto}" nunca deveria reaproveitar o produto anterior`)
+  }
+})
+
+test('3. retomada: continuar o pedido anterior permanece funcionando', async () => {
+  const deps = depsFake()
+  const estadoAguardando: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      faseAntesDoIntervalo: 'aguardando_aprovacao_frete',
+      valorFrete: 22.5, valorTotal: 162.5,
+      freteDetalhes: { cotadoEm: new Date().toISOString() },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estadoAguardando, 'quero continuar o pedido anterior', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_aprovacao_frete', 'restaura exatamente a fase salva')
+  assert.equal(r.estado.dados.produto?.nome, 'Buquê de Rosas', 'recupera o contexto real, nunca reinventa')
+})
+
 // ── Parte 4 — validade da cotação real de frete ───────────────────────────
 
 test('cotacao 29 minutos ainda valida, 30 minutos ja vencida — nunca gera pagamento sobre cotação vencida', async () => {
@@ -2138,4 +2190,50 @@ test('8. telefone isolado incompleto é rejeitado com a mensagem correta, sem tr
   const r2 = await avancarFunil(r.estado, '(11) 91234-5678', 'compra_produto', deps)
   assert.equal(r2.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
   assert.doesNotMatch(r2.mensagem, /incompleto/i)
+})
+
+// ── Telefone — bug real: valor inválido rotulado ficava preso no estado ──
+// e bloqueava um telefone válido enviado depois (isolado ou rotulado).
+
+test('4. telefone inválido rotulado nunca fica salvo no estado', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, 'Telefone do destinatário: Maria', 'compra_produto', deps)
+  assert.equal(r.mensagem, 'O telefone parece incompleto. Pode enviar novamente com o DDD?')
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, undefined, 'valor inválido nunca persiste no estado')
+})
+
+test('5. telefone inválido rotulado seguido de número válido isolado substitui o valor anterior', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeDestinatario: 'Camila' })
+  const r1 = await avancarFunil(estado, 'Telefone do destinatário: Maria', 'compra_produto', deps)
+  assert.equal(r1.estado.dados.formulario?.telefoneDestinatario, undefined)
+
+  const r2 = await avancarFunil(r1.estado, '(11) 91234-5678', 'compra_produto', deps)
+  assert.equal(r2.estado.dados.formulario?.telefoneDestinatario, '+5511912345678', 'telefone válido substitui o inválido anterior, nunca fica bloqueado')
+})
+
+test('6. número válido isolado com espaços é reconhecido', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario({ nomeComprador: 'Ana', nomeDestinatario: 'Camila' })
+  const r = await avancarFunil(estado, '11 91234 5678', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+})
+
+test('10. depois de aceitar o telefone válido, pede somente o nome do remetente (sequência real do teste)', async () => {
+  const deps = depsFake()
+  const estadoBase = estadoAguardandoFormulario({
+    nomeDestinatario: 'Camila',
+    cep: '04204-030', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', cidade: 'São Paulo', uf: 'SP',
+    dataEntrega: 'amanhã',
+  })
+  const estado: EstadoConversa = { ...estadoBase, dados: { ...estadoBase.dados, cepConsultadoViaApi: '04204-030' } }
+
+  const r1 = await avancarFunil(estado, 'Telefone do destinatário: Maria', 'compra_produto', deps)
+  assert.equal(r1.estado.dados.formulario?.telefoneDestinatario, undefined)
+
+  const r2 = await avancarFunil(r1.estado, '(11) 91234-5678', 'compra_produto', deps)
+  assert.equal(r2.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+  assert.match(r2.mensagem, /remetente/i)
+  assert.doesNotMatch(r2.mensagem, /destinat[áa]rio|CEP|rua|bairro|data de entrega|n[úu]mero/i, 'pede somente o remetente, nenhum outro campo')
 })

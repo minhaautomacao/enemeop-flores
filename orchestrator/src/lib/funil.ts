@@ -657,7 +657,7 @@ export function pareceSaudacaoSimples(mensagem: string): boolean {
 const FRASES_NOVO_PEDIDO = [
   'novo pedido', 'outro pedido', 'outro produto', 'fazer um novo pedido',
   'quero ver op', 'mostrar op', 'mostra op', 'outras opcoes', 'outras op', 'ver outras op',
-  'nova compra', 'nova jornada',
+  'nova compra', 'nova jornada', 'nova encomenda', 'comecar de novo', 'iniciar novamente',
 ]
 
 const FRASES_CONTINUACAO = [
@@ -721,6 +721,23 @@ export function deveGatilharRetomadaAposIntervalo(estado: EstadoConversa, agora:
 }
 
 /**
+ * Normalização adicional só pra comparar frases curtas de intenção (gate de
+ * retomada) — nunca usada em parsing de data/CEP/telefone, que dependem de
+ * caracteres como "/" preservados exatamente. Além de acentos/caixa (já
+ * feito por normalizar()), remove pontuação irrelevante e colapsa qualquer
+ * sequência de espaços (ex.: "nova  compra", com espaço duplo, digitado
+ * sem querer) num único espaço — bug real: "nova  compra" não batia com
+ * "nova compra" via includes() por causa do espaço extra, e a Flora
+ * repetia a pergunta de retomada em vez de reiniciar a jornada.
+ */
+function normalizarFrase(texto: string): string {
+  return normalizar(texto)
+    .replace(/[.,!?;:]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
  * Resolve a resposta do cliente ao gate de retomada — "nova compra" reinicia
  * a jornada (nunca reaproveita produto/endereço/frete/pagamento antigos);
  * "continuar"/confirmação restaura a fase salva e mostra o resumo real de
@@ -728,11 +745,11 @@ export function deveGatilharRetomadaAposIntervalo(estado: EstadoConversa, agora:
  * sozinho.
  */
 function resolverRetomadaAposIntervalo(estado: EstadoConversa, mensagemCliente: string, agora: Date): ResultadoEtapa | null {
-  const n = normalizar(mensagemCliente)
-  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p)))) {
+  const n = normalizarFrase(mensagemCliente)
+  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizarFrase(p)))) {
     return null // sinaliza pro chamador reiniciar a jornada e seguir o fluxo normal
   }
-  const querContinuar = FRASES_CONTINUACAO.some(p => n.includes(normalizar(p))) || pareceConfirmacao(mensagemCliente)
+  const querContinuar = FRASES_CONTINUACAO.some(p => n.includes(normalizarFrase(p))) || pareceConfirmacao(mensagemCliente)
   if (querContinuar) {
     const faseAnterior = estado.dados.faseAntesDoIntervalo ?? 'inicio'
     const dadosRestaurados: DadosPedido = { ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString() }
@@ -900,7 +917,7 @@ export function montarMensagemAguardandoPagamento(dados: DadosPedido): string {
 // Único gate antes de mostrar categorias/produtos: entender ocasião OU tipo
 // de produto (ver Parte B.4) — qualquer um dos dois já é suficiente.
 const CAMPOS_QUALIFICACAO: { campo: keyof DadosPedido; pergunta: string }[] = [
-  { campo: 'ocasiao', pergunta: 'Pra qual ocasião é o presente?' },
+  { campo: 'ocasiao', pergunta: 'Para qual ocasião é o presente?' },
 ]
 
 const TIPOS_PRODUTO: { termo: string; regex: RegExp }[] = [
@@ -1703,13 +1720,26 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
     mensagem,
   })
 
-  // Telefone do destinatário ainda faltando: aceita uma resposta isolada
-  // (sem o rótulo "Telefone:"), não só o formato rotulado. Só tenta
-  // interpretar a mensagem inteira como telefone quando ela não trouxe
-  // NENHUM campo rotulado reconhecido — nunca confunde dígitos soltos de
-  // outros campos (CEP, número...) numa resposta rotulada de vários campos
-  // com um telefone isolado.
-  if (!formularioAtual.telefoneDestinatario && Object.keys(extraido).length === 0) {
+  // Telefone do destinatário: aceita o rótulo "Telefone do destinatário:"
+  // OU uma resposta isolada, sem rótulo. Nunca persiste um valor que não
+  // passe na validação — bug real: um telefone inválido rotulado (ex.:
+  // "Telefone do destinatário: Maria") ficava salvo no estado, e isso
+  // bloqueava o reconhecimento de um telefone válido enviado depois
+  // (isolado), porque o campo já não estava mais vazio. Um telefone válido
+  // sempre substitui um inválido anterior, seja rotulado ou isolado.
+  if (extraido.telefoneDestinatario !== undefined) {
+    const normalizado = normalizarTelefoneDestinatarioBR(extraido.telefoneDestinatario)
+    if (normalizado) {
+      formularioAtual = { ...formularioAtual, telefoneDestinatario: normalizado }
+    } else {
+      formularioAtual = { ...formularioAtual, telefoneDestinatario: undefined }
+      return responder('O telefone parece incompleto. Pode enviar novamente com o DDD?')
+    }
+  } else if (!formularioAtual.telefoneDestinatario && Object.keys(extraido).length === 0) {
+    // Só tenta interpretar a mensagem inteira como telefone quando ela não
+    // trouxe NENHUM campo rotulado reconhecido — nunca confunde dígitos
+    // soltos de outros campos (CEP, número...) numa resposta rotulada de
+    // vários campos com um telefone isolado.
     const tentativaTelefone = interpretarTelefoneLivre(mensagemCliente)
     if (tentativaTelefone?.tipo === 'valido') {
       formularioAtual = { ...formularioAtual, telefoneDestinatario: tentativaTelefone.valor }
@@ -1719,13 +1749,9 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
   }
 
   const cepInformadoInvalido = !!formularioAtual.cep && !cepValido(formularioAtual.cep)
-  const telefoneInformadoInvalido = !!formularioAtual.telefoneDestinatario && !normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario)
 
   if (cepInformadoInvalido) {
     return responder('O CEP informado não parece válido — pode confirmar (8 dígitos)?')
-  }
-  if (telefoneInformadoInvalido) {
-    return responder('O telefone parece incompleto. Pode enviar novamente com o DDD?')
   }
 
   if (formularioAtual.cep && cepValido(formularioAtual.cep) && cepConsultadoViaApi !== formularioAtual.cep) {

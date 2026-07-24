@@ -53,6 +53,7 @@ import {
   querCartaoImpresso,
   camposFaltandoFormulario,
   montarMensagemCamposFaltando,
+  formatarTelefoneExibicao,
 } from './funil.js'
 
 // 1. cliente pede buquê para aniversário
@@ -2349,4 +2350,164 @@ test('9. após "sim", o formulário inicial não é reenviado', async () => {
   const r4 = await avancarFunil(estadoPersistido, 'sim', 'compra_produto', deps)
   assert.doesNotMatch(r4.mensagem, /CEP da entrega/i, 'nunca reenvia o formulário inicial completo')
   assert.notEqual(r4.estado.fase, 'aguardando_formulario', 'fase nunca volta pro início do formulário')
+})
+
+// ── Retomada com dados do formulário + correções naturais (bug real) ─────
+// Números/dados sintéticos, nunca reproduzem o teste real do Instagram.
+
+test('1. formulário rotulado recebido em retomada_apos_intervalo é aplicado imediatamente, sem descartar nem exigir "continuar" antes', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      faseAntesDoIntervalo: 'aguardando_formulario',
+      formulario: { nomeComprador: 'Carlos', nomeDestinatario: 'Carlos', dataEntrega: 'amanhã' },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(
+    estado,
+    'Nome do remetente: Carlos\nNome do destinatário: Maria\nTelefone do destinatário: 11948579179\nCEP da entrega: 01040-010',
+    'compra_produto',
+    deps,
+  )
+  assert.notEqual(r.mensagem, mensagemRetomadaAposIntervalo(), 'nunca descarta os dados pedindo continuar/nova compra de novo')
+  assert.equal(r.estado.dados.faseAntesDoIntervalo, undefined, 'sai do gate de retomada')
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511948579179')
+  assert.equal(r.estado.dados.formulario?.cep, '01040-010')
+})
+
+test('2. destinatário novo substitui destinatário antigo ao retomar com dados do formulário', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      faseAntesDoIntervalo: 'aguardando_formulario',
+      formulario: { nomeComprador: 'Carlos', nomeDestinatario: 'Carlos' },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Nome do destinatário: Maria', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.nomeDestinatario, 'Maria')
+})
+
+test('3. campos antigos não mencionados na mensagem de retomada permanecem', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      faseAntesDoIntervalo: 'aguardando_formulario',
+      formulario: { nomeComprador: 'Carlos', nomeDestinatario: 'Carlos', dataEntrega: 'amanhã' },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Nome do destinatário: Maria', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.nomeComprador, 'Carlos', 'remetente não mencionado permanece')
+  assert.equal(r.estado.dados.formulario?.dataEntrega, 'amanhã', 'data não mencionada permanece')
+})
+
+test('4. mensagem comum sem dados nem intenção clara mantém a pergunta de retomada', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 }, faseAntesDoIntervalo: 'aguardando_formulario' },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'oi tudo bem?', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'retomada_apos_intervalo')
+  assert.equal(r.mensagem, mensagemRetomadaAposIntervalo())
+})
+
+test('5. correção "quem vai receber é [nome]" atualiza somente o destinatário', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      formulario: {
+        nomeComprador: 'Ana', nomeDestinatario: 'Carlos', telefoneDestinatario: '+5511999990000',
+        cep: '04204-030', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', dataEntrega: 'amanhã',
+      },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'o destinatário está errado, quem vai receber é Maria', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.nomeDestinatario, 'Maria')
+  assert.equal(r.estado.dados.formulario?.nomeComprador, 'Ana', 'outros campos não mudam')
+})
+
+test('6. "Destinatário: Maria. Corrija" salva somente o nome, sem a palavra de comando', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      formulario: {
+        nomeComprador: 'Carlos', nomeDestinatario: 'Carlos', telefoneDestinatario: '+5511948579179',
+        cep: '01040-010', rua: 'Rua do Boticário', numero: '105', bairro: 'República', dataEntrega: '24/07/2026',
+      },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Destinatário: Maria. Corrija', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.nomeDestinatario, 'Maria')
+})
+
+test('7. "está errado" pergunta qual dado corrigir, sem repetir o resumo', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      formulario: {
+        nomeComprador: 'Carlos', nomeDestinatario: 'Carlos', telefoneDestinatario: '+5511948579179',
+        cep: '01040-010', rua: 'Rua do Boticário', numero: '105', bairro: 'República', dataEntrega: '24/07/2026',
+      },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Tá errado', 'compra_produto', deps)
+  assert.equal(r.mensagem, 'Qual dado você deseja corrigir?')
+  assert.doesNotMatch(r.mensagem, /Confere os dados de entrega/i, 'nunca repete o resumo completo')
+})
+
+test('8. correções rotuladas de outros campos (ex.: CEP) continuam funcionando', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      formulario: {
+        nomeComprador: 'Ana', nomeDestinatario: 'Camila', telefoneDestinatario: '+5511999990000',
+        cep: '04204-030', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', dataEntrega: 'amanhã',
+      },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'CEP: 01040-010', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.cep, '01040-010')
+})
+
+test('9. telefone é armazenado em E.164 mas exibido sem +55, no padrão brasileiro', async () => {
+  assert.equal(formatarTelefoneExibicao('+5511948579179'), '(11) 94857-9179')
+
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'confirmando_formulario',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      formulario: {
+        nomeComprador: 'Ana', nomeDestinatario: 'Camila', telefoneDestinatario: '+5511999990000',
+        cep: '04204-030', rua: 'Rua das Flores', numero: '123', bairro: 'Ipiranga', dataEntrega: 'amanhã',
+      },
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'tudo bem, obrigado', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511999990000', 'armazenamento interno continua E.164')
+  assert.doesNotMatch(r.mensagem, /\+55/, 'nunca mostra o +55 pro cliente')
+  assert.match(r.mensagem, /\(11\) 99999-0000/, 'exibe no padrão brasileiro')
 })

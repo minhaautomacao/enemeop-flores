@@ -405,6 +405,24 @@ export function normalizarTelefoneDestinatarioBR(raw: string): string | null {
   return `+${digitos}`
 }
 
+/**
+ * Formata um telefone já normalizado (E.164, +55DDDNÚMERO) pro padrão
+ * brasileiro de exibição — a Flora nunca mostra o "+55" pro cliente, só
+ * usado internamente (E.164 é exigido por Meta/WhatsApp/Mercado Pago/
+ * Lalamove). Nunca migra nem reescreve o valor armazenado — só formata na
+ * hora de montar a mensagem. Valor em formato inesperado é devolvido como
+ * veio, nunca quebra a mensagem.
+ */
+export function formatarTelefoneExibicao(telefone: string): string {
+  const digitos = telefone.replace(/\D/g, '')
+  const semDDI = digitos.startsWith('55') && (digitos.length === 12 || digitos.length === 13)
+    ? digitos.slice(2)
+    : digitos
+  if (semDDI.length === 11) return `(${semDDI.slice(0, 2)}) ${semDDI.slice(2, 7)}-${semDDI.slice(7)}`
+  if (semDDI.length === 10) return `(${semDDI.slice(0, 2)}) ${semDDI.slice(2, 6)}-${semDDI.slice(6)}`
+  return telefone
+}
+
 /** Resumo sanitizado do formulário pra confirmação — nunca mostra o CEP sozinho sem o resto do endereço, nem inventa campo ausente. */
 export function montarResumoFormulario(dados: FormularioEntregaDados): string {
   const linhas = [
@@ -412,7 +430,7 @@ export function montarResumoFormulario(dados: FormularioEntregaDados): string {
     '',
     dados.nomeComprador ? `- Pedido de: ${dados.nomeComprador}` : null,
     dados.nomeDestinatario ? `- Destinatário: ${dados.nomeDestinatario}` : null,
-    dados.telefoneDestinatario ? `- Telefone do destinatário: ${dados.telefoneDestinatario}` : null,
+    dados.telefoneDestinatario ? `- Telefone do destinatário: ${formatarTelefoneExibicao(dados.telefoneDestinatario)}` : null,
     (dados.rua || dados.numero) ? `- Endereço: ${[dados.rua, dados.numero].filter(Boolean).join(', ')}${dados.complemento ? ` (${dados.complemento})` : ''}` : null,
     (dados.bairro || dados.cidade || dados.uf) ? `- Bairro/Cidade: ${[dados.bairro, dados.cidade, dados.uf].filter(Boolean).join(', ')}` : null,
     dados.cep ? `- CEP: ${dados.cep}` : null,
@@ -751,22 +769,47 @@ function normalizarFrase(texto: string): string {
  * "continuar"/confirmação restaura a fase salva e mostra o resumo real de
  * onde a conversa parou; qualquer outra coisa repete a pergunta, sem avançar
  * sozinho.
+ *
+ * Bug real: quando o cliente respondia ao gate já trazendo campos rotulados
+ * do formulário (ex.: "Remetente: ...\nCEP da entrega: ..."), a Flora
+ * descartava esses dados, mostrava a pergunta de novo, e só depois de
+ * "continuar" restaurava dados ANTIGOS (sem aplicar os novos). Agora, campos
+ * rotulados reconhecidos contam como intenção clara de continuar — aplica
+ * imediatamente sobre o formulário já salvo (reusando etapaFormulario, nunca
+ * duplicando a validação/consulta real de CEP e telefone), sem exigir
+ * "continuar" antes.
  */
-function resolverRetomadaAposIntervalo(estado: EstadoConversa, mensagemCliente: string, agora: Date): ResultadoEtapa | null {
+async function resolverRetomadaAposIntervalo(
+  estado: EstadoConversa,
+  mensagemCliente: string,
+  deps: DependenciasFunil,
+  agora: Date,
+): Promise<ResultadoEtapa | null> {
   const n = normalizarFrase(mensagemCliente)
   if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizarFrase(p)))) {
     return null // sinaliza pro chamador reiniciar a jornada e seguir o fluxo normal
   }
-  const querContinuar = FRASES_CONTINUACAO.some(p => n.includes(normalizarFrase(p))) || pareceConfirmacao(mensagemCliente)
-  if (querContinuar) {
-    const faseAnterior = estado.dados.faseAntesDoIntervalo ?? 'inicio'
-    const dadosRestaurados: DadosPedido = { ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString() }
-    return {
-      estado: { ...estado, fase: faseAnterior, dados: dadosRestaurados },
-      mensagem: montarMensagemRetomada(faseAnterior, dadosRestaurados),
-    }
+
+  const trouxeDadosDoFormulario = Object.keys(extrairFormularioEntrega(mensagemCliente)).length > 0
+  const querContinuar = trouxeDadosDoFormulario
+    || FRASES_CONTINUACAO.some(p => n.includes(normalizarFrase(p)))
+    || pareceConfirmacao(mensagemCliente)
+
+  if (!querContinuar) {
+    return { estado, mensagem: mensagemRetomadaAposIntervalo() }
   }
-  return { estado, mensagem: mensagemRetomadaAposIntervalo() }
+
+  const faseAnterior = estado.dados.faseAntesDoIntervalo ?? 'inicio'
+  const dadosRestaurados: DadosPedido = { ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString() }
+
+  if (trouxeDadosDoFormulario) {
+    return etapaFormulario({ ...estado, fase: 'aguardando_formulario', dados: dadosRestaurados }, mensagemCliente, deps)
+  }
+
+  return {
+    estado: { ...estado, fase: faseAnterior, dados: dadosRestaurados },
+    mensagem: montarMensagemRetomada(faseAnterior, dadosRestaurados),
+  }
 }
 
 // Pergunta direta de disponibilidade por nome de produto — "tem girassol?",
@@ -1919,11 +1962,85 @@ function montarMensagemAprovacaoFrete(dados: DadosPedido): string {
   ].filter((l): l is string => l !== null).join('\n')
 }
 
+// ── Correção de campos em confirmando_formulario (linguagem natural) ─────
+//
+// Bug real: uma correção rotulada com texto de comando junto ("Destinatário:
+// Maria. Corrija") salvava a frase inteira, incluindo a palavra de comando,
+// como se fosse o nome; e uma correção em linguagem natural sem rótulo
+// ("o destinatário é Maria") não era reconhecida de jeito nenhum.
+
+const PALAVRAS_COMANDO_CORRECAO = ['corrija', 'corrigir', 'por favor', 'esta errado', 'altere', 'troque']
+
+/** Remove uma palavra/frase de comando no FINAL do valor (nunca no meio — nunca corrompe nomes compostos), com a pontuação solta ao redor. */
+function limparValorCorrecao(valorBruto: string): string {
+  let v = valorBruto.trim()
+  const padraoComandoFinal = new RegExp(
+    `[\\s,.;!]*\\b(${PALAVRAS_COMANDO_CORRECAO.map(p => p.replace(/\s+/g, '\\s+')).join('|')})\\b\\.?$`,
+    'i',
+  )
+  v = v.replace(padraoComandoFinal, '').trim()
+  v = v.replace(/[.,;!]+$/, '').trim()
+  return v
+}
+
+/** Aplica limparValorCorrecao a cada valor de campo extraído — nunca deixa uma palavra de comando (ex.: "Corrija") ser salva como parte do dado. */
+function limparCamposCorrecao(campos: Partial<FormularioEntregaDados>): Partial<FormularioEntregaDados> {
+  const limpo: Partial<FormularioEntregaDados> = {}
+  for (const [campo, valor] of Object.entries(campos)) {
+    if (typeof valor !== 'string') continue
+    const valorLimpo = limparValorCorrecao(valor)
+    if (valorLimpo) (limpo as Record<string, string>)[campo] = valorLimpo
+  }
+  return limpo
+}
+
+// Cada padrão reconhece o campo pelo sinônimo mencionado e captura o valor
+// depois do conector "é"/"eh"/"para" — nunca no meio da frase (o `[^\n]*?`
+// preguiçoso avança só até o primeiro conector real). Restrito aos campos
+// pedidos: remetente, destinatário, telefone, número, complemento, CEP e
+// data — nunca tenta adivinhar um campo não mencionado explicitamente.
+//
+// O conector usa `\s` (espaço) como delimitador, nunca `\b` — "é" é um
+// caractere acentuado e `\b` no JS (sem a flag /u com \p{...}) não trata
+// letras acentuadas como caractere de palavra, então `\bé\b` nunca bate
+// (bug pego pelos próprios testes: o regex nunca casava nada).
+const CAMPOS_CORRECAO_LIVRE: { campo: keyof FormularioEntregaDados; padrao: RegExp }[] = [
+  { campo: 'nomeDestinatario', padrao: /(?:quem vai receber|destinat[aá]rio)[^\n]*?\s(?:é|eh|para)\s+(.+)$/i },
+  { campo: 'nomeComprador', padrao: /(?:remetente|quem est[aá] fazendo o pedido)[^\n]*?\s(?:é|eh|para)\s+(.+)$/i },
+  { campo: 'telefoneDestinatario', padrao: /telefone[^\n]*?\s(?:é|eh|para)\s+(.+)$/i },
+  { campo: 'numero', padrao: /n[uú]mero[^\n]*?\s(?:é|eh|para)\s+(.+)$/i },
+  { campo: 'complemento', padrao: /complemento[^\n]*?\s(?:é|eh|para)\s+(.+)$/i },
+  { campo: 'cep', padrao: /\bcep\b[^\n]*?\s(?:é|eh|para)\s+(.+)$/i },
+  { campo: 'dataEntrega', padrao: /data(?:\s+de\s+entrega)?[^\n]*?\s(?:é|eh|para)\s+(.+)$/i },
+]
+
+/** Reconhece uma correção em linguagem natural, sem rótulo "Campo: valor" — ex.: "o destinatário é Maria", "corrija o destinatário para Maria". Só usado quando extrairFormularioEntrega não achou nada rotulado. */
+function extrairCorrecaoLivre(texto: string): Partial<FormularioEntregaDados> | null {
+  for (const { campo, padrao } of CAMPOS_CORRECAO_LIVRE) {
+    const m = texto.match(padrao)
+    if (m) {
+      const valor = limparValorCorrecao(m[1])
+      if (valor) return { [campo]: valor } as Partial<FormularioEntregaDados>
+    }
+  }
+  return null
+}
+
+const FRASES_REJEICAO_SEM_CAMPO = ['esta errado', 'ta errado', 'errado', 'incorreto', 'nao esta certo']
+
+/** true só quando a mensagem é uma rejeição isolada ("tá errado"), sem indicar qual campo — nunca dispara se algum dado real já foi extraído antes (ver ordem de checagem em etapaConfirmandoFormulario). */
+function pareceRejeicaoSemCampo(mensagem: string): boolean {
+  const n = normalizarFrase(mensagem)
+  return FRASES_REJEICAO_SEM_CAMPO.some(f => n === f)
+}
+
 /** Coleta a confirmação dos dados do formulário — nunca cota frete antes disso (Parte 3.3/3.4). Cliente pode corrigir um campo em vez de confirmar; nunca perde os dados já certos. */
 async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, agora: Date): Promise<ResultadoEtapa> {
   if (!pareceConfirmacao(mensagemCliente)) {
-    const correcao = extrairFormularioEntrega(mensagemCliente)
-    if (Object.keys(correcao).length > 0) {
+    const rotulada = extrairFormularioEntrega(mensagemCliente)
+    const correcao = Object.keys(rotulada).length > 0 ? limparCamposCorrecao(rotulada) : extrairCorrecaoLivre(mensagemCliente)
+
+    if (correcao && Object.keys(correcao).length > 0) {
       const formularioAtualizado = { ...(estado.dados.formulario ?? {}), ...correcao }
       // Corrigir qualquer campo do formulário invalida uma cotação anterior
       // (Parte 4: "mudança de endereço invalida a cotação") — nunca deixa
@@ -1939,6 +2056,16 @@ async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemClient
         mensagem: montarResumoFormulario(formularioAtualizado),
       }
     }
+
+    // "está errado"/"tá errado" sozinho, sem indicar qual campo: bug real —
+    // a Flora repetia o mesmo resumo sem perguntar nada. Agora pergunta
+    // objetivamente qual dado corrigir; só reenvia o resumo depois de uma
+    // correção real. Mensagens não reconhecidas como rejeição "vazia" caem
+    // no comportamento já existente (reenvia o resumo, pede confirmação).
+    if (pareceRejeicaoSemCampo(mensagemCliente)) {
+      return { estado, mensagem: 'Qual dado você deseja corrigir?' }
+    }
+
     return { estado, mensagem: `Sem problemas — me avisa quando os dados estiverem certos.\n\n${montarResumoFormulario(estado.dados.formulario ?? {})}` }
   }
 
@@ -2122,7 +2249,7 @@ export async function avancarFunil(
   // logo abaixo (estadoComPedidoInconsistente/pareceNovaIntencaoDeCompra
   // nunca disparam aqui pois a fase é 'retomada_apos_intervalo').
   if (estado.fase === 'retomada_apos_intervalo') {
-    const resolucao = resolverRetomadaAposIntervalo(estado, mensagemCliente, agora)
+    const resolucao = await resolverRetomadaAposIntervalo(estado, mensagemCliente, deps, agora)
     if (resolucao) return resolucao
     estado = reiniciarJornada(mensagemCliente)
     intencao = classificarIntencao(mensagemCliente, estado.fase)

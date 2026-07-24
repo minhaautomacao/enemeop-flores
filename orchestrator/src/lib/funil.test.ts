@@ -2237,3 +2237,116 @@ test('10. depois de aceitar o telefone válido, pede somente o nome do remetente
   assert.match(r2.mensagem, /remetente/i)
   assert.doesNotMatch(r2.mensagem, /destinat[áa]rio|CEP|rua|bairro|data de entrega|n[úu]mero/i, 'pede somente o remetente, nenhum outro campo')
 })
+
+// ── Etapa 2 — número/complemento em linguagem natural (bug real) ─────────
+// "Número 105" e "numero 105 apto 61" (sem dois-pontos) eram descartados
+// inteiramente pelo parser antigo, que só aceitava "105" puro ou o formato
+// "Rótulo: valor". Números sintéticos, endereço fixo de teste.
+
+function estadoEsperandoNumero(overrides: Partial<FormularioEntregaDados> = {}): EstadoConversa {
+  const base = estadoAguardandoFormulario({
+    nomeComprador: 'Ana', nomeDestinatario: 'Camila', telefoneDestinatario: '+5511999990000',
+    cep: '04204-030', rua: 'Rua das Flores', bairro: 'Ipiranga', cidade: 'São Paulo', uf: 'SP',
+    ...overrides,
+  })
+  return { ...base, dados: { ...base.dados, cepConsultadoViaApi: '04204-030' } }
+}
+
+test('1. "Número 105" (sem dois-pontos) salva o número', async () => {
+  const deps = depsFake()
+  const r = await avancarFunil(estadoEsperandoNumero(), 'Número 105', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.numero, '105')
+})
+
+test('2. "numero 105 apto 61" salva número e complemento', async () => {
+  const deps = depsFake()
+  const r = await avancarFunil(estadoEsperandoNumero(), 'numero 105 apto 61', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.numero, '105')
+  assert.equal(r.estado.dados.formulario?.complemento, 'apto 61')
+})
+
+test('3. "105 apto 61" salva número e complemento', async () => {
+  const deps = depsFake()
+  const r = await avancarFunil(estadoEsperandoNumero(), '105 apto 61', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.numero, '105')
+  assert.equal(r.estado.dados.formulario?.complemento, 'apto 61')
+})
+
+test('4. formas com dois-pontos continuam funcionando: "Número: 105"', async () => {
+  const deps = depsFake()
+  const r = await avancarFunil(estadoEsperandoNumero(), 'Número: 105', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.numero, '105')
+})
+
+test('5. número isolado continua funcionando: "105"', async () => {
+  const deps = depsFake()
+  const r = await avancarFunil(estadoEsperandoNumero(), '105', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.numero, '105')
+})
+
+test('6. telefone e CEP nunca são interpretados como número de endereço', async () => {
+  const deps = depsFake()
+  const rTelefone = await avancarFunil(estadoEsperandoNumero(), '11912345678', 'compra_produto', deps)
+  assert.equal(rTelefone.estado.dados.formulario?.numero, undefined, 'telefone isolado nunca vira número')
+
+  const rCep = await avancarFunil(estadoEsperandoNumero(), '01040-010', 'compra_produto', deps)
+  assert.equal(rCep.estado.dados.formulario?.numero, undefined, 'CEP isolado nunca vira número')
+})
+
+// ── Telefone perdido no round-trip de persistência (bug real) ────────────
+// webhook-meta salva/recarrega o estado inteiro como JSONB a cada mensagem
+// — simulado aqui via JSON.parse(JSON.stringify(...)), o mesmo round-trip
+// real de serialização.
+
+test('7. telefone válido permanece após serializar/desserializar o estado e processar a próxima mensagem', async () => {
+  const deps = depsFake()
+  const estado = estadoEsperandoNumero({ telefoneDestinatario: undefined })
+  const r1 = await avancarFunil(estado, '(11) 91234-5678', 'compra_produto', deps)
+  assert.equal(r1.estado.dados.formulario?.telefoneDestinatario, '+5511912345678')
+
+  const estadoPersistido: EstadoConversa = JSON.parse(JSON.stringify(r1.estado))
+  assert.equal(estadoPersistido.dados.formulario?.telefoneDestinatario, '+5511912345678')
+
+  const r2 = await avancarFunil(estadoPersistido, 'Número 105', 'compra_produto', deps)
+  assert.equal(r2.estado.dados.formulario?.telefoneDestinatario, '+5511912345678', 'telefone continua presente depois do round-trip')
+  assert.equal(r2.estado.dados.formulario?.numero, '105')
+})
+
+test('8. formulário completo -> resumo -> round-trip de persistência -> "sim" avança para a cotação real de frete', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario()
+  const r1 = await avancarFunil(
+    estado,
+    'Nome do remetente: Ana\nNome do destinatário: Camila\nTelefone do destinatário: 11999990000\nCEP da entrega: 04204-030',
+    'compra_produto',
+    deps,
+  )
+  assert.match(r1.mensagem, /Qual é o número/i)
+
+  const r2 = await avancarFunil(r1.estado, 'Número 105', 'compra_produto', deps)
+  const r3 = await avancarFunil(r2.estado, 'Data de entrega: amanhã', 'compra_produto', deps)
+  assert.equal(r3.estado.fase, 'confirmando_formulario')
+  assert.match(r3.mensagem, /Confere os dados de entrega/i)
+
+  const estadoPersistido: EstadoConversa = JSON.parse(JSON.stringify(r3.estado))
+  const r4 = await avancarFunil(estadoPersistido, 'sim', 'compra_produto', deps)
+  assert.equal(r4.estado.fase, 'aguardando_aprovacao_frete', 'avança pra cotação real, nunca reinicia o formulário')
+  assert.ok(r4.estado.dados.valorFrete != null, 'cotação real foi calculada')
+})
+
+test('9. após "sim", o formulário inicial não é reenviado', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario()
+  const r1 = await avancarFunil(
+    estado,
+    'Nome do remetente: Ana\nNome do destinatário: Camila\nTelefone do destinatário: 11999990000\nCEP da entrega: 04204-030',
+    'compra_produto',
+    deps,
+  )
+  const r2 = await avancarFunil(r1.estado, 'Número 105', 'compra_produto', deps)
+  const r3 = await avancarFunil(r2.estado, 'Data de entrega: amanhã', 'compra_produto', deps)
+  const estadoPersistido: EstadoConversa = JSON.parse(JSON.stringify(r3.estado))
+  const r4 = await avancarFunil(estadoPersistido, 'sim', 'compra_produto', deps)
+  assert.doesNotMatch(r4.mensagem, /CEP da entrega/i, 'nunca reenvia o formulário inicial completo')
+  assert.notEqual(r4.estado.fase, 'aguardando_formulario', 'fase nunca volta pro início do formulário')
+})

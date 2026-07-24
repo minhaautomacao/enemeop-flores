@@ -357,7 +357,15 @@ export function querCartaoImpresso(dados: FormularioEntregaDados): boolean {
 
 /** Campos obrigatórios que ainda faltam — nunca considera opcionais, exceto a mensagem do cartão, que só entra como obrigatória se o cliente confirmou que quer cartão impresso (Parte 2). */
 export function camposFaltandoFormulario(dados: FormularioEntregaDados): (keyof FormularioEntregaDados)[] {
-  const faltando = CAMPOS_OBRIGATORIOS_FORMULARIO.filter(c => !dados[c])
+  const faltando = CAMPOS_OBRIGATORIOS_FORMULARIO.filter(c => {
+    // Telefone nunca conta como "presente" só por ser truthy — um valor que
+    // não sobrevive à normalização (ex.: um valor inválido que tenha
+    // chegado ao estado por algum outro caminho) tem que voltar a ser
+    // pedido, nunca seguir adiante pra ser silenciosamente descartado na
+    // normalização final (ver etapaFormulario).
+    if (c === 'telefoneDestinatario') return !dados.telefoneDestinatario || !normalizarTelefoneDestinatarioBR(dados.telefoneDestinatario)
+    return !dados[c]
+  })
   if (querCartaoImpresso(dados) && !dados.mensagemCartao) faltando.push('mensagemCartao')
   return faltando
 }
@@ -1678,8 +1686,22 @@ function interpretarTelefoneLivre(texto: string): { tipo: 'valido'; valor: strin
 }
 
 /** Extrai "123" ou "123, apto 45" / "123 bloco B" de uma resposta livre (sem rótulos) à pergunta do número — usado só quando o CEP já foi resolvido em turno anterior e a mensagem atual não trouxe nenhum campo no formato "Rótulo: valor". Nunca inventa um número: mensagem que não começa com dígitos devolve null e o número continua sendo pedido. */
+/**
+ * Extrai número (+ complemento opcional) de uma resposta em linguagem
+ * natural à pergunta "qual é o número" — com ou sem a palavra "número"
+ * (com/sem acento, maiúscula/minúscula) e com ou sem dois-pontos. Aceita
+ * "105", "Número 105", "Número: 105", "numero 105 apto 61", "105 apto 61",
+ * "número 105 apartamento 61", "número 105 bloco B apartamento 61" —
+ * preserva o texto do complemento tal como informado. Nunca confunde
+ * telefone/CEP com número: um número de casa real nunca chega a 6 dígitos
+ * seguidos (CEP tem 8, telefone BR tem 10-13), então qualquer sequência
+ * líder com 6+ dígitos é rejeitada de propósito.
+ */
 function extrairNumeroComplementoLivre(texto: string): { numero: string; complemento?: string } | null {
-  const m = texto.trim().match(/^(\d+[a-zA-Z]?)\s*[,.\-–]?\s*(.*)$/)
+  const semRotulo = texto.trim().replace(/^n[uú]mero\s*:?\s*|^n[ºo°.]\s*:?\s*/i, '')
+  const digitosLideranca = (semRotulo.match(/^\d[\d-]*/) ?? [''])[0].replace(/-/g, '')
+  if (digitosLideranca.length >= 6) return null
+  const m = semRotulo.match(/^(\d{1,5}[a-zA-Z]?)(?!\d)[,.\-–]?\s*(.*)$/)
   if (!m) return null
   const complemento = m[2].trim()
   return { numero: m[1], complemento: complemento || undefined }
@@ -1797,8 +1819,16 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
   }
 
   // Telefone sempre normalizado pra E.164 antes de seguir — é o formato que
-  // a Lalamove exige (Parte 2), nunca enviado "cru" pra frente.
-  const telefoneE164 = normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario!)!
+  // a Lalamove exige (Parte 2), nunca enviado "cru" pra frente. Nunca grava
+  // null: camposFaltandoFormulario já garante que só chega aqui um telefone
+  // normalizável, mas se por algum motivo a normalização falhar mesmo assim,
+  // pede de novo em vez de gravar um valor corrompido no estado (bug real:
+  // um `!` sem essa guarda deixava telefoneDestinatario virar null e o
+  // formulário "completo" silenciosamente perdia o telefone).
+  const telefoneE164 = normalizarTelefoneDestinatarioBR(formularioAtual.telefoneDestinatario!)
+  if (!telefoneE164) {
+    return responder('O telefone parece incompleto. Pode enviar novamente com o DDD?')
+  }
   const formularioNormalizado = { ...formularioAtual, telefoneDestinatario: telefoneE164 }
   const novoEstado: EstadoConversa = { ...estado, fase: 'confirmando_formulario', dados: { ...estado.dados, formulario: formularioNormalizado, cepConsultadoViaApi } }
   return { estado: novoEstado, mensagem: montarResumoFormulario(formularioNormalizado) }

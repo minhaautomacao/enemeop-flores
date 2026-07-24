@@ -793,21 +793,28 @@ Deno.serve(async (req: Request) => {
   const eventos = extrairEventos(body);
   console.log(`[webhook-meta] ${eventos.length} evento(s)`);
 
-  await Promise.allSettled(
-    eventos.map(async (ev) => {
-      if (ev.tipo === 'dm') {
-        await Promise.allSettled([
-          processarDM(ev.canal_id, ev.canal, ev.mensagem, ev.mid),
-          enviarAoOrquestrador(ev),
-        ]);
-      } else if (ev.tipo === 'comentario') {
-        await Promise.allSettled([
-          processarComentario(ev),
-          enviarAoOrquestrador(ev),
-        ]);
-      }
-    }),
-  );
+  // Sequencial, nunca em paralelo: eventos.map(...) + Promise.allSettled
+  // rodava todos os eventos de um mesmo payload ao mesmo tempo. Quando a
+  // Meta agrupa mais de uma mensagem da MESMA conversa num único webhook
+  // (comportamento real e documentado), duas chamadas concorrentes de
+  // processarDM liam a mesma linha de conversas ANTES de qualquer uma
+  // salvar, e a que terminasse depois sobrescrevia sem saber da mudança da
+  // outra — um campo já aceito (ex.: telefone) podia sumir silenciosamente
+  // (bug real encontrado em teste). Processar um evento por vez elimina essa
+  // corrida de leitura-modificação-escrita na mesma conversa.
+  for (const ev of eventos) {
+    if (ev.tipo === 'dm') {
+      await Promise.allSettled([
+        processarDM(ev.canal_id, ev.canal, ev.mensagem, ev.mid),
+        enviarAoOrquestrador(ev),
+      ]);
+    } else if (ev.tipo === 'comentario') {
+      await Promise.allSettled([
+        processarComentario(ev),
+        enviarAoOrquestrador(ev),
+      ]);
+    }
+  }
 
   return new Response('ok', { status: 200 });
 });

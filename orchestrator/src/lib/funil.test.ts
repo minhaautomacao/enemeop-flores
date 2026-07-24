@@ -983,6 +983,26 @@ test('pergunta de pagamento sem integração configurada admite a limitação ho
   assert.match(r.mensagem, /não consigo confirmar|validar.*equipe/i)
 })
 
+// Bug real observado em monitoramento 2026-07-24 (retomada de pagamento
+// recusado): em 'aguardando_pagamento' já existe um link real (ou uma
+// tentativa recusada) — "pix"/"gere um novo link"/"quero pagar agora"
+// devem reenviar ESSE link, nunca cair na resposta genérica de FAQ (que
+// nem sequer contém o link, gerando um loop de respostas idênticas).
+test('em aguardando_pagamento, mensagem sobre pagamento reenvia o link real em vez da resposta generica de FAQ', async () => {
+  const deps = depsFake({ buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'] })
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: { produto: { nome: 'Arranjo de Orquídeas', preco: 269.63 }, linkPagamento: 'https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=abc-123' },
+    perguntasFeitas: [],
+  }
+  for (const mensagem of ['pix', 'gere um novo link de pagamento', 'quero fazer o pagamento agora']) {
+    const r = await avancarFunil(estado, mensagem, classificarIntencao(mensagem, estado.fase), deps)
+    assert.equal(r.estado.fase, 'aguardando_pagamento', `fase deve permanecer aguardando_pagamento para "${mensagem}"`)
+    assert.ok(r.mensagem.includes('https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=abc-123'), `deve reenviar o link real para "${mensagem}"`)
+    assert.doesNotMatch(r.mensagem, /por um link de pagamento seguro depois que confirmarmos/, `nao deve cair na resposta generica de FAQ para "${mensagem}"`)
+  }
+})
+
 test('regressão completa 2026-07-17: qualificação -> 2 opções com fotos corretas -> "a segunda" -> frete -> pagamento -> confirmação -> pagamento gerado, sem nunca voltar às sugestões', async () => {
   const CATALOGO_2: ProdutoCatalogo[] = [
     { nome: 'Arranjo Alegre Colorido', preco: 130, codigo: '050', disponivel: true, fotoUrl: 'https://site/050.jpg' },

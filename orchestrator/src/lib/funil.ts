@@ -2388,7 +2388,14 @@ export async function avancarFunil(
   // realmente habilitado na integração de produção agora — nunca inventa
   // Pix/cartão/dinheiro. Não apaga produto/endereço já coletados nem gera
   // link (isso só acontece depois do resumo confirmado, no fluxo normal).
-  if (intencao === 'pagamento') {
+  // Nunca dispara em 'aguardando_pagamento': ali já existe um link real
+  // pendente (ou uma tentativa recusada) e o cliente falando sobre
+  // pagamento ("pix", "gere um novo link", "quero pagar agora") quer
+  // retomar ESSE pedido — cai pro case 'aguardando_pagamento' do switch
+  // abaixo, que reenvia o link real, nunca esta resposta genérica de FAQ
+  // (bug real observado em monitoramento 2026-07-24: a Flora respondia a
+  // mesma frase genérica em loop e nunca reenviava o link).
+  if (intencao === 'pagamento' && estado.fase !== 'aguardando_pagamento') {
     const formas = await deps.buscarFormasPagamento()
     if (formas.length === 0) {
       return {

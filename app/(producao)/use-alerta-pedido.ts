@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useRef } from 'react'
 
-const CHAVE_VISTOS = 'enemeop_producao_pedidos_vistos'
+const CHAVE_VISTOS_NOVO_PEDIDO = 'enemeop_producao_pedidos_vistos'
+const CHAVE_VISTOS_AGENDADO = 'enemeop_producao_pedidos_agendados_vistos'
 
-function carregarVistos(): Set<number> {
+function carregarVistos(chave: string): Set<number> {
   try {
-    const bruto = localStorage.getItem(CHAVE_VISTOS)
+    const bruto = localStorage.getItem(chave)
     return new Set(bruto ? (JSON.parse(bruto) as number[]) : [])
   } catch {
     return new Set()
@@ -18,13 +19,26 @@ export function calcularNovos(atuais: number[], vistosAnteriores: Set<number>): 
   return atuais.filter((n) => !vistosAnteriores.has(n))
 }
 
-function salvarVistos(vistos: Set<number>): void {
+function salvarVistos(chave: string, vistos: Set<number>): void {
   try {
     // Mantém só os últimos 500 — a lista só existe pra nunca repetir o som
     // pro mesmo pedido entre reloads, não precisa crescer sem limite.
     const lista = [...vistos].slice(-500)
-    localStorage.setItem(CHAVE_VISTOS, JSON.stringify(lista))
+    localStorage.setItem(chave, JSON.stringify(lista))
   } catch { /* localStorage indisponível (modo privado etc.) — degrada sem som persistente */ }
+}
+
+/**
+ * Números dos pedidos pagos com logística agendada (fora do horário) —
+ * calculado sempre a partir da lista vinda do banco (nunca de
+ * localStorage): localStorage só decide se o alerta sonoro já tocou pra um
+ * pedido específico, nunca decide quais pedidos agendados existem agora.
+ */
+export function numerosAgendados(pedidos: Record<string, unknown>[]): number[] {
+  return pedidos
+    .filter((p) => p.status_logistica === 'agendada' && p.numero_pedido != null)
+    .map((p) => Number(p.numero_pedido))
+    .filter((n) => Number.isFinite(n))
 }
 
 /**
@@ -73,19 +87,26 @@ function useBipeDesbloqueadoPorGesto() {
  * pedido (persistido em localStorage, sobrevive a refresh — Parte I.6/I.7).
  * Na primeira carga da página, só registra os pedidos existentes como
  * "vistos" sem tocar som (evita disparar um alerta por cada pedido antigo).
+ *
+ * `chaveStorage` permite reaproveitar o mesmo mecanismo (bipe + dedup) pra
+ * outra categoria de pedido sem misturar os dois conjuntos de "vistos" —
+ * ver uso duplo em producao/page.tsx (pedido novo vs. pedido agendado fora
+ * do horário). A EXISTÊNCIA dos pedidos em si nunca vem daqui: sempre do
+ * banco (quem chama passa a lista já vinda da API); localStorage só evita
+ * repetir o som.
  */
-export function useAlertaNovoPedido() {
+export function useAlertaNovoPedido(chaveStorage: string = CHAVE_VISTOS_NOVO_PEDIDO) {
   const tocarBipe = useBipeDesbloqueadoPorGesto()
   const vistosRef = useRef<Set<number> | null>(null)
   const primeiraCargaRef = useRef(true)
 
   const registrar = useCallback((numerosAtuais: number[]) => {
-    if (vistosRef.current === null) vistosRef.current = carregarVistos()
+    if (vistosRef.current === null) vistosRef.current = carregarVistos(chaveStorage)
     const vistos = vistosRef.current
 
     const novos = calcularNovos(numerosAtuais, vistos)
     for (const n of numerosAtuais) vistos.add(n)
-    salvarVistos(vistos)
+    salvarVistos(chaveStorage, vistos)
 
     if (primeiraCargaRef.current) {
       primeiraCargaRef.current = false
@@ -93,7 +114,9 @@ export function useAlertaNovoPedido() {
     }
     if (novos.length > 0) tocarBipe()
     return { novos }
-  }, [tocarBipe])
+  }, [tocarBipe, chaveStorage])
 
   return { registrar }
 }
+
+export { CHAVE_VISTOS_AGENDADO }

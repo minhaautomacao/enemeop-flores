@@ -831,29 +831,24 @@ export function mensagemPagamentoConfirmadoForaDoHorario(): string {
   return 'Pagamento confirmado! Como estamos fora do horário da loja, seu pedido será preparado e seguirá para entrega a partir do horário comercial do próximo dia.'
 }
 
-// ── Horário comercial — aviso com opt-in no início de uma jornada (Parte 4/5) ──
+// ── Horário comercial — aviso com opt-in no início de uma jornada (Parte 4/6) ──
 //
-// Texto exato definido na tarefa. Mostrado só uma vez por jornada (nunca
-// repetido a cada mensagem — ver fase 'aviso_fora_horario'), nunca finaliza
-// dizendo só que está fora do horário, nunca transfere pra humano só por
-// isso, e nunca bloqueia pagamento depois que o cliente aceitou continuar.
+// Regra oficial: todo o fluxo comercial (atendimento, catálogo, formulário,
+// cotação real, aprovação, link, pagamento, confirmação, criação do pedido)
+// pode acontecer normalmente fora do horário — só a corrida real (despacho)
+// nunca acontece fora dele, decidida depois do pagamento (ver
+// webhook-mercadopago). Texto exato definido na tarefa. Mostrado só uma vez
+// por jornada (nunca repetido a cada mensagem — ver fase
+// 'aviso_fora_horario'), nunca finaliza dizendo só que está fora do
+// horário, nunca transfere pra humano só por isso, e nunca bloqueia
+// pagamento depois que o cliente aceitou continuar.
 export function mensagemAvisoForaDoHorarioComOpcao(): string {
-  return 'No momento estamos fora do horário da loja, mas posso adiantar seu pedido por aqui. As cotações e entregas serão processadas a partir do horário comercial do próximo dia. Deseja continuar?'
+  return 'Podemos concluir seu pedido agora. Como estamos fora do horário da loja, ele será preparado e entregue no próximo dia de funcionamento, dentro do horário comercial. Deseja continuar?'
 }
 
 /** Lembrete curto enquanto o cliente ainda não respondeu sim/continuar ao aviso — nunca repete o texto completo do aviso de novo. */
 export function mensagemAguardandoRespostaForaDoHorario(): string {
   return 'Posso adiantar seu pedido agora mesmo fora do horário — é só confirmar. Deseja continuar?'
-}
-
-/**
- * Cotação/corrida real nunca acontecem fora do horário (Parte 4/5) — a
- * conversa segue normalmente (catálogo, formulário), só a cotação de frete
- * de verdade fica pra quando a loja reabrir. Nunca dispara sozinha: só é
- * mostrada em resposta a uma mensagem nova do cliente que tentaria cotar.
- */
-export function mensagemCotacaoForaDoHorario(): string {
-  return 'A loja está fora do horário agora, então ainda não consigo cotar o frete de verdade — assim que reabrirmos, calculo certinho e te mostro o total. Já deixei os dados registrados por aqui.'
 }
 
 /**
@@ -1666,15 +1661,13 @@ function etapaFormulario(estado: EstadoConversa, mensagemCliente: string): Resul
   return { estado: novoEstado, mensagem: montarResumoFormulario(formularioNormalizado) }
 }
 
-async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil, foraDoHorario: boolean, agora: Date): Promise<ResultadoEtapa> {
-  // Nunca cota (nem recota) fora do horário comercial (Parte 4/5) — a
-  // cotação real da Lalamove fica pro próximo horário comercial; a conversa
-  // continua normalmente, sem transferir pra humano só por isso. Fica em
-  // 'confirmando_formulario' pra uma mensagem nova do cliente (dentro do
-  // horário) refazer a tentativa automaticamente — nunca dispara sozinha.
-  if (foraDoHorario) {
-    return { estado: { ...estado, fase: 'confirmando_formulario' }, mensagem: mensagemCotacaoForaDoHorario() }
-  }
+async function etapaCalculoFrete(estado: EstadoConversa, deps: DependenciasFunil, agora: Date): Promise<ResultadoEtapa> {
+  // Cotação real acontece normalmente fora do horário comercial (regra
+  // oficial: todo o fluxo comercial pode acontecer fora do horário) — só a
+  // corrida real (despacho) nunca acontece fora dele, decidida depois do
+  // pagamento (ver webhook-mercadopago). A validade máxima da cotação
+  // (30min/expiresAt real da Lalamove) continua valendo do mesmo jeito,
+  // dentro ou fora do horário — ver cotacaoFreteVencida.
   const cep = estado.dados.endereco?.cep ?? estado.dados.formulario?.cep
   if (!cep) {
     return { estado: transferirParaHumano(estado, 'CEP ausente ao tentar calcular frete'), mensagem: mensagemTransferencia() }
@@ -1754,7 +1747,7 @@ function montarMensagemAprovacaoFrete(dados: DadosPedido): string {
 }
 
 /** Coleta a confirmação dos dados do formulário — nunca cota frete antes disso (Parte 3.3/3.4). Cliente pode corrigir um campo em vez de confirmar; nunca perde os dados já certos. */
-async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, foraDoHorario: boolean, agora: Date): Promise<ResultadoEtapa> {
+async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, agora: Date): Promise<ResultadoEtapa> {
   if (!pareceConfirmacao(mensagemCliente)) {
     const correcao = extrairFormularioEntrega(mensagemCliente)
     if (Object.keys(correcao).length > 0) {
@@ -1800,20 +1793,17 @@ async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemClient
     dataEntregaSolicitada: dataParseada!,
     periodoEntrega: normalizarPeriodoEntregaTexto(estado.dados.formulario.periodo),
   }
-  return etapaCalculoFrete({ ...estadoSincronizado, dados: dadosComDataTipada, fase: 'calculando_frete' }, deps, foraDoHorario, agora)
+  return etapaCalculoFrete({ ...estadoSincronizado, dados: dadosComDataTipada, fase: 'calculando_frete' }, deps, agora)
 }
 
-async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, foraDoHorario: boolean, agora: Date): Promise<ResultadoEtapa> {
+async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, agora: Date): Promise<ResultadoEtapa> {
   // Cotação vencida nunca pode gerar pagamento (Parte 4) — checado antes de
   // interpretar a resposta do cliente, pra nunca aprovar um total calculado
-  // sobre uma cotação já vencida. Dentro do horário, recota e apresenta o
-  // total atualizado; fora do horário, informa que a nova cotação fica pro
-  // próximo horário comercial (nunca cota nem cria corrida fora dele).
+  // sobre uma cotação já vencida. Sempre recota e apresenta o total
+  // atualizado — cotação real acontece normalmente fora do horário também
+  // (regra oficial), só a corrida real nunca acontece fora dele.
   if (cotacaoFreteVencida(estado.dados.freteDetalhes, agora)) {
-    if (foraDoHorario) {
-      return { estado: { ...estado, fase: 'confirmando_formulario' }, mensagem: mensagemCotacaoForaDoHorario() }
-    }
-    return etapaCalculoFrete({ ...estado, fase: 'calculando_frete' }, deps, foraDoHorario, agora)
+    return etapaCalculoFrete({ ...estado, fase: 'calculando_frete' }, deps, agora)
   }
 
   if (!pareceConfirmacao(mensagemCliente)) {
@@ -1932,6 +1922,10 @@ export function estadoComPedidoInconsistente(estado: EstadoConversa): boolean {
  *
  * @param foraDoHorario Calculado pelo chamador (ver _shared/horario-comercial.ts,
  *   fonte única do horário) — funil.ts nunca calcula hora sozinho (zero imports).
+ *   Só usado pro aviso com opt-in no início de uma jornada nova (Parte 6):
+ *   todo o resto do fluxo comercial (catálogo, formulário, cotação real,
+ *   aprovação, link, pagamento) acontece normalmente fora do horário — só a
+ *   corrida real nunca acontece fora dele, decidida depois do pagamento.
  * @param proximoHorarioTexto Texto pronto ("amanhã (terça-feira), a partir das
  *   9h") pra ajustar "hoje" quando a jornada foi aceita fora do horário (Parte 4).
  * @param agora Instante atual — injetável só pra testes determinísticos (Parte
@@ -2087,7 +2081,7 @@ export async function avancarFunil(
       ...estado,
       dados: { ...estado.dados, endereco: { ...(estado.dados.endereco ?? { cep: '' }), cep: cepConhecido } },
     }
-    return etapaCalculoFrete(estadoComCep, deps, foraDoHorario, agora)
+    return etapaCalculoFrete(estadoComCep, deps, agora)
   }
 
   // Pergunta direta de forma de pagamento: responde com o que está
@@ -2131,11 +2125,11 @@ export async function avancarFunil(
     case 'aguardando_formulario':
       return etapaFormulario(estado, mensagemCliente)
     case 'confirmando_formulario':
-      return etapaConfirmandoFormulario(estado, mensagemCliente, deps, foraDoHorario, agora)
+      return etapaConfirmandoFormulario(estado, mensagemCliente, deps, agora)
     case 'calculando_frete':
-      return etapaCalculoFrete(estado, deps, foraDoHorario, agora)
+      return etapaCalculoFrete(estado, deps, agora)
     case 'aguardando_aprovacao_frete':
-      return etapaAguardandoAprovacaoFrete(estado, mensagemCliente, deps, foraDoHorario, agora)
+      return etapaAguardandoAprovacaoFrete(estado, mensagemCliente, deps, agora)
     // Fases antigas (fluxo campo-a-campo, substituído pelo formulário único
     // — Parte 2/3): nunca travam uma conversa que ainda esteja numa delas,
     // sempre reencaminham pro novo fluxo. 'aguardando_endereco'/
@@ -2152,7 +2146,7 @@ export async function avancarFunil(
       }
     case 'aguardando_confirmacao':
       if (estado.dados.valorFrete != null && estado.dados.freteDetalhes) {
-        return etapaAguardandoAprovacaoFrete({ ...estado, fase: 'aguardando_aprovacao_frete' }, mensagemCliente, deps, foraDoHorario, agora)
+        return etapaAguardandoAprovacaoFrete({ ...estado, fase: 'aguardando_aprovacao_frete' }, mensagemCliente, deps, agora)
       }
       return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA }
     case 'aguardando_pagamento':

@@ -3,15 +3,18 @@
 import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
 import { EnumeopLogo } from '@/components/enemeop-logo'
-import { Truck, AlertTriangle, RefreshCw } from 'lucide-react'
-import { useAlertaNovoPedido } from '../use-alerta-pedido'
+import { Truck, AlertTriangle, RefreshCw, Clock } from 'lucide-react'
+import { useAlertaNovoPedido, numerosAgendados, CHAVE_VISTOS_AGENDADO } from '../use-alerta-pedido'
 
 type StatusPedido = 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue'
-type StatusLogistica = 'pendente' | 'criada' | 'erro_logistica' | 'revisao_logistica' | null
+// 'agendada' = pago fora do horário comercial — corrida nunca criada ainda,
+// despacho fica pro próximo horário comercial (ver webhook-mercadopago).
+type StatusLogistica = 'agendada' | 'pendente' | 'criada' | 'erro_logistica' | 'revisao_logistica' | null
 
 const INTERVALO_ATUALIZACAO_MS = 15_000
 
 const LOGISTICA_CONFIG: Record<Exclude<StatusLogistica, null>, { label: string; classes: string }> = {
+  agendada:            { label: 'Agendado p/ próximo horário', classes: 'bg-amber-500/10 border-amber-500/30 text-amber-400' },
   pendente:            { label: 'Logística: processando…', classes: 'bg-blue-500/10 border-blue-500/30 text-blue-400' },
   criada:              { label: 'Entrega criada',          classes: 'bg-green-500/10 border-green-500/30 text-green-400' },
   erro_logistica:      { label: 'Erro na entrega',         classes: 'bg-red-500/10 border-red-500/30 text-red-400' },
@@ -54,6 +57,10 @@ export default function ProducaoPage() {
   const [erro, setErro] = useState<string | null>(null)
   const [reprocessando, setReprocessando] = useState<string | null>(null)
   const { registrar } = useAlertaNovoPedido()
+  // Mesmo mecanismo de alerta (bipe + dedup), chave de storage separada —
+  // nunca mistura "pedido novo" com "pedido agendado fora do horário" no
+  // mesmo controle de "já visto" (ver use-alerta-pedido.ts).
+  const { registrar: registrarAgendado } = useAlertaNovoPedido(CHAVE_VISTOS_AGENDADO)
 
   const carregarPedidos = useCallback(async () => {
     try {
@@ -63,6 +70,10 @@ export default function ProducaoPage() {
       setErro(null)
       const bruto: Record<string, unknown>[] = json.pedidos ?? []
       const { novos } = registrar(bruto.map((p) => Number(p.numero_pedido)).filter((n) => Number.isFinite(n)))
+      // A existência dos pedidos agendados vem sempre desta resposta do
+      // banco (nunca de localStorage) — o hook só usa localStorage pra
+      // nunca repetir o bipe pro mesmo pedido (regra oficial da tarefa).
+      registrarAgendado(numerosAgendados(bruto))
       const montados: Pedido[] = bruto.map((p) => {
         const produtos = (p.produtos as Array<{ codigo?: string }> | null) ?? []
         const numero = Number(p.numero_pedido)
@@ -96,7 +107,7 @@ export default function ProducaoPage() {
     } finally {
       setCarregando(false)
     }
-  }, [registrar])
+  }, [registrar, registrarAgendado])
 
   const reprocessarLogistica = useCallback(async (pedidoId: string) => {
     setReprocessando(pedidoId)
@@ -125,6 +136,11 @@ export default function ProducaoPage() {
 
   const porStatus = (s: StatusPedido) => pedidos.filter(p => p.status === s)
   const ativos = pedidos.filter(p => !['saiu','entregue'].includes(p.status)).length
+  // Sempre recalculado a partir da lista carregada agora (nunca de
+  // localStorage) — o alerta permanece enquanto existir pelo menos um
+  // pedido pago com logística agendada, some sozinho quando a corrida real
+  // for criada (status_logistica deixa de ser 'agendada').
+  const agendados = pedidos.filter(p => p.statusLogistica === 'agendada').length
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-[#0f0f0f]">
@@ -161,6 +177,18 @@ export default function ProducaoPage() {
           <span className="font-bold uppercase tracking-widest">Falha ao atualizar pedidos:</span>
           <span className="text-red-300">{erro}</span>
           <span className="text-red-400/60">— mostrando a última lista carregada com sucesso.</span>
+        </div>
+      )}
+
+      {/* Permanece visível enquanto houver pelo menos um pedido pago fora
+          do horário aguardando o próximo horário comercial — nunca some
+          sozinho, some quando a corrida real for criada. */}
+      {agendados > 0 && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-400 text-xs shrink-0">
+          <Clock className="w-3.5 h-3.5 shrink-0" />
+          <span className="font-bold uppercase tracking-widest">
+            Há {agendados} pedido{agendados > 1 ? 's' : ''} pago{agendados > 1 ? 's' : ''} agendado{agendados > 1 ? 's' : ''} para produção e entrega.
+          </span>
         </div>
       )}
 

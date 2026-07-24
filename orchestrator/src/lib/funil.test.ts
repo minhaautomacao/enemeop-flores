@@ -48,7 +48,6 @@ import {
   mensagemRetomadaAposIntervalo,
   deveGatilharRetomadaAposIntervalo,
   cotacaoFreteVencida,
-  mensagemCotacaoForaDoHorario,
   mensagemAvisoForaDoHorarioComOpcao,
   mensagemPagamentoConfirmadoForaDoHorario,
   querCartaoImpresso,
@@ -1834,9 +1833,15 @@ test('cotacao 29 minutos ainda valida, 30 minutos ja vencida — nunca gera paga
   assert.equal(r.estado.dados.pedidoId, undefined, 'nunca gera pedido/pagamento sobre a cotação vencida')
 })
 
-// ── Parte 4/5 — cotação e pagamento fora do horário comercial ────────────
+// ── Parte 4/6 — cotação e pagamento fora do horário comercial ────────────
 
-test('cotacao fora do horario: nunca cota nem cria corrida, avisa que a cotação fica pro próximo horário comercial', async () => {
+// Regra oficial (2026-07-23): todo o fluxo comercial pode acontecer fora do
+// horário — atendimento, catálogo, formulário, cotação real, aprovação,
+// link, pagamento, confirmação e criação do pedido. Só a corrida real
+// (despacho) nunca acontece fora dele, decidida só depois do pagamento (ver
+// webhook-mercadopago). A validade máxima da cotação (30min/expiresAt real
+// da Lalamove) continua valendo do mesmo jeito, dentro ou fora do horário.
+test('1. cotação permitida fora do horário: cota normalmente, sem nenhum bloqueio', async () => {
   const deps = depsFake()
   const estado: EstadoConversa = {
     fase: 'confirmando_formulario',
@@ -1844,12 +1849,33 @@ test('cotacao fora do horario: nunca cota nem cria corrida, avisa que a cotaçã
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'sim', 'compra_produto', deps, true)
-  assert.equal(r.estado.fase, 'confirmando_formulario', 'conversa continua, nunca trava nem transfere pra humano só por isso')
-  assert.equal(r.estado.dados.valorFrete, undefined, 'nunca cota fora do horário')
-  assert.equal(r.mensagem, mensagemCotacaoForaDoHorario())
+  assert.equal(r.estado.fase, 'aguardando_aprovacao_frete', 'cota normalmente fora do horário, nunca bloqueia')
+  assert.equal(r.estado.dados.valorFrete, 22.5)
+  assert.match(r.mensagem, /Total:/)
+  assert.match(r.mensagem, /Você aprova o frete e o total\?/)
 
-  // Aviso inicial (Parte 4) usa o texto exato definido, sem citar horários fixos.
-  assert.match(mensagemAvisoForaDoHorarioComOpcao(), /fora do hor[aá]rio da loja/i)
+  // Cotação vencida (30min/expiresAt) continua sendo respeitada mesmo fora
+  // do horário — recota automaticamente, nunca aprova um total vencido.
+  const estadoVencidoForaDoHorario: EstadoConversa = {
+    fase: 'aguardando_aprovacao_frete',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'hoje' },
+      valorFrete: 99, valorTotal: 239,
+      freteDetalhes: { cotadoEm: new Date(Date.now() - 31 * 60_000).toISOString() },
+      formulario: formularioFixture(),
+    },
+    perguntasFeitas: [],
+  }
+  const rVencido = await avancarFunil(estadoVencidoForaDoHorario, 'sim, confirmo', 'compra_produto', deps, true)
+  assert.equal(rVencido.estado.fase, 'aguardando_aprovacao_frete', 'recota normalmente mesmo fora do horário')
+  assert.equal(rVencido.estado.dados.valorFrete, 22.5, 'novo valor cotado, nunca o total antigo vencido')
+  assert.equal(rVencido.estado.dados.pedidoId, undefined)
+
+  // Aviso inicial (Parte 4) usa o texto exato definido — nunca diz que a
+  // cotação fica pro próximo dia, já que ela acontece normalmente agora.
+  assert.match(mensagemAvisoForaDoHorarioComOpcao(), /Podemos concluir seu pedido agora/)
+  assert.match(mensagemAvisoForaDoHorarioComOpcao(), /pr[óo]ximo dia de funcionamento/i)
+  assert.doesNotMatch(mensagemAvisoForaDoHorarioComOpcao(), /cota[çc][ãa]o.*pr[óo]ximo/i)
   assert.match(mensagemAvisoForaDoHorarioComOpcao(), /Deseja continuar\?/)
 })
 

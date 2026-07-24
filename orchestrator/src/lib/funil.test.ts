@@ -1572,6 +1572,19 @@ test('Parte 4: fora do horário mostra o aviso com opt-in na primeira mensagem, 
   assert.match(r.mensagem, /Deseja continuar\?/)
 })
 
+test('Parte 4: aviso fora do horário reconhece o que o cliente pediu, nunca responde fora de contexto (caso real observado em monitoramento 2026-07-24)', async () => {
+  const deps = depsFake()
+  const rOutroProduto = await avancarFunil(estadoInicial(), 'quero escolher outro produto', 'compra_produto', deps, true, 'amanhã, a partir das 09h')
+  assert.match(rOutroProduto.mensagem, /^Claro, vamos montar um novo pedido!/, 'reconhece o pedido de trocar/escolher outro produto antes do aviso')
+  assert.match(rOutroProduto.mensagem, /Podemos concluir seu pedido agora/, 'mantém o texto exato do aviso na sequência')
+
+  const rTipoProduto = await avancarFunil(estadoInicial(), 'quero uma orquídea', 'recomendacao', deps, true, 'amanhã, a partir das 09h')
+  assert.match(rTipoProduto.mensagem, /^Claro, vamos cuidar do seu pedido de orqu[ií]de/, 'reconhece o tipo de produto pedido antes do aviso')
+
+  const rGenerico = await avancarFunil(estadoInicial(), 'oi', 'recomendacao', deps, true, 'amanhã, a partir das 09h')
+  assert.match(rGenerico.mensagem, /^Podemos concluir seu pedido agora/, 'sem sinal reconhecível, mantém o texto exato original, sem prefixo inventado')
+})
+
 test('Parte 4: fora do horário aguarda sim/continuar antes de avançar, nunca repete o aviso completo de novo', async () => {
   const deps = depsFake()
   const estadoAvisado: EstadoConversa = { fase: 'aviso_fora_horario', dados: {}, perguntasFeitas: [] }

@@ -917,8 +917,26 @@ export function mensagemPagamentoConfirmadoForaDoHorario(): string {
 // 'aviso_fora_horario'), nunca finaliza dizendo só que está fora do
 // horário, nunca transfere pra humano só por isso, e nunca bloqueia
 // pagamento depois que o cliente aceitou continuar.
-export function mensagemAvisoForaDoHorarioComOpcao(): string {
-  return 'Podemos concluir seu pedido agora. Como estamos fora do horário da loja, ele será preparado e entregue no próximo dia de funcionamento, dentro do horário comercial. Deseja continuar?'
+// Reconhecimento curto e determinístico do que o cliente pediu, prefixado
+// ao aviso de horário — nunca gerado por IA (mesma regra do resto do
+// arquivo: só reconhece sinais claros já usados em outro lugar do funil,
+// FRASES_NOVO_PEDIDO/TIPOS_PRODUTO). Vazio quando a mensagem não traz
+// nenhum sinal reconhecível (ex.: primeira mensagem genérica, "oi") — nesse
+// caso o texto exato original (definido na tarefa) permanece intacto. Caso
+// real observado em monitoramento 2026-07-24: "quero escolher outro
+// produto" reiniciou a jornada corretamente, mas a resposta ignorava o que
+// o cliente pediu e soava fora de contexto.
+function reconhecimentoAberturaForaDoHorario(mensagemCliente: string): string {
+  const n = normalizar(mensagemCliente)
+  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizar(p)))) return 'Claro, vamos montar um novo pedido! '
+  const tipo = TIPOS_PRODUTO.find(t => t.regex.test(n))
+  if (tipo) return `Claro, vamos cuidar do seu pedido de ${tipo.termo}! `
+  return ''
+}
+
+export function mensagemAvisoForaDoHorarioComOpcao(mensagemCliente = ''): string {
+  const reconhecimento = reconhecimentoAberturaForaDoHorario(mensagemCliente)
+  return `${reconhecimento}Podemos concluir seu pedido agora. Como estamos fora do horário da loja, ele será preparado e entregue no próximo dia de funcionamento, dentro do horário comercial. Deseja continuar?`
 }
 
 /** Lembrete curto enquanto o cliente ainda não respondeu sim/continuar ao aviso — nunca repete o texto completo do aviso de novo. */
@@ -2320,7 +2338,7 @@ export async function avancarFunil(
   // horário — mostra o aviso com opt-in antes de catálogo/formulário
   // (Parte 4). Nunca dispara de novo se esta jornada já foi aceita.
   if (estado.fase === 'inicio' && foraDoHorario && !estado.dados.aceitouForaDoHorario) {
-    return { estado: { ...estado, fase: 'aviso_fora_horario' }, mensagem: mensagemAvisoForaDoHorarioComOpcao() }
+    return { estado: { ...estado, fase: 'aviso_fora_horario' }, mensagem: mensagemAvisoForaDoHorarioComOpcao(mensagemCliente) }
   }
 
   // Cliente voltou só com uma saudação (sem informação nova) enquanto havia

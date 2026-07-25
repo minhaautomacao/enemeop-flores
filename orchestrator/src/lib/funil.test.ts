@@ -1037,6 +1037,40 @@ test('2c. "quero escolher outro produto" nunca vira uma busca fracassada — é 
   assert.equal(r.estado.fase, 'escolha_categoria')
 })
 
+// Bug real observado em monitoramento 2026-07-25: depois de "trocar o
+// produto" levar o cliente pra escolha_categoria (2c acima), citar um
+// produto específico do site nessa fase só repetia "qual categoria" — a
+// busca ao vivo só existia em etapaRecomendacao/etapaCatalogoCompleto,
+// nunca em etapaEscolhaCategoria.
+test('2d. produto citado do site em escolha_categoria (logo após "trocar o produto") é buscado ao vivo, nunca só repete "qual categoria"', async () => {
+  const PRODUTO_DO_SITE: ProdutoCatalogo = { nome: 'Produto Teste – Não disponível para venda', preco: 1, disponivel: true }
+  let ultimaQuery = ''
+  const deps = depsFake({ buscarCatalogo: async ({ query }) => { ultimaQuery = query; return [PRODUTO_DO_SITE] } })
+  const estado: EstadoConversa = {
+    fase: 'escolha_categoria',
+    dados: { categoriasApresentadas: ['30', '31', '39'] },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Produto Teste – Não disponível para venda', 'compra_produto', deps)
+  assert.equal(ultimaQuery, 'Produto Teste Não disponível para venda')
+  assert.equal(r.estado.fase, 'recomendacao')
+  assert.equal(r.estado.dados.opcoesRecomendadas?.[0]?.nome, 'Produto Teste – Não disponível para venda')
+  assert.doesNotMatch(r.mensagem, /qual dessas categorias/i)
+})
+
+test('2e. em escolha_categoria, pedido de navegação genérico ("outras opções") nunca dispara busca ao vivo', async () => {
+  let chamadasCatalogo = 0
+  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return [] } })
+  const estado: EstadoConversa = {
+    fase: 'escolha_categoria',
+    dados: { categoriasApresentadas: ['30', '31', '39'] },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quero ver outras opções', 'compra_produto', deps)
+  assert.equal(chamadasCatalogo, 0)
+  assert.match(r.mensagem, /qual dessas categorias/i)
+})
+
 // "não" é uma palavra comum demais pra usar como filtro de negação antes
 // de buscar — apareceria até no nome do próprio produto sendo procurado
 // (ver testes 1b/1c/2b). Por isso "não gostei de nenhuma" também tenta a

@@ -1608,6 +1608,24 @@ async function etapaEscolhaCategoria(estado: EstadoConversa, mensagemCliente: st
     const escolhida = detectarCategoriaEscolhida(mensagemCliente, apresentadas)
     if (escolhida) return iniciarRecomendacaoPorCategoria(estado, escolhida, deps)
     if (pedeCatalogoCompleto(mensagemCliente)) return iniciarCatalogoCompleto(estado, deps)
+    // Não bateu com nenhuma categoria, nem pede catálogo completo, nem é
+    // pedido de navegação genérico ("outras opções" etc.) — pode ser o
+    // nome de um produto específico do site: busca ao vivo antes de só
+    // perguntar de novo (mesma lógica de etapaRecomendacao/
+    // etapaCatalogoCompleto; bug real observado em monitoramento
+    // 2026-07-25: citar um produto aqui, logo após "trocar o produto" ter
+    // levado o cliente pra esta fase, só repetia "qual categoria").
+    if (!FRASES_NOVO_PEDIDO.some(p => normalizar(mensagemCliente).includes(normalizar(p)))) {
+      const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps)
+      if (encontrado) {
+        const novoEstado: EstadoConversa = {
+          ...estado,
+          fase: 'recomendacao',
+          dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true },
+        }
+        return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
+      }
+    }
     // Nunca reapresenta a lista de categorias sozinha — só pergunta qual delas.
     return { estado, mensagem: 'Qual dessas categorias você prefere? Pode me dizer o nome ou o número.' }
   }

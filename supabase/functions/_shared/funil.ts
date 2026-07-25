@@ -1151,6 +1151,34 @@ export function selecionarRecomendacoes(produtosDoCatalogo: ProdutoCatalogo[]): 
   return { principal, alternativas: resto.slice(0, 2) }
 }
 
+/**
+ * Sinal explícito de que o cliente está citando um produto do site que não
+ * está entre as opções já apresentadas — nunca dispara numa mensagem
+ * ambígua genérica ("não gostei", "outra opção"), só quando a própria
+ * mensagem referencia o site/catálogo diretamente. Caso real observado em
+ * monitoramento 2026-07-24: cliente citou um produto pelo nome dizendo "que
+ * vi no site"/"não está no catálogo", e a Flora só repetia a pergunta sobre
+ * as opções já mostradas, nunca buscando de verdade o produto citado.
+ */
+function pareceReferenciaAoSite(mensagem: string): boolean {
+  const n = normalizar(mensagem)
+  return /\bsite\b/.test(n) || /nao esta no catalogo/.test(n)
+}
+
+/**
+ * Busca ao vivo por um produto citado diretamente pelo nome, fora das
+ * opções já apresentadas — mesma fonte/filtro de validade do resto do
+ * catálogo (deps.buscarCatalogo), nunca inventa nem confirma um produto que
+ * a busca real não confirmar (um produto de teste/indisponível no site
+ * nunca aparece aqui, pois já é filtrado na origem — ver
+ * catalogo-woocommerce-filtro.ts).
+ */
+async function buscarProdutoCitadoNoSite(mensagemCliente: string, deps: DependenciasFunil): Promise<Recomendacao | null> {
+  const produtos = await deps.buscarCatalogo({ query: mensagemCliente })
+  const rec = selecionarRecomendacoes(produtos)
+  return rec.principal ? rec : null
+}
+
 function formatarPreco(preco?: number): string {
   return preco != null ? `R$ ${preco.toFixed(2).replace('.', ',')}` : 'consultar'
 }
@@ -1685,6 +1713,18 @@ async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: st
   if (PALAVRAS_NEGACAO.some(p => normalizar(mensagemCliente).includes(normalizar(p)))) {
     return { estado: { ...estado, fase: 'escolha_categoria' }, mensagem: 'Sem problemas! Me conta o que você procura (cor, estilo, ocasião) que eu te ajudo a encontrar.' }
   }
+  if (pareceReferenciaAoSite(mensagemCliente)) {
+    const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps)
+    if (encontrado) {
+      const novoEstado: EstadoConversa = {
+        ...estado,
+        fase: 'recomendacao',
+        dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true },
+      }
+      return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
+    }
+    return { estado, mensagem: 'Não encontrei esse produto no nosso catálogo agora. Quer escolher entre as opções que já te mostrei, ou prefere ver outras alternativas?' }
+  }
   // Mensagem ambígua durante a paginação — nunca despeja o catálogo de novo sozinho, só pergunta.
   return { estado, mensagem: 'Você quer ver mais opções, ou já escolheu algum item? Pode me dizer o nome, código ou preço.' }
 }
@@ -1707,8 +1747,25 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
   // Opções já foram apresentadas nesta conversa e o cliente ainda não
   // escolheu (a mensagem não bateu com nenhuma delas acima) — nunca
   // reapresenta o catálogo do zero; só pergunta objetivamente qual das
-  // opções já mostradas ele quer.
+  // opções já mostradas ele quer. Exceção: cliente referenciou o site
+  // diretamente (produto fora das opções já mostradas) — busca ao vivo
+  // antes de insistir nas opções antigas (caso real, monitoramento
+  // 2026-07-24).
   if (estado.dados.recomendacaoApresentada && estado.dados.opcoesRecomendadas?.length) {
+    if (pareceReferenciaAoSite(mensagemCliente)) {
+      const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps)
+      if (encontrado) {
+        const novoEstado: EstadoConversa = {
+          ...estado,
+          dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true },
+        }
+        return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
+      }
+      return {
+        estado,
+        mensagem: 'Não encontrei esse produto no nosso catálogo agora. Quer escolher entre as opções que já te mostrei, ou prefere ver outras alternativas?',
+      }
+    }
     return {
       estado,
       mensagem: 'Qual das opções que te mostrei você prefere? Pode me dizer o nome, o código ou o preço.',

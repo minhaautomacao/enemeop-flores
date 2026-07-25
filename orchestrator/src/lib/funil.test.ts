@@ -913,6 +913,51 @@ test('recomendação já apresentada: mensagem que não escolhe nenhuma opção 
   assert.doesNotMatch(r.mensagem, /R\$ ?105|R\$ ?145|R\$ ?140/i, 'nao deve reapresentar a lista de produtos/precos')
 })
 
+// ── Produto citado do site, fora das opções já mostradas (bug real) ──────
+// Caso real observado em monitoramento 2026-07-24: cliente citou um produto
+// pelo nome dizendo "que vi no site" — não estava entre as opções já
+// apresentadas, e a Flora só repetia "qual das opções que te mostrei",
+// nunca buscando de verdade o produto citado.
+
+test('1. produto citado com referência ao site é buscado ao vivo e apresentado, mesmo fora das opções já mostradas', async () => {
+  const PRODUTO_DO_SITE: ProdutoCatalogo = { nome: 'Buquê Extra Grande de Girassóis', preco: 210, codigo: '099', disponivel: true }
+  const deps = depsFake({ buscarCatalogo: async () => [PRODUTO_DO_SITE] })
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quero o Buquê Extra Grande de Girassóis que vi no site', 'compra_produto', deps)
+  assert.equal(r.estado.dados.opcoesRecomendadas?.[0]?.nome, 'Buquê Extra Grande de Girassóis', 'busca ao vivo e apresenta o produto citado')
+  assert.match(r.mensagem, /Buquê Extra Grande de Girassóis/)
+  assert.doesNotMatch(r.mensagem, /qual das op(c|ç)(o|õ)es que te mostrei/i, 'nunca insiste nas opções antigas quando encontra o produto citado')
+})
+
+test('2. produto citado com referência ao site mas não encontrado na busca real (ex.: produto de teste/indisponível) recebe resposta honesta, nunca insiste nas opções antigas em loop', async () => {
+  const deps = depsFake({ buscarCatalogo: async () => [] })
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'o produto é Produto Teste que vi no site. ele não está no catálogo', 'compra_produto', deps)
+  assert.match(r.mensagem, /não encontrei esse produto/i)
+  assert.doesNotMatch(r.mensagem, /R\$ ?105|R\$ ?145|R\$ ?140/i, 'nunca reapresenta o catalogo antigo como se fosse resposta ao produto citado')
+})
+
+test('3. sem referência ao site, mensagem ambígua continua caindo no fallback antigo, sem buscar o catálogo de novo (regressão)', async () => {
+  let chamadasCatalogo = 0
+  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return CATALOGO_ANIVERSARIO } })
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'não gostei de nenhuma', 'compra_produto', deps)
+  assert.equal(chamadasCatalogo, 0, 'sem sinal explicito de referencia ao site, nunca dispara busca ao vivo')
+  assert.match(r.mensagem, /qual das op(c|ç)(o|õ)es que te mostrei/i)
+})
+
 test('escolha "quero o código 002" após recomendação apresentada avança pro próximo passo, sem repetir o catálogo', async () => {
   let chamadasCatalogo = 0
   const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return CATALOGO_ANIVERSARIO } })

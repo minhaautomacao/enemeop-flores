@@ -1165,6 +1165,23 @@ function pareceReferenciaAoSite(mensagem: string): boolean {
   return /\bsite\b/.test(n) || /nao esta no catalogo/.test(n)
 }
 
+// Remove frases de abertura/fechamento comuns ao redor do nome do produto
+// citado, deixando só o nome pra buscar — a busca real (WooCommerce
+// ?search=) não lida bem com frases inteiras cheias de palavras soltas
+// (bug real observado em monitoramento 2026-07-24: a mensagem completa
+// "quero este produto X que está no site" não encontrava X mesmo com X
+// existindo de verdade no catálogo). Nunca tenta demais: se sobrar texto
+// não reconhecido, ainda assim usa o que sobrou — a busca real decide,
+// nunca inventa um nome.
+export function extrairNomeProdutoCitado(mensagem: string): string {
+  return mensagem
+    .replace(/^\s*(eu\s+)?quero\s+(este|esse|o)\s+produto\s*/i, '')
+    .replace(/^\s*o\s+produto\s+[ée]\s*/i, '')
+    .replace(/\s*,?\s*que\s+(vi|est[aá])\s+no\s+site\.?/gi, '')
+    .replace(/\s*\.?\s*(ele\s+)?n[aã]o\s+est[aá]\s+no\s+cat[aá]logo\.?/gi, '')
+    .trim() || mensagem.trim()
+}
+
 /**
  * Busca ao vivo por um produto citado diretamente pelo nome, fora das
  * opções já apresentadas — mesma fonte/filtro de validade do resto do
@@ -1174,7 +1191,7 @@ function pareceReferenciaAoSite(mensagem: string): boolean {
  * catalogo-woocommerce-filtro.ts).
  */
 async function buscarProdutoCitadoNoSite(mensagemCliente: string, deps: DependenciasFunil): Promise<Recomendacao | null> {
-  const produtos = await deps.buscarCatalogo({ query: mensagemCliente })
+  const produtos = await deps.buscarCatalogo({ query: extrairNomeProdutoCitado(mensagemCliente) })
   const rec = selecionarRecomendacoes(produtos)
   return rec.principal ? rec : null
 }

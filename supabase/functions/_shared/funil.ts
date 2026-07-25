@@ -214,6 +214,8 @@ export interface DadosPedido {
   cepConsultadoViaApi?: string
   /** Formulário de entrega completo salvo antes de reiniciar a jornada (troca de produto/novo pedido) — só existe durante a fase 'aguardando_reaproveitar_dados', enquanto aguarda o cliente decidir se reaproveita esses dados ou informa dados novos. Nunca persiste além dessa decisão. */
   formularioAnterior?: FormularioEntregaDados
+  /** true logo depois que a Flora pergunta o link/nome exato de um produto citado que a busca real não encontrou — a PRÓXIMA mensagem é tratada como a resposta a essa pergunta (busca ao vivo direto, sem precisar repetir "site"/"não está no catálogo"). Limpo assim que a próxima mensagem é processada, sucesso ou não. */
+  aguardandoNomeProdutoCitado?: boolean
 }
 
 export interface EstadoConversa {
@@ -1738,17 +1740,20 @@ async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: st
   if (PALAVRAS_NEGACAO.some(p => normalizar(mensagemCliente).includes(normalizar(p)))) {
     return { estado: { ...estado, fase: 'escolha_categoria' }, mensagem: 'Sem problemas! Me conta o que você procura (cor, estilo, ocasião) que eu te ajudo a encontrar.' }
   }
-  if (pareceReferenciaAoSite(mensagemCliente)) {
+  if (pareceReferenciaAoSite(mensagemCliente) || estado.dados.aguardandoNomeProdutoCitado) {
     const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps)
     if (encontrado) {
       const novoEstado: EstadoConversa = {
         ...estado,
         fase: 'recomendacao',
-        dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true },
+        dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true, aguardandoNomeProdutoCitado: undefined },
       }
       return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
     }
-    return { estado, mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.' }
+    return {
+      estado: { ...estado, dados: { ...estado.dados, aguardandoNomeProdutoCitado: true } },
+      mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.',
+    }
   }
   // Mensagem ambígua durante a paginação — nunca despeja o catálogo de novo sozinho, só pergunta.
   return { estado, mensagem: 'Você quer ver mais opções, ou já escolheu algum item? Pode me dizer o nome, código ou preço.' }
@@ -1777,17 +1782,17 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
   // antes de insistir nas opções antigas (caso real, monitoramento
   // 2026-07-24).
   if (estado.dados.recomendacaoApresentada && estado.dados.opcoesRecomendadas?.length) {
-    if (pareceReferenciaAoSite(mensagemCliente)) {
+    if (pareceReferenciaAoSite(mensagemCliente) || estado.dados.aguardandoNomeProdutoCitado) {
       const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps)
       if (encontrado) {
         const novoEstado: EstadoConversa = {
           ...estado,
-          dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true },
+          dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true, aguardandoNomeProdutoCitado: undefined },
         }
         return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
       }
       return {
-        estado,
+        estado: { ...estado, dados: { ...estado.dados, aguardandoNomeProdutoCitado: true } },
         mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.',
       }
     }

@@ -987,6 +987,28 @@ test('2. produto citado com referência ao site mas não encontrado na busca rea
   assert.match(r.mensagem, /não encontrei esse produto/i)
   assert.match(r.mensagem, /link do produto|nome exato/i, 'pergunta onde o cliente encontrou o produto (link ou nome exato), pra ajudar a localizar')
   assert.doesNotMatch(r.mensagem, /R\$ ?105|R\$ ?145|R\$ ?140/i, 'nunca reapresenta o catalogo antigo como se fosse resposta ao produto citado')
+  assert.equal(r.estado.dados.aguardandoNomeProdutoCitado, true, 'marca que a proxima mensagem deve ser tratada como resposta a essa pergunta')
+})
+
+// Caso real observado em monitoramento 2026-07-25 (após o fix da busca por
+// nome): a Flora perguntou "pode me dizer... o nome exato como aparece
+// lá?", o cliente respondeu com o nome exato do produto (sem repetir
+// "site"/"não está no catálogo"), e a Flora voltou a insistir nas opções
+// antigas — a resposta à própria pergunta da Flora não era reconhecida.
+test('2b. resposta à pergunta "qual o nome exato" é tratada como busca ao vivo, mesmo sem repetir "site"', async () => {
+  const PRODUTO_DO_SITE: ProdutoCatalogo = { nome: 'Produto Teste – Não disponível para venda', preco: 1, disponivel: true }
+  let ultimaQuery = ''
+  const deps = depsFake({ buscarCatalogo: async ({ query }) => { ultimaQuery = query; return [PRODUTO_DO_SITE] } })
+  const estadoAguardandoResposta: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true, aguardandoNomeProdutoCitado: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estadoAguardandoResposta, 'Produto Teste – Não disponível para venda', 'compra_produto', deps)
+  assert.equal(ultimaQuery, 'Produto Teste Não disponível para venda', 'busca ao vivo direto, sem exigir "site" de novo — a mensagem já é a resposta à pergunta anterior')
+  assert.equal(r.estado.dados.opcoesRecomendadas?.[0]?.nome, 'Produto Teste – Não disponível para venda')
+  assert.doesNotMatch(r.mensagem, /qual das op(c|ç)(o|õ)es que te mostrei/i)
+  assert.equal(r.estado.dados.aguardandoNomeProdutoCitado, undefined, 'limpa a marca depois de resolver')
 })
 
 test('3. sem referência ao site, mensagem ambígua continua caindo no fallback antigo, sem buscar o catálogo de novo (regressão)', async () => {

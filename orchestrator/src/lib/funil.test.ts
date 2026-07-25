@@ -1018,6 +1018,25 @@ test('2b. resposta à pergunta "qual o nome exato" é tratada como busca ao vivo
   assert.equal(r.estado.dados.aguardandoNomeProdutoCitado, undefined, 'limpa a marca depois de resolver')
 })
 
+// Bug real observado em monitoramento 2026-07-25 (após a busca passar a
+// tentar qualquer mensagem não reconhecida): "quero escolher outro
+// produto" é um pedido de NAVEGAÇÃO (ver categorias diferentes), nunca o
+// nome de um produto — mas virou uma busca fracassada, respondendo "não
+// encontrei esse produto com esse nome".
+test('2c. "quero escolher outro produto" nunca vira uma busca fracassada — é pedido de navegação, não nome de produto', async () => {
+  let chamadasCatalogo = 0
+  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return [] } })
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'quero escolher outro produto', 'compra_produto', deps)
+  assert.equal(chamadasCatalogo, 0, 'nunca tenta buscar "outro produto" como se fosse um nome de produto real')
+  assert.doesNotMatch(r.mensagem, /não encontrei esse produto/i)
+  assert.equal(r.estado.fase, 'escolha_categoria')
+})
+
 // "não" é uma palavra comum demais pra usar como filtro de negação antes
 // de buscar — apareceria até no nome do próprio produto sendo procurado
 // (ver testes 1b/1c/2b). Por isso "não gostei de nenhuma" também tenta a

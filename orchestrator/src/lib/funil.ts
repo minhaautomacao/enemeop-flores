@@ -808,6 +808,22 @@ async function resolverRetomadaAposIntervalo(
 ): Promise<ResultadoEtapa | null> {
   const n = normalizarFrase(mensagemCliente)
   if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizarFrase(p)))) {
+    // Mesma pergunta de reaproveitamento de dados já usada quando "nova
+    // intenção de compra" reinicia a jornada em fases mais avançadas (ver
+    // avancarFunil) — faltava aqui, no reinício vindo do gate de intervalo
+    // (>1h sem interação + "nova compra"). Bug real observado em
+    // monitoramento 2026-07-25: cliente perdeu o formulário completo já
+    // informado antes e teve que digitar tudo de novo, mesmo pedindo
+    // explicitamente "use os dados do pedido anterior" depois.
+    const formularioAnterior = estado.dados.formulario
+    const enderecoCompleto = !!formularioAnterior && camposFaltandoFormulario(formularioAnterior).length === 0
+    if (enderecoCompleto) {
+      const jornadaReiniciada = reiniciarJornada(mensagemCliente)
+      return {
+        estado: { ...jornadaReiniciada, fase: 'aguardando_reaproveitar_dados', dados: { ...jornadaReiniciada.dados, formularioAnterior } },
+        mensagem: mensagemPerguntaReaproveitarDados(),
+      }
+    }
     return null // sinaliza pro chamador reiniciar a jornada e seguir o fluxo normal
   }
 

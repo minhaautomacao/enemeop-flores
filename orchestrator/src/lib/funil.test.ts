@@ -2143,6 +2143,31 @@ test('retomada apos intervalo 2: "continuar" restaura a fase e os dados salvos; 
   assert.equal(rAmbiguo.mensagem, mensagemRetomadaAposIntervalo())
 })
 
+// Bug real observado em monitoramento 2026-07-25: "nova compra" vindo do
+// gate de intervalo (>1h sem interação) reiniciava a jornada direto,
+// perdendo um formulário de entrega já completo, sem nunca oferecer
+// reaproveitá-lo — diferente do mesmo cenário em fases mais avançadas
+// (onde a pergunta de reaproveitamento já funcionava, ver testes de
+// "reaproveitamento" acima). Cliente teve que digitar tudo de novo mesmo
+// pedindo explicitamente pra reaproveitar depois.
+test('retomada apos intervalo 3: "nova compra" com formulário completo salvo pergunta antes de reiniciar, mesma pergunta de reaproveitamento', async () => {
+  const deps = depsFake()
+  const estadoAguardando: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      formulario: formularioFixture(),
+      faseAntesDoIntervalo: 'aguardando_formulario',
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estadoAguardando, 'nova compra', 'compra_produto', deps)
+  assert.equal(r.estado.fase, 'aguardando_reaproveitar_dados')
+  assert.deepEqual(r.estado.dados.formularioAnterior, formularioFixture(), 'guarda o formulário completo pra decidir depois')
+  assert.equal(r.estado.dados.produto, undefined, 'produto da jornada anterior nunca é reaproveitado automaticamente')
+  assert.match(r.mensagem, /mesmos dados de entrega do pedido anterior/i)
+})
+
 // ── Retomada após intervalo — bug real: espaço duplo não era reconhecido ──
 
 test('1. retomada: "nova  compra" (espaço duplo) avança sem repetir a pergunta', async () => {

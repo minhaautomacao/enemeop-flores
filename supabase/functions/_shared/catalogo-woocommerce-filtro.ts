@@ -58,11 +58,21 @@ export function divergeSkuDoCodigo(p: WooProduct): boolean {
   return !!sku && !!doNome && sku.toLowerCase() !== doNome.toLowerCase();
 }
 
-/** Produto de teste/rascunho/fora de estoque/sem preço/sem imagem — nunca aparece pro cliente. Ausência de código no nome NÃO exclui (usa o ID como fallback, ver paraProdutoCatalogo). */
+/**
+ * Produto rascunho/fora de estoque/sem preço/sem imagem — nunca aparece pro
+ * cliente. Ausência de código no nome NÃO exclui (usa o ID como fallback,
+ * ver paraProdutoCatalogo).
+ *
+ * Nunca exclui pelo NOME do produto (ex.: conter "teste" ou "não
+ * disponível") — decisão explícita do usuário, 2026-07-24: um produto real
+ * usado deliberadamente para testar a Flora ponta a ponta (inclusive
+ * pagamento) tem esse tipo de nome de propósito, e status/estoque reais no
+ * WooCommerce (publish + instock, checados acima) já são o sinal correto de
+ * disponibilidade — nunca o texto do nome.
+ */
 export function produtoValido(p: WooProduct): boolean {
   if (p.status !== 'publish') return false;
   if (p.stock_status !== 'instock') return false;
-  if (/\bteste\b/i.test(p.name) || /n[aã]o\s+dispon[ií]vel/i.test(p.name)) return false;
   if (parsePreco(p) == null) return false;
   if (!p.images || p.images.length === 0) return false;
   return true;

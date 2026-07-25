@@ -107,9 +107,13 @@ test('produto outofstock (stock_status != instock) nunca aparece, mesmo publicad
   assert.equal(produtoValido(foraDeEstoque), false);
 });
 
-test('exclusão do produto de teste continua funcionando junto com a nova regra de código', () => {
+// Decisão explícita do usuário, 2026-07-24: produto real (publicado, em
+// estoque, com preço e foto) usado deliberadamente pra testar a Flora
+// ponta a ponta nunca é excluído só pelo nome — status/estoque reais no
+// WooCommerce são o sinal correto de disponibilidade, nunca o texto do nome.
+test('produto com "teste"/"não disponível" no nome, mas publicado e em estoque de verdade, NUNCA é excluído só pelo nome', () => {
   const produtoTeste = produtoBase({ name: 'Produto Teste - Não disponível para venda', sku: '', price: '1.00', regular_price: '1.00' });
-  assert.equal(produtoValido(produtoTeste), false);
+  assert.equal(produtoValido(produtoTeste), true);
 });
 
 // 8. Credencial ausente nunca lança exceção nem vaza nada — header vira null.

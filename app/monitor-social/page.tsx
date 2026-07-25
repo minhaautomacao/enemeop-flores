@@ -1,6 +1,7 @@
 ﻿'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { Activity, MessageCircle, Users, Wifi, WifiOff } from 'lucide-react';
 
 const IconInstagram = () => <span className="text-lg">📸</span>;
@@ -75,7 +76,7 @@ export default function MonitorSocialPage() {
   return (
     <div className="min-h-screen bg-[#FDFCF9] font-sans">
       <div className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-[#DDD6C8] bg-[#FDFCF9]/95 backdrop-blur px-6">
-        <div className="flex items-center gap-3"><IconInstagram /><IconFacebook /><span className="text-sm font-bold text-[#1C1208]">Monitor Social — Enemeop Flores</span></div>
+        <Link href="/dashboard" aria-label="Ir para o Dashboard" className="flex items-center gap-3 cursor-pointer"><IconInstagram /><IconFacebook /><span className="text-sm font-bold text-[#1C1208]">Monitor Social — Enemeop Flores</span></Link>
         <div className="flex items-center gap-3">
           {lastUpdate && <span className="text-xs text-[#A8967E]">Atualizado {lastUpdate.toLocaleTimeString('pt-BR')}</span>}
           <div className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full border ${online ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-600 border-red-200'}`}>

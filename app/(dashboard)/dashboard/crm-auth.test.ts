@@ -36,8 +36,24 @@ for (const { nome, arquivo } of PAGINAS) {
     assert.equal(/NEXT_PUBLIC_[A-Z_]*FACTORY_SECRET/.test(fonte), false);
   });
 
-  test(`${nome}/page.tsx: sem FACTORY_SECRET configurado, retorna lista vazia (nunca lança nem trava a página)`, () => {
-    const semSegredo = /if\s*\(!factorySecret\)\s*\{[\s\S]*?return \[\];[\s\S]*?\}/;
+  test(`${nome}/page.tsx: sem FACTORY_SECRET configurado, retorna lista vazia com erro explícito (nunca lança nem trava a página)`, () => {
+    const semSegredo = new RegExp(`if\\s*\\(!factorySecret\\)\\s*\\{[\\s\\S]*?return \\{ ${nome}: \\[\\], erro:[\\s\\S]*?\\}[\\s\\S]*?\\}`);
     assert.match(fonte, semSegredo);
+  });
+
+  test(`${nome}/page.tsx: resposta HTTP não-ok (ex.: 401 por segredo divergente) vira erro visível, nunca lista vazia silenciosa`, () => {
+    assert.match(fonte, /if\s*\(!res\.ok\)\s*\{/);
+    assert.match(fonte, new RegExp(`return \\{ ${nome}: \\[\\], erro: \``));
+    // Guarda o status HTTP no log/erro pra diagnosticar 401 vs 5xx — nunca o
+    // corpo ou headers da resposta, que poderiam ecoar o segredo enviado.
+    assert.match(fonte, /res\.status/);
+  });
+
+  test(`${nome}/page.tsx: nunca loga o corpo ou os headers da resposta de erro (só o status HTTP)`, () => {
+    assert.doesNotMatch(fonte, /console\.error\([^)]*res\.(headers|body|json\(\))/);
+  });
+
+  test(`${nome}/page.tsx: a página distingue "erro" de "lista realmente vazia" na UI (dois estados visuais diferentes)`, () => {
+    assert.match(fonte, /\{erro \? \(/);
   });
 }

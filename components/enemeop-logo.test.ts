@@ -53,3 +53,9 @@ test('tela de login: EnumeopLogo NUNCA recebe href (não é uma página autentic
   const src = readFileSync(join(DIR, '..', 'app', '(auth)', 'login', 'page.tsx'), 'utf-8');
   assert.doesNotMatch(src, /<EnumeopLogo[^>]*href=/);
 });
+
+test('Monitor Social: marca no topo esquerdo é um Link do Next.js pra /dashboard (não usa EnumeopLogo, header não foi duplicado nem reescrito)', () => {
+  const src = readFileSync(join(DIR, '..', 'app', 'monitor-social', 'page.tsx'), 'utf-8');
+  assert.match(src, /<Link href="\/dashboard"[^>]*>[\s\S]*?<\/Link>/);
+  assert.match(src, /import Link from ['"]next\/link['"]/);
+});

@@ -46,11 +46,15 @@ interface Conversa {
 
 // conversas-enemeop foi migrada para enemeop-flores/supabase/functions/ —
 // pendente de deploy no projeto Enemeop (ver docs/DEPLOYMENT.md).
-async function getConversas(): Promise<Conversa[]> {
+//
+// Retorna `erro` separado da lista — uma falha de auth/rede nunca deve
+// parecer "nenhuma conversa ainda" (silenciosa); a página distingue os dois
+// estados e mostra um aviso visível quando erro != null.
+async function getConversas(): Promise<{ conversas: Conversa[]; erro: string | null }> {
   const factorySecret = process.env.FACTORY_SECRET;
   if (!factorySecret) {
     console.error('[dashboard/conversas] FACTORY_SECRET não configurado no servidor — lista vazia');
-    return [];
+    return { conversas: [], erro: 'FACTORY_SECRET não configurado no servidor' };
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
@@ -60,11 +64,18 @@ async function getConversas(): Promise<Conversa[]> {
       headers: { Authorization: `Bearer ${factorySecret}` },
       next: { revalidate: 10 },
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      // Nunca logamos corpo/headers da resposta (poderiam ecoar o segredo
+      // enviado) — só o status HTTP, suficiente pra diagnosticar 401 (segredo
+      // divergente) vs 5xx (Supabase fora do ar).
+      console.error(`[dashboard/conversas] conversas-enemeop respondeu HTTP ${res.status} — lista vazia`);
+      return { conversas: [], erro: `Falha ao carregar conversas (HTTP ${res.status})` };
+    }
     const json = await res.json();
-    return json.conversas ?? [];
-  } catch {
-    return [];
+    return { conversas: json.conversas ?? [], erro: null };
+  } catch (e) {
+    console.error('[dashboard/conversas] falha de rede ao chamar conversas-enemeop:', e instanceof Error ? e.message : 'erro desconhecido');
+    return { conversas: [], erro: 'Falha de rede ao carregar conversas' };
   }
 }
 
@@ -86,7 +97,7 @@ function ultimaMensagem(historico: Mensagem[]): string {
 }
 
 export default async function ConversasPage() {
-  const conversas = await getConversas();
+  const { conversas, erro } = await getConversas();
 
   const ativas     = conversas.filter(c => !['concluido', 'perdido'].includes(c.fase)).length;
   const propostas  = conversas.filter(c => c.fase === 'proposta').length;
@@ -127,7 +138,12 @@ export default async function ConversasPage() {
             </span>
           </div>
 
-          {conversas.length === 0 ? (
+          {erro ? (
+            <div className="px-4 py-16 text-center">
+              <p className="text-status-error text-sm font-medium">Não foi possível carregar as conversas.</p>
+              <p className="text-text-faint text-xs mt-1">{erro}</p>
+            </div>
+          ) : conversas.length === 0 ? (
             <div className="px-4 py-16 text-center">
               <p className="text-text-muted text-sm">Nenhuma conversa ainda.</p>
               <p className="text-text-faint text-xs mt-1">Mande uma DM no Instagram para testar.</p>

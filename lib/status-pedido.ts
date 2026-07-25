@@ -66,9 +66,16 @@ export const FILTROS_STATUS_PEDIDOS: { valor: FiltroStatusPedidos; label: string
   { valor: 'entregues', label: 'Entregues' },
 ];
 
+/**
+ * Filtros mutuamente exclusivos — cada status real pertence a NO MÁXIMO um
+ * filtro desta tela, nunca aparece em mais de um ao mesmo tempo.
+ * 'saiu' (saiu para entrega) não pertence a nenhum dos 4 filtros daqui —
+ * essa tela é sobre produção (aberto/preparando/pronto/entregue), a
+ * visualização de "saiu" continua no Painel de Produção.
+ */
 export function pedidoNoFiltroStatus(statusProducao: StatusProducao, filtro: FiltroStatusPedidos): boolean {
   switch (filtro) {
-    case 'em_aberto': return statusProducao !== 'entregue';
+    case 'em_aberto': return statusProducao === 'novo' || statusProducao === 'confirmado';
     case 'preparando': return statusProducao === 'preparando';
     case 'prontos': return statusProducao === 'pronto';
     case 'entregues': return statusProducao === 'entregue';

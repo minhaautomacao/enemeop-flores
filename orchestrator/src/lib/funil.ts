@@ -1127,20 +1127,6 @@ export function selecionarRecomendacoes(produtosDoCatalogo: ProdutoCatalogo[]): 
   return { principal, alternativas: resto.slice(0, 2) }
 }
 
-/**
- * Sinal explícito de que o cliente está citando um produto do site que não
- * está entre as opções já apresentadas — nunca dispara numa mensagem
- * ambígua genérica ("não gostei", "outra opção"), só quando a própria
- * mensagem referencia o site/catálogo diretamente. Caso real observado em
- * monitoramento 2026-07-24: cliente citou um produto pelo nome dizendo "que
- * vi no site"/"não está no catálogo", e a Flora só repetia a pergunta sobre
- * as opções já mostradas, nunca buscando de verdade o produto citado.
- */
-function pareceReferenciaAoSite(mensagem: string): boolean {
-  const n = normalizar(mensagem)
-  return /\bsite\b/.test(n) || /nao esta no catalogo/.test(n)
-}
-
 // Remove frases de abertura/fechamento comuns ao redor do nome do produto
 // citado, deixando só o nome pra buscar — a busca real (WooCommerce
 // ?search=) não lida bem com frases inteiras cheias de palavras soltas
@@ -1174,10 +1160,26 @@ export function extrairNomeProdutoCitado(mensagem: string): string {
  * nunca aparece aqui, pois já é filtrado na origem — ver
  * catalogo-woocommerce-filtro.ts).
  */
-async function buscarProdutoCitadoNoSite(mensagemCliente: string, deps: DependenciasFunil): Promise<Recomendacao | null> {
+// Nunca conta como "encontrado" um produto que já está entre as opções
+// apresentadas nesta conversa — sem essa checagem, uma pergunta ambígua
+// de continuação ("tem mais alguma coisa?", sem citar produto nenhum)
+// dispararia uma busca que devolve o MESMO catálogo já mostrado, e ele
+// seria re-apresentado como se fosse uma descoberta nova (regressão real
+// já corrigida antes — "loop de aniversário", monitoramento 2026-07-21).
+function jaEstaNasOpcoesMostradas(produto: ProdutoCatalogo, opcoesMostradas?: ProdutoCatalogo[]): boolean {
+  if (!opcoesMostradas) return false
+  return opcoesMostradas.some(o => (produto.codigo && o.codigo === produto.codigo) || o.nome === produto.nome)
+}
+
+async function buscarProdutoCitadoNoSite(
+  mensagemCliente: string,
+  deps: DependenciasFunil,
+  opcoesJaMostradas?: ProdutoCatalogo[],
+): Promise<Recomendacao | null> {
   const produtos = await deps.buscarCatalogo({ query: extrairNomeProdutoCitado(mensagemCliente) })
   const rec = selecionarRecomendacoes(produtos)
-  return rec.principal ? rec : null
+  if (!rec.principal || jaEstaNasOpcoesMostradas(rec.principal, opcoesJaMostradas)) return null
+  return rec
 }
 
 function formatarPreco(preco?: number): string {
@@ -1714,23 +1716,23 @@ async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: st
   if (PALAVRAS_NEGACAO.some(p => normalizar(mensagemCliente).includes(normalizar(p)))) {
     return { estado: { ...estado, fase: 'escolha_categoria' }, mensagem: 'Sem problemas! Me conta o que você procura (cor, estilo, ocasião) que eu te ajudo a encontrar.' }
   }
-  if (pareceReferenciaAoSite(mensagemCliente) || estado.dados.aguardandoNomeProdutoCitado) {
-    const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps)
-    if (encontrado) {
-      const novoEstado: EstadoConversa = {
-        ...estado,
-        fase: 'recomendacao',
-        dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true, aguardandoNomeProdutoCitado: undefined },
-      }
-      return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
+  // Não bateu com nenhuma opção já mostrada, nem é confirmação/negação —
+  // pode ser o nome de outro produto do site: busca ao vivo antes de só
+  // perguntar de novo (nunca chega aqui numa rejeição genérica, já tratada
+  // acima).
+  const encontradoNoSite = await buscarProdutoCitadoNoSite(mensagemCliente, deps, estado.dados.opcoesRecomendadas)
+  if (encontradoNoSite) {
+    const novoEstado: EstadoConversa = {
+      ...estado,
+      fase: 'recomendacao',
+      dados: { ...estado.dados, opcoesRecomendadas: [encontradoNoSite.principal!, ...encontradoNoSite.alternativas], recomendacaoApresentada: true, aguardandoNomeProdutoCitado: undefined },
     }
-    return {
-      estado: { ...estado, dados: { ...estado.dados, aguardandoNomeProdutoCitado: true } },
-      mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.',
-    }
+    return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontradoNoSite) }
   }
-  // Mensagem ambígua durante a paginação — nunca despeja o catálogo de novo sozinho, só pergunta.
-  return { estado, mensagem: 'Você quer ver mais opções, ou já escolheu algum item? Pode me dizer o nome, código ou preço.' }
+  return {
+    estado: { ...estado, dados: { ...estado.dados, aguardandoNomeProdutoCitado: true } },
+    mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.',
+  }
 }
 
 async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
@@ -1750,29 +1752,27 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
 
   // Opções já foram apresentadas nesta conversa e o cliente ainda não
   // escolheu (a mensagem não bateu com nenhuma delas acima) — nunca
-  // reapresenta o catálogo do zero; só pergunta objetivamente qual das
-  // opções já mostradas ele quer. Exceção: cliente referenciou o site
-  // diretamente (produto fora das opções já mostradas) — busca ao vivo
-  // antes de insistir nas opções antigas (caso real, monitoramento
-  // 2026-07-24).
+  // reapresenta o catálogo do zero. Nunca filtra por palavra de negação
+  // aqui antes de buscar: um nome de produto real pode conter "não" (ex.:
+  // "Produto Teste – Não disponível para venda", caso real de monitoramento
+  // 2026-07-25) e um filtro lexical de negação bloquearia a busca desse
+  // produto genuíno. A proteção contra reapresentar o MESMO catálogo já
+  // mostrado como se fosse uma descoberta nova (regressão real "loop de
+  // aniversário", 2026-07-21) fica inteiramente a cargo de
+  // jaEstaNasOpcoesMostradas, dentro de buscarProdutoCitadoNoSite — nunca
+  // do conteúdo da mensagem.
   if (estado.dados.recomendacaoApresentada && estado.dados.opcoesRecomendadas?.length) {
-    if (pareceReferenciaAoSite(mensagemCliente) || estado.dados.aguardandoNomeProdutoCitado) {
-      const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps)
-      if (encontrado) {
-        const novoEstado: EstadoConversa = {
-          ...estado,
-          dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true, aguardandoNomeProdutoCitado: undefined },
-        }
-        return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
+    const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps, estado.dados.opcoesRecomendadas)
+    if (encontrado) {
+      const novoEstado: EstadoConversa = {
+        ...estado,
+        dados: { ...estado.dados, opcoesRecomendadas: [encontrado.principal!, ...encontrado.alternativas], recomendacaoApresentada: true, aguardandoNomeProdutoCitado: undefined },
       }
-      return {
-        estado: { ...estado, dados: { ...estado.dados, aguardandoNomeProdutoCitado: true } },
-        mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.',
-      }
+      return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
     }
     return {
-      estado,
-      mensagem: 'Qual das opções que te mostrei você prefere? Pode me dizer o nome, o código ou o preço.',
+      estado: { ...estado, dados: { ...estado.dados, aguardandoNomeProdutoCitado: true } },
+      mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.',
     }
   }
 

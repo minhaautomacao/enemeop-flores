@@ -899,18 +899,25 @@ const CATALOGO_ANIVERSARIO: ProdutoCatalogo[] = [
   { nome: 'Buquê de Rosas Vermelhas', preco: 140, codigo: '032', idExterno: '4032', disponivel: true, fotoUrl: 'https://site/032.jpg' },
 ]
 
-test('recomendação já apresentada: mensagem que não escolhe nenhuma opção NUNCA repete a busca no catálogo (regressão do loop de aniversário)', async () => {
-  let chamadasCatalogo = 0
-  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return CATALOGO_ANIVERSARIO } })
+// A versão anterior desta proteção nunca chamava deps.buscarCatalogo de
+// novo pra uma mensagem ambígua ("tem mais alguma coisa?"). Isso mudou de
+// propósito (ver comentário em etapaRecomendacao, monitoramento 2026-07-25):
+// filtrar por palavra de negação antes de buscar bloqueava produtos reais
+// cujo nome contém "não" (ex.: "Produto Teste – Não disponível para
+// venda"). A chamada agora pode acontecer, mas a proteção contra
+// REAPRESENTAR o mesmo catálogo já mostrado como se fosse uma descoberta
+// nova continua garantida por jaEstaNasOpcoesMostradas — nunca pelo
+// conteúdo da mensagem.
+test('recomendação já apresentada: mensagem ambígua nunca reapresenta o MESMO catálogo já mostrado como se fosse uma descoberta nova (regressão do loop de aniversário)', async () => {
+  const deps = depsFake({ buscarCatalogo: async () => CATALOGO_ANIVERSARIO })
   const estado: EstadoConversa = {
     fase: 'recomendacao',
     dados: { ocasiao: 'aniversario', opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'e pra aniversário, tem mais alguma coisa?', 'recomendacao', deps)
-  assert.equal(chamadasCatalogo, 0, 'nao deve buscar o catalogo de novo — opcoes ja foram apresentadas nesta conversa')
   assert.equal(r.estado.fase, 'recomendacao')
-  assert.match(r.mensagem, /qual das op(c|ç)(o|õ)es/i)
+  assert.deepEqual(r.estado.dados.opcoesRecomendadas, CATALOGO_ANIVERSARIO, 'nunca substitui as opcoes ja mostradas pelo mesmo catalogo como se fosse novo')
   assert.doesNotMatch(r.mensagem, /R\$ ?105|R\$ ?145|R\$ ?140/i, 'nao deve reapresentar a lista de produtos/precos')
 })
 
@@ -1011,17 +1018,22 @@ test('2b. resposta à pergunta "qual o nome exato" é tratada como busca ao vivo
   assert.equal(r.estado.dados.aguardandoNomeProdutoCitado, undefined, 'limpa a marca depois de resolver')
 })
 
-test('3. sem referência ao site, mensagem ambígua continua caindo no fallback antigo, sem buscar o catálogo de novo (regressão)', async () => {
-  let chamadasCatalogo = 0
-  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return CATALOGO_ANIVERSARIO } })
+// "não" é uma palavra comum demais pra usar como filtro de negação antes
+// de buscar — apareceria até no nome do próprio produto sendo procurado
+// (ver testes 1b/1c/2b). Por isso "não gostei de nenhuma" também tenta a
+// busca ao vivo agora; o que garante que ela nunca vira uma resposta
+// errada é jaEstaNasOpcoesMostradas (o "achado" é sempre o mesmo catálogo
+// já mostrado, então nunca conta como encontrado de verdade).
+test('3. "não gostei de nenhuma" tenta a busca ao vivo, mas nunca reapresenta o mesmo catálogo como se fosse um produto novo encontrado', async () => {
+  const deps = depsFake({ buscarCatalogo: async () => CATALOGO_ANIVERSARIO })
   const estado: EstadoConversa = {
     fase: 'recomendacao',
     dados: { opcoesRecomendadas: CATALOGO_ANIVERSARIO, recomendacaoApresentada: true },
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'não gostei de nenhuma', 'compra_produto', deps)
-  assert.equal(chamadasCatalogo, 0, 'sem sinal explicito de referencia ao site, nunca dispara busca ao vivo')
-  assert.match(r.mensagem, /qual das op(c|ç)(o|õ)es que te mostrei/i)
+  assert.deepEqual(r.estado.dados.opcoesRecomendadas, CATALOGO_ANIVERSARIO, 'nunca substitui as opcoes ja mostradas pelo mesmo catalogo como se fosse novo')
+  assert.doesNotMatch(r.mensagem, /R\$ ?105|R\$ ?145|R\$ ?140/i, 'nao reapresenta precos como se fosse uma descoberta nova')
 })
 
 test('escolha "quero o código 002" após recomendação apresentada avança pro próximo passo, sem repetir o catálogo', async () => {

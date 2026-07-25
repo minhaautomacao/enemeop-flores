@@ -1,6 +1,10 @@
+import Link from 'next/link'
+
 interface LogoProps {
   size?: 'sm' | 'md' | 'lg'
   showText?: boolean
+  /** Quando definido, o logo vira um link interno do Next.js para esta rota (ex.: '/dashboard'). Sem essa prop, o logo permanece não clicável (ex.: tela de login). */
+  href?: string
 }
 
 const sizes = {
@@ -18,10 +22,10 @@ const SQUARES = [
   { x: 54, y: 54 },
 ]
 
-export function EnumeopLogo({ size = 'md', showText = true }: LogoProps) {
+export function EnumeopLogo({ size = 'md', showText = true, href }: LogoProps) {
   const s = sizes[size]
 
-  return (
+  const conteudo = (
     <div className="flex items-center gap-3 select-none">
       <svg
         width={s.px}
@@ -48,5 +52,13 @@ export function EnumeopLogo({ size = 'md', showText = true }: LogoProps) {
         </div>
       )}
     </div>
+  )
+
+  if (!href) return conteudo
+
+  return (
+    <Link href={href} aria-label="Ir para o Dashboard" className="inline-flex cursor-pointer">
+      {conteudo}
+    </Link>
   )
 }

@@ -44,7 +44,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
         {/* Logo */}
         <div className="relative flex h-16 items-center border-b border-border px-4">
-          <EnumeopLogo size="sm" showText={true} />
+          <EnumeopLogo size="sm" showText={true} href="/dashboard" />
         </div>
 
         {/* Navegação */}

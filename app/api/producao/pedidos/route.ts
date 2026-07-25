@@ -1,10 +1,13 @@
 ﻿import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 
-// Só pedidos pagos entram na produção — status_producao (workflow de
-// cozinha) é uma coluna separada de status (estado de pagamento: pago,
-// aguardando_pagamento, pagamento_recusado, cancelado, reembolsado), então
-// nunca reaproveita um valor de uma pela outra.
+// Pedidos pagos (produção) + pedidos aguardando pagamento (ainda no fluxo
+// comercial, exibidos como "Pedido em Atendimento" — nunca confundidos com
+// produção real). status_producao (workflow de cozinha) é uma coluna
+// separada de status (estado de pagamento: pago, aguardando_pagamento,
+// pagamento_recusado, cancelado, reembolsado), então nunca reaproveita um
+// valor de uma pela outra — a classificação fica em lib/status-pedido.ts.
+// Pagamento recusado/cancelado/reembolsado nunca entra aqui.
 export async function GET() {
   const supabase = await createClient();
 
@@ -22,7 +25,7 @@ export async function GET() {
       status, status_producao, status_logistica, logistica_resposta, canal, criado_em,
       horario_entrega, data_agendada, nome_destinatario, bairro, endereco_entrega,
       mensagem_cartao, frete_transportadora`)
-    .eq('status', 'pago')
+    .in('status', ['pago', 'aguardando_pagamento'])
     .order('numero_pedido', { ascending: true })
     .limit(1000);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

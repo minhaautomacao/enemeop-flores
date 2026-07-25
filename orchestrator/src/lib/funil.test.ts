@@ -1037,6 +1037,28 @@ test('2c. "quero escolher outro produto" nunca vira uma busca fracassada — é 
   assert.equal(r.estado.fase, 'escolha_categoria')
 })
 
+// Bug real observado em monitoramento 2026-07-25 (mesma conversa do bug
+// "ramalhete"): quando a PRIMEIRA busca no catálogo já falha
+// (opcoesRecomendadas fica vazio, recomendacaoApresentada fica false), a
+// checagem de FRASES_NOVO_PEDIDO ficava presa dentro do bloco
+// "recomendacaoApresentada && opcoesRecomendadas.length" — nunca
+// executava, e a conversa repetia pra sempre a mesma busca fracassada,
+// inclusive quando o cliente pedia explicitamente "gostaria de fazer um
+// novo pedido".
+test('2c-bis. depois de uma busca já fracassada (sem opções), "fazer um novo pedido" ainda é reconhecido — nunca repete a mesma busca fracassada', async () => {
+  let chamadasCatalogo = 0
+  const deps = depsFake({ buscarCatalogo: async () => { chamadasCatalogo++; return [] } })
+  const estado: EstadoConversa = {
+    fase: 'recomendacao',
+    dados: { tipoProduto: 'buquê', opcoesRecomendadas: [], recomendacaoApresentada: false },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, 'Gostaria de fazer um novo pedido', 'compra_produto', deps)
+  assert.equal(chamadasCatalogo, 0, 'nunca repete a busca já fracassada quando o cliente pede um novo pedido')
+  assert.doesNotMatch(r.mensagem, /não encontrei/i)
+  assert.equal(r.estado.fase, 'escolha_categoria')
+})
+
 // Bug real observado em monitoramento 2026-07-25: depois de "trocar o
 // produto" levar o cliente pra escolha_categoria (2c acima), citar um
 // produto específico do site nessa fase só repetia "qual categoria" — a

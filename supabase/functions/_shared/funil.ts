@@ -1828,6 +1828,24 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
     return { estado: novoEstado, mensagem: `Você escolheu ${escolhido.codigo ? `${escolhido.codigo} — ` : ''}${escolhido.nome}, por ${formatarPreco(escolhido.preco)}. Quantas unidades você quer?` }
   }
 
+  // "quero outro produto"/"outras opções"/"fazer um novo pedido" etc. é
+  // pedido de navegação (quer ver coisas diferentes), nunca o nome de um
+  // produto — nunca tenta buscar isso ao vivo como se fosse uma citação de
+  // produto (bug real observado em monitoramento 2026-07-25: "quero
+  // escolher outro produto" virou uma busca fracassada, respondendo "não
+  // encontrei esse produto"). Checado ANTES e independente de
+  // recomendacaoApresentada/opcoesRecomendadas: quando a primeira busca já
+  // tinha falhado (opcoesRecomendadas vazio), a conversa ficava presa
+  // repetindo pra sempre a mesma busca fracassada — inclusive quando o
+  // cliente pedia explicitamente "gostaria de fazer um novo pedido" (caso
+  // real de monitoramento 2026-07-25, mesma conversa do bug "ramalhete").
+  if (FRASES_NOVO_PEDIDO.some(p => normalizar(mensagemCliente).includes(normalizar(p)))) {
+    return {
+      estado: { ...estado, fase: 'escolha_categoria' },
+      mensagem: 'Claro! Me conta o que você procura (cor, estilo, ocasião), ou posso te mostrar as categorias de novo.',
+    }
+  }
+
   // Opções já foram apresentadas nesta conversa e o cliente ainda não
   // escolheu (a mensagem não bateu com nenhuma delas acima) — nunca
   // reapresenta o catálogo do zero. Nunca filtra por palavra de negação
@@ -1840,18 +1858,6 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
   // jaEstaNasOpcoesMostradas, dentro de buscarProdutoCitadoNoSite — nunca
   // do conteúdo da mensagem.
   if (estado.dados.recomendacaoApresentada && estado.dados.opcoesRecomendadas?.length) {
-    // "quero outro produto"/"outras opções" etc. é pedido de navegação
-    // (quer ver coisas diferentes), nunca o nome de um produto — nunca
-    // tenta buscar isso ao vivo como se fosse uma citação de produto (bug
-    // real observado em monitoramento 2026-07-25: "quero escolher outro
-    // produto" virou uma busca fracassada, respondendo "não encontrei esse
-    // produto").
-    if (FRASES_NOVO_PEDIDO.some(p => normalizar(mensagemCliente).includes(normalizar(p)))) {
-      return {
-        estado: { ...estado, fase: 'escolha_categoria' },
-        mensagem: 'Claro! Me conta o que você procura (cor, estilo, ocasião), ou posso te mostrar as categorias de novo.',
-      }
-    }
     const encontrado = await buscarProdutoCitadoNoSite(mensagemCliente, deps, estado.dados.opcoesRecomendadas)
     if (encontrado) {
       const novoEstado: EstadoConversa = {

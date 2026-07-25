@@ -300,7 +300,9 @@ export const TEXTO_FORMULARIO_ENTREGA = `Para calcular a entrega, envie por favo
 Nome do remetente:
 Nome do destinatário:
 Telefone do destinatário:
-CEP da entrega:`
+CEP da entrega:
+Número:
+Complemento (se houver):`
 
 // Rótulos aceitos por campo (já normalizados: sem acento, minúsculo, sem
 // pontuação de marcação). O primeiro de cada lista é o rótulo canônico do
@@ -2124,6 +2126,16 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
 
   const faltando = camposFaltandoFormulario(formularioAtual)
   if (faltando.length > 0) {
+    // Nada foi reconhecido ainda (nem rotulado, nem isolado) — repete o
+    // pedido inicial no formato de sempre, nunca a lista de "só faltou
+    // completar" (que soa como se algo já tivesse sido informado, quando
+    // na verdade nenhum campo foi reconhecido). Bug real observado em
+    // monitoramento 2026-07-25: "use os dados do pedido anterior" não foi
+    // reconhecido, e a resposta listou os 8 campos como se fosse uma
+    // pendência parcial.
+    if (Object.keys(formularioAtual).length === 0) {
+      return responder(TEXTO_FORMULARIO_ENTREGA)
+    }
     return responder(montarMensagemCamposFaltando(faltando))
   }
 

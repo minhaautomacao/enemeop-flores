@@ -2387,12 +2387,18 @@ function estadoAguardandoFormulario(formulario?: Partial<FormularioEntregaDados>
   }
 }
 
-test('1. etapa 1 pede so os quatro campos iniciais, em qualquer ordem, sem repetir o que ja foi informado', async () => {
+// Pedido explícito do usuário, 2026-07-25: o pedido inicial passou a
+// incluir número e complemento junto (nunca só depois do CEP resolver) —
+// decisão de conteúdo, não um bug. Rua/bairro/data de entrega continuam de
+// fora (rua/bairro resolvidos via ViaCEP; data pedida depois).
+test('1. etapa 1 pede remetente/destinatário/telefone/CEP/número/complemento, em qualquer ordem, sem repetir o que ja foi informado', async () => {
   assert.match(TEXTO_FORMULARIO_ENTREGA, /Nome do remetente:/i)
   assert.match(TEXTO_FORMULARIO_ENTREGA, /Nome do destinat[áa]rio:/i)
   assert.match(TEXTO_FORMULARIO_ENTREGA, /Telefone do destinat[áa]rio:/i)
   assert.match(TEXTO_FORMULARIO_ENTREGA, /CEP da entrega:/i)
-  assert.doesNotMatch(TEXTO_FORMULARIO_ENTREGA, /\brua\b|\bn[úu]mero\b|\bbairro\b|data de entrega/i, 'etapa 1 nunca mistura endereço/data com os quatro campos iniciais')
+  assert.match(TEXTO_FORMULARIO_ENTREGA, /N[úu]mero:/i)
+  assert.match(TEXTO_FORMULARIO_ENTREGA, /Complemento/i)
+  assert.doesNotMatch(TEXTO_FORMULARIO_ENTREGA, /\brua\b|\bbairro\b|data de entrega/i, 'etapa 1 nunca mistura rua/bairro (resolvidos via ViaCEP) nem data de entrega com o pedido inicial')
 
   const deps = depsFake()
   const estado = estadoAguardandoFormulario()
@@ -2405,6 +2411,19 @@ test('1. etapa 1 pede so os quatro campos iniciais, em qualquer ordem, sem repet
 
   const r2 = await avancarFunil(r1.estado, 'Nome do remetente: Ana\nCEP da entrega: 04204-030', 'compra_produto', deps)
   assert.match(r2.mensagem, /Localizei o endere[çc]o/i, 'CEP válido dispara a etapa 2 (ViaCEP) automaticamente')
+})
+
+// Bug real observado em monitoramento 2026-07-25: "use os dados do pedido
+// anterior" (nenhum campo reconhecido) recebia a mensagem de "só faltou
+// completar" listando os 8 campos, como se fosse uma pendência parcial —
+// quando na verdade nada tinha sido informado ainda. Repete o pedido
+// inicial de sempre nesse caso.
+test('1b. nenhum campo reconhecido ainda repete o pedido inicial de sempre, nunca a lista de "só faltou completar"', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario()
+  const r = await avancarFunil(estado, 'use os dados do pedido anterior', 'compra_produto', deps)
+  assert.equal(r.mensagem, TEXTO_FORMULARIO_ENTREGA)
+  assert.doesNotMatch(r.mensagem, /s[óo] faltou completar/i)
 })
 
 test('2. CEP valido consulta o ViaCEP e preenche rua/bairro/cidade/UF automaticamente no formulário', async () => {

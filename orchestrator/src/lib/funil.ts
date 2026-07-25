@@ -1153,6 +1153,14 @@ export function extrairNomeProdutoCitado(mensagem: string): string {
     .replace(/^\s*o\s+produto\s+[ée]\s*/i, '')
     .replace(/\s*,?\s*que\s+(vi|est[aá])\s+no\s+site\.?/gi, '')
     .replace(/\s*\.?\s*(ele\s+)?n[aã]o\s+est[aá]\s+no\s+cat[aá]logo\.?/gi, '')
+    // Traço isolado (– — -) entre palavras quebra a busca real (WooCommerce
+    // ?search=) mesmo com o resto do nome idêntico — confirmado ao vivo no
+    // site real, 2026-07-25: a mesma consulta sem o traço encontra o
+    // produto, com o traço devolve zero resultados. Nunca remove hífen
+    // colado a uma palavra (ex.: "mini-ramalhete"), só o separado por
+    // espaços dos dois lados.
+    .replace(/\s[-–—]\s/g, ' ')
+    .replace(/\s{2,}/g, ' ')
     .trim() || mensagem.trim()
 }
 
@@ -1714,7 +1722,7 @@ async function etapaCatalogoCompleto(estado: EstadoConversa, mensagemCliente: st
       }
       return { estado: novoEstado, mensagem: montarMensagemRecomendacao(encontrado) }
     }
-    return { estado, mensagem: 'Não encontrei esse produto no nosso catálogo agora. Quer escolher entre as opções que já te mostrei, ou prefere ver outras alternativas?' }
+    return { estado, mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.' }
   }
   // Mensagem ambígua durante a paginação — nunca despeja o catálogo de novo sozinho, só pergunta.
   return { estado, mensagem: 'Você quer ver mais opções, ou já escolheu algum item? Pode me dizer o nome, código ou preço.' }
@@ -1754,7 +1762,7 @@ async function etapaRecomendacao(estado: EstadoConversa, mensagemCliente: string
       }
       return {
         estado,
-        mensagem: 'Não encontrei esse produto no nosso catálogo agora. Quer escolher entre as opções que já te mostrei, ou prefere ver outras alternativas?',
+        mensagem: 'Não encontrei esse produto com esse nome. Pode me dizer o link do produto no site, ou o nome exato como aparece lá, pra eu localizar certinho? Se preferir, também posso te mostrar as opções que já te apresentei.',
       }
     }
     return {

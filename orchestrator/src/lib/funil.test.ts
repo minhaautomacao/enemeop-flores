@@ -940,8 +940,14 @@ test('1. produto citado com referência ao site é buscado ao vivo e apresentado
 // (WooCommerce ?search=) não encontrava X mesmo com X existindo de
 // verdade — palavras soltas demais na consulta. extrairNomeProdutoCitado
 // isola só o nome antes de buscar.
+//
+// 3ª ocorrência (2026-07-25), já com o nome isolado: a busca AINDA não
+// encontrava o produto. Confirmado ao vivo no site real: o traço "–" no
+// meio do nome ("Produto Teste – Não disponível para venda") quebra a
+// busca sozinho — a mesma consulta sem o traço encontra o produto
+// normalmente. extrairNomeProdutoCitado também remove o traço isolado.
 
-test('1b. a busca ao vivo usa só o nome extraído, nunca a mensagem inteira com "quero este produto"/"que está no site"', async () => {
+test('1b. a busca ao vivo usa só o nome extraído, sem traço, nunca a mensagem inteira com "quero este produto"/"que está no site"', async () => {
   let ultimaQuery = ''
   const PRODUTO_DO_SITE: ProdutoCatalogo = { nome: 'Produto Teste – Não disponível para venda', preco: 1, disponivel: true }
   const deps = depsFake({ buscarCatalogo: async ({ query }) => { ultimaQuery = query; return [PRODUTO_DO_SITE] } })
@@ -951,22 +957,26 @@ test('1b. a busca ao vivo usa só o nome extraído, nunca a mensagem inteira com
     perguntasFeitas: [],
   }
   const r = await avancarFunil(estado, 'quero este produto Produto Teste – Não disponível para venda que está no site', 'compra_produto', deps)
-  assert.equal(ultimaQuery, 'Produto Teste – Não disponível para venda', 'busca só pelo nome, nunca pela frase inteira')
-  assert.equal(r.estado.dados.opcoesRecomendadas?.[0]?.nome, 'Produto Teste – Não disponível para venda')
+  assert.equal(ultimaQuery, 'Produto Teste Não disponível para venda', 'busca só pelo nome, sem o traço que quebra a busca real')
+  assert.equal(r.estado.dados.opcoesRecomendadas?.[0]?.nome, 'Produto Teste – Não disponível para venda', 'o produto retornado mantém o nome real, com traço — só a CONSULTA nunca leva o traço')
 })
 
-test('1c. extrairNomeProdutoCitado isola o nome do produto nas duas frases reais observadas em monitoramento', () => {
+test('1c. extrairNomeProdutoCitado isola o nome do produto, sem traço, nas frases reais observadas em monitoramento', () => {
   assert.equal(
     extrairNomeProdutoCitado('quero este produto Produto Teste – Não disponível para venda que está no site'),
-    'Produto Teste – Não disponível para venda',
+    'Produto Teste Não disponível para venda',
   )
   assert.equal(
     extrairNomeProdutoCitado('o produto é Produto Teste – Não disponível para venda que vi no site. ele não está no catálogo'),
-    'Produto Teste – Não disponível para venda',
+    'Produto Teste Não disponível para venda',
   )
 })
 
-test('2. produto citado com referência ao site mas não encontrado na busca real (ex.: produto de teste/indisponível) recebe resposta honesta, nunca insiste nas opções antigas em loop', async () => {
+test('1d. extrairNomeProdutoCitado nunca remove hífen colado a uma palavra (só o traço separado por espaços)', () => {
+  assert.equal(extrairNomeProdutoCitado('quero o mini-ramalhete que vi no site'), 'quero o mini-ramalhete')
+})
+
+test('2. produto citado com referência ao site mas não encontrado na busca real (ex.: produto de teste/indisponível) pergunta onde o cliente encontrou, pra ajudar a localizar — nunca insiste nas opções antigas em loop', async () => {
   const deps = depsFake({ buscarCatalogo: async () => [] })
   const estado: EstadoConversa = {
     fase: 'recomendacao',
@@ -975,6 +985,7 @@ test('2. produto citado com referência ao site mas não encontrado na busca rea
   }
   const r = await avancarFunil(estado, 'o produto é Produto Teste que vi no site. ele não está no catálogo', 'compra_produto', deps)
   assert.match(r.mensagem, /não encontrei esse produto/i)
+  assert.match(r.mensagem, /link do produto|nome exato/i, 'pergunta onde o cliente encontrou o produto (link ou nome exato), pra ajudar a localizar')
   assert.doesNotMatch(r.mensagem, /R\$ ?105|R\$ ?145|R\$ ?140/i, 'nunca reapresenta o catalogo antigo como se fosse resposta ao produto citado')
 })
 

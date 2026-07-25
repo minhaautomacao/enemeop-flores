@@ -1526,12 +1526,38 @@ const CATALOGO_RAMALHETES: ProdutoCatalogo[] = [
 ]
 
 test('8. "quero ramalhetes" retorna opções reais em texto (código — nome — preço), sem despejar foto/link', async () => {
-  const deps = depsFake({ buscarCatalogo: async (params) => { assert.match(params.query, /ramalhete/); return CATALOGO_RAMALHETES } })
+  // A busca no catálogo real usa "buquê" (vocabulário real do site), nunca
+  // "ramalhete" — bug real observado em monitoramento 2026-07-25: nenhum
+  // produto do site tem "ramalhete" no nome, então buscar esse termo literal
+  // sempre voltava vazio, e a Flora dizia "não encontrei opções" pra um
+  // pedido comum de buquê. "ramalhete" continua reconhecido como sinônimo
+  // (dispara a etapa de recomendação), só o termo de busca muda.
+  const deps = depsFake({ buscarCatalogo: async (params) => { assert.match(params.query, /buqu[êe]/); assert.doesNotMatch(params.query, /ramalhete/); return CATALOGO_RAMALHETES } })
   const r = await avancarFunil({ fase: 'inicio', dados: {}, perguntasFeitas: [] }, 'quero ramalhetes', 'recomendacao', deps)
   assert.equal(r.estado.fase, 'recomendacao')
+  assert.equal(r.estado.dados.tipoProduto, 'buquê')
   assert.match(r.mensagem, /028 — Mini Ramalhete - Frente única — R\$ 55,00/)
   assert.match(r.mensagem, /029 — Mini Ramalhete \+ Ferrero Rocher 100g — R\$ 100,00/)
   assert.equal(r.fotos, undefined)
+})
+
+test('8b. "ramalhete de rosas vermelhas" busca com o termo real do catálogo ("buquê"), nunca com a palavra literal do cliente', async () => {
+  // Caso real da conversa monitorada: cliente disse "ramalhete" (07-18) e
+  // depois "buquê" (07-25) — em ambos, a Flora respondeu "não encontrei
+  // opções" porque a busca real usava "ramalhete" (nenhum produto do site
+  // tem essa palavra no nome). Provando que agora o termo de busca vira
+  // "buquê" e uma cor citada (ex.: vermelha) continua indo junto na query.
+  const deps = depsFake({
+    buscarCatalogo: async (params) => {
+      assert.match(params.query, /buqu[êe]/)
+      assert.match(params.query, /vermelh/)
+      return [{ nome: 'Buquê de Rosas Vermelhas', preco: 140, codigo: '010', disponivel: true, fotoUrl: 'https://site/010.jpg' }]
+    },
+  })
+  const r = await avancarFunil({ fase: 'inicio', dados: {}, perguntasFeitas: [] }, 'ramalhete de rosas vermelhas', 'recomendacao', deps)
+  assert.equal(r.estado.fase, 'recomendacao')
+  assert.notEqual(r.estado.dados.opcoesRecomendadas?.length, 0, 'deve encontrar o produto real, nunca "não encontrei opções"')
+  assert.match(r.mensagem, /Buquê de Rosas Vermelhas/)
 })
 
 test('11. foto inexistente nunca usa foto de outro produto', () => {

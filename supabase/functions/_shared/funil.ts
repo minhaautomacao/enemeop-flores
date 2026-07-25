@@ -1074,8 +1074,17 @@ const CAMPOS_QUALIFICACAO: { campo: keyof DadosPedido; pergunta: string }[] = [
   { campo: 'ocasiao', pergunta: 'Para qual ocasião é o presente?' },
 ]
 
+// `termo` é o vocabulário real do catálogo (o que vira palavra de busca no
+// site) — nunca necessariamente a mesma palavra que o cliente usou. "Ramalhete"
+// é reconhecido como sinônimo de buquê (regex), mas o termo salvo/buscado é
+// "buquê", porque nenhum produto real do site usa "ramalhete" no nome — uma
+// busca literal por "ramalhete" sempre voltava vazia, fazendo a Flora dizer
+// "não encontrei opções" pra um pedido comum (buquê de rosas), bug real
+// observado em monitoramento 2026-07-25 (mesma conversa falhou em 07-18,
+// 07-25 15h47 e 07-25 19h34, mesmo depois do cliente dizer "buquê" — porque
+// tipoProduto já tinha sido travado em "ramalhete" antes).
 const TIPOS_PRODUTO: { termo: string; regex: RegExp }[] = [
-  { termo: 'ramalhete', regex: /ramalhete/ },
+  { termo: 'buquê', regex: /ramalhete/ },
   { termo: 'buquê', regex: /buqu[eê]/ },
   { termo: 'arranjo', regex: /arranjo/ },
   { termo: 'orquídea', regex: /orqu[ií]de/ },

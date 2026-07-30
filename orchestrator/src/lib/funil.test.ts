@@ -517,6 +517,19 @@ test('extrairTermoDisponibilidade reconhece "tem X" e variantes, ignora mensagen
   assert.equal(extrairTermoDisponibilidade('tem'), null, 'sem produto nenhum mencionado')
 })
 
+// Bug real observado em validação interna 2026-07-30: "vocês tem bonsai?"
+// virava termo de busca "bons", porque o filler "aí" (pra "tem rosas aí?")
+// batia com o final de "bonsai" mesmo sem espaço nenhum separando —
+// respondendo ao cliente "não temos bons disponível" (termo truncado,
+// resposta sem sentido).
+test('extrairTermoDisponibilidade nunca trunca um produto cujo nome termina com "ai" (filler "aí" exige palavra separada)', () => {
+  assert.equal(extrairTermoDisponibilidade('vocês tem bonsai?'), 'bonsai')
+  assert.equal(extrairTermoDisponibilidade('tem bonsai'), 'bonsai')
+  // Continua reconhecendo o filler de verdade quando ele é uma palavra separada.
+  assert.equal(extrairTermoDisponibilidade('tem bonsai aí?'), 'bonsai')
+  assert.equal(extrairTermoDisponibilidade('tem rosas aí?'), 'rosas')
+})
+
 test('classificarIntencao reconhece pergunta de disponibilidade por termo em qualquer fase', () => {
   assert.equal(classificarIntencao('Tem girassol pra hoje', 'transferido_humano'), 'disponibilidade')
   assert.equal(classificarIntencao('Tem lírios', 'aguardando_pagamento'), 'disponibilidade')

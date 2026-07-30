@@ -856,7 +856,13 @@ async function resolverRetomadaAposIntervalo(
 // PALAVRAS_DISPONIBILIDADE (frases fixas genéricas): aqui extraímos o termo
 // do produto perguntado, pra consultar o catálogo real por ele — nunca cai
 // no fallback de "compra_produto"/fase antiga.
-const REGEX_PERGUNTA_DISPONIBILIDADE = /^(?:voces?\s+)?tem\s+(.+?)\s*(?:pra\s?hoje|para\s?hoje|hoje|a[íi]|dispon[íi]vel)?[\s?.!]*$/
+// A palavra de preenchimento (pra hoje/hoje/aí/disponível) só é removida
+// quando aparece como palavra SEPARADA (com espaço antes) — nunca como
+// sufixo colado ao nome do produto. Bug real observado em validação
+// interna 2026-07-30: "vocês tem bonsai?" virava termo de busca "bons",
+// porque o "ai" final de "bonsai" batia com o filler "aí" mesmo sem
+// espaço nenhum antes, respondendo ao cliente "não temos bons disponível".
+const REGEX_PERGUNTA_DISPONIBILIDADE = /^(?:voces?\s+)?tem\s+(.+?)(?:\s+(?:pra\s?hoje|para\s?hoje|hoje|a[íi]|dispon[íi]vel))?[\s?.!]*$/
 
 export function extrairTermoDisponibilidade(mensagem: string): string | null {
   const m = normalizar(mensagem).match(REGEX_PERGUNTA_DISPONIBILIDADE)

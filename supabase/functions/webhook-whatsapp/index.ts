@@ -48,6 +48,7 @@ import { type DadosClientePedido, criarOuReusarPedido, gerarOuReusarPreference, 
 import { type OrigemHandoff, criarOuReusarAtendimento } from '../_shared/handoff.ts';
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { validarTokenWebhook } from '../_shared/zapi-auth.ts';
+import { canSendWhatsAppMessage, mensagemDeOptOut, mensagemConfirmacaoOptOut } from '../_shared/whatsapp-guard.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -72,6 +73,19 @@ const WORKSPACE_ID  = Deno.env.get('SAAS_WORKSPACE_ID') ?? Deno.env.get('WORKSPA
 const ZAPI_INSTANCE = Deno.env.get('ZAPI_INSTANCE_ID') ?? '';
 const ZAPI_TOKEN    = Deno.env.get('ZAPI_TOKEN') ?? '';
 const ZAPI_CLIENT   = Deno.env.get('ZAPI_CLIENT_TOKEN') ?? '';
+// Preparação do WhatsApp (2026-07-30) — número anterior banido; trava contra
+// reativar acidentalmente o número oficial protegido (ver whatsapp-guard.ts,
+// canSendWhatsAppMessage). Lido a cada chamada (nunca cacheado num const de
+// módulo) só por consistência com _shared/whatsapp.ts — o runtime Deno não
+// recarrega env vars entre invocações da mesma instância de qualquer forma.
+function configEnvioWhatsApp() {
+  return {
+    numeroAtivo: Deno.env.get('WHATSAPP_ACTIVE_NUMBER') ?? '',
+    numeroOficial: Deno.env.get('WHATSAPP_OFFICIAL_NUMBER') ?? '',
+    numeroOficialBloqueado: (Deno.env.get('WHATSAPP_OFFICIAL_NUMBER_LOCKED') ?? 'true') !== 'false',
+    marketingHabilitado: Deno.env.get('WHATSAPP_MARKETING_ENABLED') === 'true',
+  };
+}
 // Preferência: variável de ambiente (Edge Function secret) — mesmo padrão
 // das demais credenciais deste arquivo. Fallback pra funcao_configs (mesma
 // tabela já usada como fallback de GROQ_API_KEY abaixo) só porque não há
@@ -116,6 +130,7 @@ interface ConversaRow {
   handoff_em?: string | null;
   atendente_id?: string | null;
   assumido_em?: string | null;
+  whatsapp_opt_out?: boolean;
 }
 
 // Mesmo critério de "handoff realmente ativo" que webhook-meta usa — ver
@@ -361,34 +376,66 @@ function normalizarTelefone(phone: string): string {
 // manda mensagem pra si mesma" (ver _shared/handoff.ts, que só registra
 // ticket, nunca envia WhatsApp pro operador).
 
-async function enviarTexto(phone: string, message: string): Promise<boolean> {
-  try {
-    const res = await fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
-      body: JSON.stringify({ phone, message }),
-    });
-    if (!res.ok) { console.error(`[webhook-whatsapp] falha ao enviar texto status=${res.status}`); return false; }
-    return true;
-  } catch (e) {
-    console.error('[webhook-whatsapp] falha ao enviar texto:', e);
-    return false;
+// Único ponto de saída real pra Z-API neste arquivo (enviarTexto/
+// enviarImagem) — nenhuma mensagem sai sem passar por
+// canSendWhatsAppMessage primeiro (trava do número oficial + número ativo
+// configurado; duplicidade/opt-out/humano já foram resolvidos antes de
+// qualquer chamador chegar até aqui, ver processarMensagem).
+function validarEnvio(): boolean {
+  const validacao = canSendWhatsAppMessage(configEnvioWhatsApp(), {
+    tipo: 'transacional',
+    atendimentoHumanoAtivo: false,
+    optOut: false,
+    mensagemDuplicada: false,
+  });
+  if (!validacao.permitido) {
+    console.error(`[whatsapp-guard] envio bloqueado: ${validacao.motivo}`);
   }
+  return validacao.permitido;
+}
+
+// WHATSAPP_MAX_RETRY_ATTEMPTS — só reintenta erro >=500 (transiente do lado
+// do provedor); nunca reintenta 4xx (ex.: número inválido, rate limit
+// definitivo) nem falha de rede local. Pausa curta entre tentativas evita
+// martelar o provedor em sequência apertada.
+const MAX_RETRY_ATTEMPTS = Math.max(0, Number(Deno.env.get('WHATSAPP_MAX_RETRY_ATTEMPTS') ?? '2'));
+
+async function comRetry(rotulo: string, tentar: () => Promise<Response>): Promise<boolean> {
+  for (let tentativa = 0; tentativa <= MAX_RETRY_ATTEMPTS; tentativa++) {
+    try {
+      const res = await tentar();
+      if (res.ok) return true;
+      if (res.status >= 500 && tentativa < MAX_RETRY_ATTEMPTS) {
+        console.warn(`[webhook-whatsapp] ${rotulo} HTTP ${res.status} — tentativa ${tentativa + 1}/${MAX_RETRY_ATTEMPTS}, tentando de novo`);
+        await new Promise(resolve => setTimeout(resolve, 500 * (tentativa + 1)));
+        continue;
+      }
+      console.error(`[webhook-whatsapp] falha ao ${rotulo} status=${res.status}`);
+      return false;
+    } catch (e) {
+      console.error(`[webhook-whatsapp] falha ao ${rotulo}:`, e);
+      return false;
+    }
+  }
+  return false;
+}
+
+async function enviarTexto(phone: string, message: string): Promise<boolean> {
+  if (!validarEnvio()) return false;
+  return comRetry('enviar texto', () => fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
+    body: JSON.stringify({ phone, message }),
+  }));
 }
 
 async function enviarImagem(phone: string, imageUrl: string, caption: string): Promise<boolean> {
-  try {
-    const res = await fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-image`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
-      body: JSON.stringify({ phone, image: imageUrl, caption }),
-    });
-    if (!res.ok) { console.error(`[webhook-whatsapp] falha ao enviar imagem status=${res.status}`); return false; }
-    return true;
-  } catch (e) {
-    console.error('[webhook-whatsapp] falha ao enviar imagem:', e);
-    return false;
-  }
+  if (!validarEnvio()) return false;
+  return comRetry('enviar imagem', () => fetch(`https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-image`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Client-Token': ZAPI_CLIENT },
+    body: JSON.stringify({ phone, image: imageUrl, caption }),
+  }));
 }
 
 // ── Processar mensagem — usa o funil determinístico compartilhado ──────────
@@ -398,6 +445,29 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, me
 
   if (mensagemDuplicada(conversaRow.historico ?? [], mensagemCliente, mid)) {
     console.log(`[webhook-whatsapp] mensagem_duplicada_ignorada phone=${phone} mid=${mid ?? '(sem mid)'}`);
+    return;
+  }
+
+  // Opt-out: pedido explícito de não receber mais mensagens automáticas —
+  // registra e responde uma única confirmação fixa, nunca mais nada
+  // automático depois disso pra este contato (até liberação manual).
+  if (conversaRow.whatsapp_opt_out) {
+    const novaMsgOptOut: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString(), mid };
+    const historicoOptOut = [...(conversaRow.historico ?? []), novaMsgOptOut].slice(-20);
+    await salvarConversa(conversaRow.id, { historico: historicoOptOut });
+    console.log(`[webhook-whatsapp] whatsapp_opt_out_ativo phone=${phone} — Flora nao responde`);
+    return;
+  }
+  if (mensagemDeOptOut(mensagemCliente)) {
+    const novaMsgOptOut: Mensagem = { role: 'user', content: mensagemCliente, ts: new Date().toISOString(), mid };
+    const historicoOptOut = [...(conversaRow.historico ?? []), novaMsgOptOut].slice(-20);
+    await salvarConversa(conversaRow.id, {
+      historico: historicoOptOut,
+      whatsapp_opt_out: true,
+      whatsapp_opt_out_em: new Date().toISOString(),
+    } as Partial<ConversaRow>);
+    console.log(`[webhook-whatsapp] whatsapp_opt_out_registrado phone=${phone}`);
+    await enviarTexto(phone, mensagemConfirmacaoOptOut());
     return;
   }
 

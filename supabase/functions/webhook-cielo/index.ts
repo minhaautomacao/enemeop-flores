@@ -72,7 +72,7 @@ Deno.serve(async (req: Request) => {
         const envio = canal === 'instagram' && pedido.canal_id
           ? await enviarDMInstagram(pedido.canal_id as string, mensagemCliente)
           : pedido.cliente_telefone
-            ? await enviarWhatsApp(WORKSPACE_ID, pedido.cliente_telefone as string, mensagemCliente)
+            ? await enviarWhatsApp(WORKSPACE_ID, pedido.cliente_telefone as string, mensagemCliente, 'transacional')
             : { enviado: false, erro: 'nenhum canal de contato disponível no pedido' };
 
         await logEvento({

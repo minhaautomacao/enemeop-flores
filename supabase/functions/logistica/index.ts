@@ -93,7 +93,7 @@ Deno.serve(async (req: Request) => {
 
     if (resultado.notificar_cliente && resultado.mensagem_cliente) {
       const telefone = payload.telefone as string | undefined;
-      const envio = await enviarWhatsApp(workspace_id, telefone, resultado.mensagem_cliente);
+      const envio = await enviarWhatsApp(workspace_id, telefone, resultado.mensagem_cliente, 'transacional');
       acoes.push(envio.enviado
         ? `Cliente notificado via WhatsApp (${envio.provedor})`
         : `Notificação não enviada: ${envio.erro}`);

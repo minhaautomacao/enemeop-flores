@@ -906,8 +906,14 @@ export function intencaoInterrompeFluxo(intencao: Intencao): boolean {
 
 // ── Mensagens fixas (nunca geradas por LLM) ──────────────────────────────
 
+// Número operacional atual do WhatsApp (WHATSAPP_ACTIVE_NUMBER) — o número
+// oficial da loja (5511982829083) fica protegido/bloqueado enquanto esta
+// fase durar (ver _shared/whatsapp-guard.ts). Texto fixo, nunca lido de env
+// var aqui (funil.ts nunca importa nada — ver cabeçalho do arquivo);
+// atualizar os dois literais abaixo junto se o número operacional mudar de
+// novo.
 export function mensagemForaDeEscopo(): string {
-  return 'Posso te ajudar com flores, presentes, pedidos e entregas da Enemeop Flores. Para outros assuntos, fale com nossa equipe pelo WhatsApp final 9083.'
+  return 'Posso te ajudar com flores, presentes, pedidos e entregas da Enemeop Flores. Para outros assuntos, fale com nossa equipe pelo WhatsApp final 9190.'
 }
 
 export function mensagemTransferencia(): string {
@@ -917,10 +923,10 @@ export function mensagemTransferencia(): string {
 /**
  * Só para quando uma limitação técnica real impede continuar no canal atual
  * (ex.: falha ao enviar mídia pela API do Instagram/Facebook) — nunca como
- * oferta padrão de handoff. Sempre com link clicável, nunca só "final 9083".
+ * oferta padrão de handoff. Sempre com link clicável, nunca só "final 9190".
  */
 export function mensagemTransferenciaLimitacaoTecnica(): string {
-  return 'No momento não consigo continuar por aqui devido a uma limitação técnica. Fale com nossa equipe pelo WhatsApp oficial: https://wa.me/5511982829083'
+  return 'No momento não consigo continuar por aqui devido a uma limitação técnica. Fale com nossa equipe pelo WhatsApp oficial: https://wa.me/5511966439190'
 }
 
 /** Fixa (dentro do horário) — nunca usada quando o pagamento foi confirmado fora do horário (ver mensagemPagamentoConfirmadoForaDoHorario). */

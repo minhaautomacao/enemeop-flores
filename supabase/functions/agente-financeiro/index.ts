@@ -106,7 +106,7 @@ Deno.serve(async (req: Request) => {
       if (envio.enviado) acoes.push(`Instagram DM enviada para ${canalId}`);
       else acoes.push(`Instagram DM falhou: ${envio.erro}`);
     } else if (telefone) {
-      const envio = await enviarWhatsApp(workspace_id, telefone, mensagem);
+      const envio = await enviarWhatsApp(workspace_id, telefone, mensagem, 'transacional');
       if (envio.enviado) acoes.push(`WhatsApp enviado para ${telefone} via ${envio.provedor}`);
       else acoes.push(`WhatsApp falhou: ${envio.erro}`);
     } else {

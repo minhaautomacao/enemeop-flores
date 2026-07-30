@@ -145,7 +145,14 @@ Deno.serve(async (req: Request) => {
           acoes.push(`Instagram DM não enviada: ${envio.erro}`);
         }
       } else if (telefone) {
-        const envio = await enviarWhatsApp(workspace_id, telefone, mensagem);
+        // 'abordagem_inicial'/'follow_up'/'reativacao' são a empresa
+        // iniciando ou reengajando (contato frio) — só saem com
+        // WHATSAPP_MARKETING_ENABLED=true (ver whatsapp-guard.ts). Os
+        // demais tipos são resposta dentro de um atendimento já em
+        // andamento, sempre permitidos por esta checagem.
+        const TIPOS_INICIADOS_PELA_EMPRESA = new Set(['abordagem_inicial', 'follow_up', 'reativacao']);
+        const tipoEnvio = TIPOS_INICIADOS_PELA_EMPRESA.has(resultado.tipo) ? 'iniciada_pela_empresa' : 'transacional';
+        const envio = await enviarWhatsApp(workspace_id, telefone, mensagem, tipoEnvio);
         if (envio.enviado) {
           acoes.push(`WhatsApp enviado para ${telefone} via ${envio.provedor}`);
           if (payload.lead_id) {

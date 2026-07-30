@@ -235,7 +235,7 @@ test('12-13. cliente pergunta sobre politica -> assunto_fora_escopo, resposta fi
   assert.equal(intencaoInterrompeFluxo(intencao), true)
   const resposta = mensagemForaDeEscopo()
   assert.match(resposta, /flores, presentes, pedidos e entregas/)
-  assert.match(resposta, /WhatsApp final 9083/)
+  assert.match(resposta, /WhatsApp final 9190/)
 })
 
 // Bug real observado em monitoramento 2026-07-29: "jesus Cristo te ama"
@@ -269,7 +269,7 @@ test('14-15. cliente reclama -> intencao reclamacao, transfere para humano com m
 
 test('mensagemTransferenciaLimitacaoTecnica so e usada em limitacao tecnica real, com link clicavel oficial', () => {
   const msg = mensagemTransferenciaLimitacaoTecnica()
-  assert.match(msg, /https:\/\/wa\.me\/5511982829083/, 'deve ter link clicavel, nunca so "final 9083"')
+  assert.match(msg, /https:\/\/wa\.me\/5511966439190/, 'deve ter link clicavel, nunca so "final 9190"')
 })
 
 // 16 e 17. cliente muda de assunto no meio da compra -> Flora redireciona sem perder o funil

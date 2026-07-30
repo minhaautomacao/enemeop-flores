@@ -365,7 +365,7 @@ test('cenario 7 — WhatsApp so aparece (com link clicavel) na transferencia por
   const msgTecnica = iniciarHandoffSimulado(conversaTecnica, atendimentos, 'limite_tecnico');
   const msgClienteSolicitou = iniciarHandoffSimulado(conversaPedido, atendimentos, 'cliente_solicitou');
 
-  assert.match(msgTecnica, /https:\/\/wa\.me\/5511982829083/);
+  assert.match(msgTecnica, /https:\/\/wa\.me\/5511966439190/);
   assert.doesNotMatch(msgClienteSolicitou, /wa\.me|WhatsApp/i);
 });
 

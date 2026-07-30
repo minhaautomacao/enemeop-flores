@@ -154,7 +154,7 @@ function textoJanelaPrometida(entregaPrometidaEm: Date, agora: Date): string {
 async function notificarCliente(pedido: PedidoRow, texto: string): Promise<void> {
   if (pedido.canal === 'whatsapp') {
     const numero = pedido.cliente_telefone || pedido.canal_id;
-    const resultado = await enviarWhatsApp(WORKSPACE_ID, numero, texto);
+    const resultado = await enviarWhatsApp(WORKSPACE_ID, numero, texto, 'transacional');
     if (!resultado.enviado) console.error('[webhook-mp] falha ao notificar cliente via whatsapp:', resultado.erro);
     return;
   }

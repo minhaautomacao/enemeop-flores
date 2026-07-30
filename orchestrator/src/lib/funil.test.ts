@@ -42,6 +42,7 @@ import {
   type DependenciasFunil,
   type CategoriaCatalogo,
   type FormularioEntregaDados,
+  type ProdutoSelecionado,
   normalizarDataEntregaTexto,
   dataEntregaValida,
   dataCalendarioParaISO,
@@ -2450,11 +2451,11 @@ test('formulario unico: cartão impresso é opcional; mensagem só é obrigatór
 
 // ── Parte 3 — coleta de entrega em duas etapas (ViaCEP) ───────────────────
 
-function estadoAguardandoFormulario(formulario?: Partial<FormularioEntregaDados>): EstadoConversa {
+function estadoAguardandoFormulario(formulario?: Partial<FormularioEntregaDados>, produtoOverrides: Partial<ProdutoSelecionado> = {}): EstadoConversa {
   return {
     fase: 'aguardando_formulario',
     dados: {
-      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã' },
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1, dataEntrega: 'amanhã', ...produtoOverrides },
       ...(formulario ? { formulario: formulario as FormularioEntregaDados } : {}),
     },
     perguntasFeitas: [],
@@ -2561,14 +2562,17 @@ test('6. dados já fornecidos nunca são pedidos de novo ao longo das duas etapa
   )
   assert.match(r1.mensagem, /Qual é o número/i)
 
-  // Responde só com o número, em texto livre (sem rótulo "Número:") — nunca perde o dado.
+  // Responde só com o número, em texto livre (sem rótulo "Número:") — nunca
+  // perde o dado. A fixture já simula a data de entrega respondida antes
+  // (produto.dataEntrega='amanhã', pergunta "Pra quando você precisa da
+  // entrega?") — reaproveitada automaticamente, então o formulário já fica
+  // completo aqui, sem pedir "Data de entrega" de novo (reaproveitamento
+  // corrigido 2026-07-30 — antes essa pergunta repetia à toa).
   const r2 = await avancarFunil(r1.estado, '123', 'compra_produto', deps)
   assert.equal(r2.estado.dados.formulario?.numero, '123')
-  assert.match(r2.mensagem, /data de entrega/i, 'só falta a data — único campo pedido agora')
-  assert.doesNotMatch(r2.mensagem, /remetente|destinat[áa]rio|CEP|rua|bairro|n[úu]mero/i, 'nunca repete nenhum campo já coletado')
-
-  const r3 = await avancarFunil(r2.estado, 'Data de entrega: amanhã', 'compra_produto', deps)
-  assert.equal(r3.estado.fase, 'confirmando_formulario', 'formulário completo -> segue direto pra confirmação/cotação, sem reenviar nada')
+  assert.equal(r2.estado.dados.formulario?.dataEntrega, 'amanhã', 'reaproveitada de produto.dataEntrega, nunca pedida de novo')
+  assert.equal(r2.estado.fase, 'confirmando_formulario', 'formulário completo -> segue direto pra confirmação/cotação, sem reenviar nada (nunca pede nenhum campo de novo, nem "Data de entrega")')
+  assert.doesNotMatch(r2.mensagem, /^Só faltou completar/i, 'formulário já completo — nunca é a lista de campos faltando, é o resumo de confirmação')
 })
 
 // ── Telefone do destinatário — resposta isolada, sem o rótulo "Telefone:" ─
@@ -2699,9 +2703,16 @@ test('10. depois de aceitar o telefone válido, pede somente o nome do remetente
 // a mesma pergunta se repetia indefinidamente — o cliente nunca conseguia
 // concluir o formulário)
 
+// produtoOverrides: { dataEntrega: undefined } nos 4 testes abaixo — nunca
+// deixa produto.dataEntrega pré-preencher formulario.dataEntrega (ver
+// reaproveitamento automático em etapaFormulario, corrigido 2026-07-30);
+// sem isso, estes testes não conseguem reproduzir o cenário real de
+// "data de entrega genuinamente nunca informada em lugar nenhum" que a
+// checagem de reconhecimento isolado abaixo precisa validar.
+
 test('1. data de entrega isolada em formato DD/MM/AAAA é reconhecida quando é o único campo faltando', async () => {
   const deps = depsFake()
-  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }))
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }), { dataEntrega: undefined })
   const r = await avancarFunil(estado, '25/07/2026', 'compra_produto', deps)
   assert.equal(r.estado.dados.formulario?.dataEntrega, '25/07/2026')
   assert.equal(r.estado.fase, 'confirmando_formulario', 'formulário completo avança para confirmação, nunca repete a pergunta')
@@ -2709,7 +2720,7 @@ test('1. data de entrega isolada em formato DD/MM/AAAA é reconhecida quando é 
 
 test('2. "amanhã" isolado é reconhecido quando data de entrega é o único campo faltando', async () => {
   const deps = depsFake()
-  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }))
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }), { dataEntrega: undefined })
   const r = await avancarFunil(estado, 'amanhã', 'compra_produto', deps)
   assert.equal(r.estado.dados.formulario?.dataEntrega, 'amanhã')
   assert.equal(r.estado.fase, 'confirmando_formulario')
@@ -2717,7 +2728,7 @@ test('2. "amanhã" isolado é reconhecido quando data de entrega é o único cam
 
 test('3. "amanhã às 10 da manhã" (com texto extra) é reconhecido, nunca ignorado', async () => {
   const deps = depsFake()
-  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }))
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }), { dataEntrega: undefined })
   const r = await avancarFunil(estado, 'amanha as 10 da manha', 'compra_produto', deps)
   assert.equal(r.estado.dados.formulario?.dataEntrega, 'amanha as 10 da manha')
   assert.equal(r.estado.fase, 'confirmando_formulario')
@@ -2725,10 +2736,22 @@ test('3. "amanhã às 10 da manhã" (com texto extra) é reconhecido, nunca igno
 
 test('4. resposta isolada de data nunca é aceita quando outro campo obrigatório também falta (nunca engole resposta destinada a outro campo)', async () => {
   const deps = depsFake()
-  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined, nomeComprador: undefined }))
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined, nomeComprador: undefined }), { dataEntrega: undefined })
   const r = await avancarFunil(estado, '25/07/2026', 'compra_produto', deps)
   assert.equal(r.estado.dados.formulario?.dataEntrega, undefined, 'nao preenche data quando ainda falta outro campo obrigatorio')
   assert.equal(r.estado.fase, 'aguardando_formulario')
+})
+
+// Reaproveitamento automático (novo, 2026-07-30): quando produto.dataEntrega
+// já foi respondido antes (pergunta "Pra quando você precisa da entrega?"),
+// o formulário nunca pede de novo — mesmo sem o cliente repetir a data.
+test('4b. data de entrega já respondida na etapa de detalhes do produto é reaproveitada no formulário, nunca pedida de novo', async () => {
+  const deps = depsFake()
+  const estado = estadoAguardandoFormulario(formularioFixture({ dataEntrega: undefined }))
+  assert.equal(estado.dados.produto?.dataEntrega, 'amanhã', 'fixture do teste já simula a data respondida antes')
+  const r = await avancarFunil(estado, 'só confirmando meu pedido', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.dataEntrega, 'amanhã', 'reaproveitada de produto.dataEntrega, sem o cliente repetir')
+  assert.equal(r.estado.fase, 'confirmando_formulario', 'formulário já estava completo com a data reaproveitada')
 })
 
 // ── Etapa 2 — número/complemento em linguagem natural (bug real) ─────────

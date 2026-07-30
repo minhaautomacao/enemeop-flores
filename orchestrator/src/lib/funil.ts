@@ -2025,6 +2025,19 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
   const formularioAnterior = estado.dados.formulario ?? {}
   const extraido = extrairFormularioEntrega(mensagemCliente)
   let formularioAtual: FormularioEntregaDados = { ...formularioAnterior, ...extraido }
+  // Reaproveita a data de entrega já informada na etapa de detalhes do
+  // produto (produto.dataEntrega, pergunta "Pra quando você precisa da
+  // entrega?") — nunca pede de novo o que o cliente já respondeu. Bug real
+  // observado em validação interna 2026-07-30: cliente informou "amanhã"
+  // ali, preencheu todo o resto do formulário numa mensagem só (sem repetir
+  // a data), e a Flora ainda pedia "Data de entrega" de novo — porque
+  // formulario.dataEntrega é um campo textualmente separado de
+  // produto.dataEntrega, nunca sincronizado entre si. Mesmo texto bruto que
+  // o cliente digitaria direto no formulário, validado do mesmo jeito
+  // depois (normalizarDataEntregaTexto em etapaConfirmandoFormulario).
+  if (!formularioAtual.dataEntrega && estado.dados.produto?.dataEntrega) {
+    formularioAtual = { ...formularioAtual, dataEntrega: estado.dados.produto.dataEntrega }
+  }
   let cepConsultadoViaApi = estado.dados.cepConsultadoViaApi
   const cepJaConsultadoAntesDesteTurno = !!formularioAnterior.cep && cepConsultadoViaApi === formularioAnterior.cep && formularioAnterior.cep === formularioAtual.cep
 
@@ -2133,8 +2146,12 @@ async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, 
     // na verdade nenhum campo foi reconhecido). Bug real observado em
     // monitoramento 2026-07-25: "use os dados do pedido anterior" não foi
     // reconhecido, e a resposta listou os 8 campos como se fosse uma
-    // pendência parcial.
-    if (Object.keys(formularioAtual).length === 0) {
+    // pendência parcial. Checa formularioAnterior+extraido (o que existia
+    // ANTES desta mensagem + o que ela trouxe), nunca formularioAtual —
+    // que já inclui a data de entrega reaproveitada automaticamente do
+    // produto (acima), algo que não veio desta mensagem nem de nenhuma
+    // resposta anterior AO FORMULÁRIO em si.
+    if (Object.keys(formularioAnterior).length === 0 && Object.keys(extraido).length === 0) {
       return responder(TEXTO_FORMULARIO_ENTREGA)
     }
     return responder(montarMensagemCamposFaltando(faltando))

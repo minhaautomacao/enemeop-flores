@@ -238,6 +238,19 @@ test('12-13. cliente pergunta sobre politica -> assunto_fora_escopo, resposta fi
   assert.match(resposta, /WhatsApp final 9083/)
 })
 
+// Bug real observado em monitoramento 2026-07-29: "jesus Cristo te ama"
+// (mensagem espontânea/religiosa, primeira mensagem de uma conversa nova)
+// não continha nenhuma das palavras já cobertas (religiao/deus existe/
+// igreja/biblia), então caía no default de intenção 'recomendacao' pra
+// fase 'inicio' — e como a mensagem chegou fora do horário comercial, a
+// Flora respondeu "Podemos concluir seu pedido agora... Deseja
+// continuar?", completamente fora de contexto.
+test('mensagem religiosa espontânea ("jesus Cristo te ama") -> assunto_fora_escopo, nunca vira "deseja continuar" fora de contexto', () => {
+  const intencao = classificarIntencao('jesus Cristo te ama', 'inicio')
+  assert.equal(intencao, 'assunto_fora_escopo')
+  assert.equal(intencaoInterrompeFluxo(intencao), true)
+})
+
 // 14 e 15. cliente faz reclamação -> Flora transfere
 test('14-15. cliente reclama -> intencao reclamacao, transfere para humano com motivo registrado', () => {
   const intencao = classificarIntencao('Meu pedido chegou quebrado, isso é um absurdo', 'pedido_criado')

@@ -595,7 +595,7 @@ const PALAVRAS_RECLAMACAO = [
 
 const PALAVRAS_FORA_ESCOPO = [
   'politica', 'eleicao', 'presidente do brasil',
-  'governo', 'religiao', 'deus existe', 'igreja', 'biblia',
+  'governo', 'religiao', 'deus existe', 'igreja', 'biblia', 'jesus',
   'noticia', 'futebol', 'campeonato', 'novela', 'musica', 'filme', 'serie',
   'seu conselho', 'me da um conselho',
   'o que voce acha de', 'sua opiniao sobre',

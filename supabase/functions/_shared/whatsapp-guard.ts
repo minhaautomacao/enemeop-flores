@@ -30,6 +30,15 @@ export interface ConfigEnvioWhatsApp {
   numeroOficialBloqueado: boolean
   /** WHATSAPP_MARKETING_ENABLED — quando false, nenhuma mensagem de campanha/abordagem fria é enviada. */
   marketingHabilitado: boolean
+  /**
+   * WHATSAPP_SAFE_START — modo de partida segura do número novo. Quando
+   * true, é um override independente de marketingHabilitado: bloqueia
+   * QUALQUER mensagem 'iniciada_pela_empresa' (campanha, lembrete, cobrança
+   * automática, recuperação de carrinho, reativação, abordagem fria),
+   * mesmo que marketingHabilitado tenha sido ligado por engano. Só
+   * 'transacional' (resposta a mensagem recebida) passa.
+   */
+  safeStart: boolean
 }
 
 /**
@@ -82,6 +91,9 @@ export function canSendWhatsAppMessage(
   }
   if (contexto.atendimentoHumanoAtivo) {
     return { permitido: false, motivo: 'atendimento_humano_ativo' }
+  }
+  if (contexto.tipo === 'iniciada_pela_empresa' && config.safeStart) {
+    return { permitido: false, motivo: 'safe_start_ativo: mensagem iniciada pela empresa bloqueada enquanto WHATSAPP_SAFE_START=true' }
   }
   if (contexto.tipo === 'iniciada_pela_empresa' && !config.marketingHabilitado) {
     return { permitido: false, motivo: 'marketing_desabilitado: mensagem iniciada pela empresa (campanha/abordagem fria) bloqueada' }

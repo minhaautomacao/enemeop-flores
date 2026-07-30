@@ -84,6 +84,7 @@ function configEnvioWhatsApp() {
     numeroOficial: Deno.env.get('WHATSAPP_OFFICIAL_NUMBER') ?? '',
     numeroOficialBloqueado: (Deno.env.get('WHATSAPP_OFFICIAL_NUMBER_LOCKED') ?? 'true') !== 'false',
     marketingHabilitado: Deno.env.get('WHATSAPP_MARKETING_ENABLED') === 'true',
+    safeStart: (Deno.env.get('WHATSAPP_SAFE_START') ?? 'true') !== 'false',
   };
 }
 // Preferência: variável de ambiente (Edge Function secret) — mesmo padrão

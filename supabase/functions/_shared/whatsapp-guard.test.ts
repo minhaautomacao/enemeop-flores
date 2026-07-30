@@ -15,6 +15,7 @@ const CONFIG_OK: ConfigEnvioWhatsApp = {
   numeroOficial: '5511982829083',
   numeroOficialBloqueado: true,
   marketingHabilitado: false,
+  safeStart: true,
 };
 
 const CONTEXTO_OK = {
@@ -72,13 +73,39 @@ test('atendimento humano ativo: Flora nunca envia enquanto humano responsavel', 
 // desligado (padrão) — é exatamente o tipo de mensagem duplicada/não
 // solicitada que provavelmente contribuiu pro banimento anterior.
 test('mensagem iniciada pela empresa (campanha/abordagem fria) e bloqueada quando marketing esta desabilitado (padrao)', () => {
-  const r = canSendWhatsAppMessage(CONFIG_OK, { ...CONTEXTO_OK, tipo: 'iniciada_pela_empresa' });
+  const config: ConfigEnvioWhatsApp = { ...CONFIG_OK, safeStart: false };
+  const r = canSendWhatsAppMessage(config, { ...CONTEXTO_OK, tipo: 'iniciada_pela_empresa' });
   assert.equal(r.permitido, false);
   assert.match(r.motivo!, /marketing_desabilitado/);
 });
 
-test('mensagem iniciada pela empresa e permitida quando marketing esta explicitamente habilitado', () => {
-  const config: ConfigEnvioWhatsApp = { ...CONFIG_OK, marketingHabilitado: true };
+test('mensagem iniciada pela empresa e permitida quando marketing esta habilitado e SAFE_START esta desligado', () => {
+  const config: ConfigEnvioWhatsApp = { ...CONFIG_OK, marketingHabilitado: true, safeStart: false };
+  const r = canSendWhatsAppMessage(config, { ...CONTEXTO_OK, tipo: 'iniciada_pela_empresa' });
+  assert.equal(r.permitido, true);
+});
+
+// ── SAFE_START ─────────────────────────────────────────────────────────────
+// Modo de partida segura do número novo: nunca iniciar conversa, nunca
+// campanha/lembrete/cobrança automática/recuperação de carrinho/marketing —
+// tudo isso é 'iniciada_pela_empresa'. Só responde mensagem recebida
+// ('transacional'). É um override independente de marketingHabilitado.
+
+test('SAFE_START=true bloqueia mensagem iniciada pela empresa MESMO com marketing habilitado por engano', () => {
+  const config: ConfigEnvioWhatsApp = { ...CONFIG_OK, marketingHabilitado: true, safeStart: true };
+  const r = canSendWhatsAppMessage(config, { ...CONTEXTO_OK, tipo: 'iniciada_pela_empresa' });
+  assert.equal(r.permitido, false);
+  assert.match(r.motivo!, /safe_start_ativo/);
+});
+
+test('SAFE_START=true nunca bloqueia resposta a mensagem recebida (transacional)', () => {
+  const config: ConfigEnvioWhatsApp = { ...CONFIG_OK, safeStart: true };
+  const r = canSendWhatsAppMessage(config, { ...CONTEXTO_OK, tipo: 'transacional' });
+  assert.equal(r.permitido, true);
+});
+
+test('SAFE_START=false permite mensagem iniciada pela empresa se marketing tambem estiver habilitado', () => {
+  const config: ConfigEnvioWhatsApp = { ...CONFIG_OK, marketingHabilitado: true, safeStart: false };
   const r = canSendWhatsAppMessage(config, { ...CONTEXTO_OK, tipo: 'iniciada_pela_empresa' });
   assert.equal(r.permitido, true);
 });

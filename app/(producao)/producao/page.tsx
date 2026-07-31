@@ -80,7 +80,7 @@ export default function ProducaoPage() {
             seq: numero,
             produto: String(p.produto ?? 'Pedido sem produto'),
             codigo: produtos[0]?.codigo ?? '',
-            foto_url: '',
+            foto_url: String(p.foto_url ?? ''),
             preco: Number(p.valor ?? 0),
             cliente: String(p.cliente_nome ?? 'Cliente sem nome'),
             telefone: String(p.cliente_telefone ?? ''),
@@ -237,7 +237,12 @@ export default function ProducaoPage() {
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto p-4">
-          {pedidosFiltrados.length === 0 ? (
+          {pedidos.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-64 gap-1.5 rounded-xl border border-dashed border-white/10 text-center">
+              <p className="text-white/40 text-sm font-semibold">Nenhum pedido em andamento</p>
+              <p className="text-white/20 text-xs">Os novos pedidos aparecerão aqui automaticamente.</p>
+            </div>
+          ) : pedidosFiltrados.length === 0 ? (
             <div className="flex items-center justify-center h-32 rounded-xl border border-dashed border-white/10 text-white/20 text-sm">
               Nenhum pedido em &quot;{FILTROS_PRODUCAO.find(f => f.valor === filtro)?.label}&quot;
             </div>
@@ -268,7 +273,9 @@ export default function ProducaoPage() {
                           referrerPolicy="no-referrer"
                         />
                       ) : (
-                        <div className="w-full h-full flex items-center justify-center text-2xl">🌸</div>
+                        <div className="w-full h-full flex items-center justify-center text-center px-1">
+                          <span className="text-[8px] leading-tight text-white/30 font-semibold uppercase tracking-wide">Imagem não cadastrada</span>
+                        </div>
                       )}
                     </div>
 

@@ -1178,6 +1178,17 @@ export function extrairNomeProdutoCitado(mensagem: string): string {
   return mensagem
     .replace(/^\s*(eu\s+)?quero\s+(este|esse|o)\s+produto\s*/i, '')
     .replace(/^\s*o\s+produto\s+[ée]\s*/i, '')
+    // Abertura genérica de desejo ("eu quero um/uma X", "queria X",
+    // "gostaria de um X", "preciso de uma X") — sem isso, a frase inteira
+    // ia pra busca real e o WooCommerce (?search=) não encontrava nada
+    // mesmo com o produto existindo (bug real observado em monitoramento
+    // 2026-07-31: "Eu quero uma ramalhete" não encontrava nenhum dos vários
+    // ramalhetes reais do site, mas buscar só "ramalhete" encontrava 10).
+    // Roda DEPOIS do padrão "quero este/esse/o produto" acima (mais
+    // específico) pra não competir com ele. Alternância do artigo em ordem
+    // do mais longo pro mais curto (umas/uma/uns/um) — nunca o contrário,
+    // senão "um" casa primeiro como prefixo de "uma" e sobra um "a" solto.
+    .replace(/^\s*(eu\s+)?(quero|queria|gostaria\s+de|preciso\s+de)\s+(umas|uma|uns|um)?\s*/i, '')
     .replace(/\s*,?\s*que\s+(vi|est[aá])\s+no\s+site\.?/gi, '')
     .replace(/\s*\.?\s*(ele\s+)?n[aã]o\s+est[aá]\s+no\s+cat[aá]logo\.?/gi, '')
     // Traço isolado (– — -) entre palavras quebra a busca real (WooCommerce

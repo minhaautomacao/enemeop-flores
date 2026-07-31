@@ -1041,7 +1041,14 @@ test('1c. extrairNomeProdutoCitado isola o nome do produto, sem traço, nas fras
 })
 
 test('1d. extrairNomeProdutoCitado nunca remove hífen colado a uma palavra (só o traço separado por espaços)', () => {
-  assert.equal(extrairNomeProdutoCitado('quero o mini-ramalhete que vi no site'), 'quero o mini-ramalhete')
+  assert.equal(extrairNomeProdutoCitado('quero o mini-ramalhete que vi no site'), 'o mini-ramalhete')
+})
+
+test('1e. extrairNomeProdutoCitado remove abertura de desejo ("eu quero um/uma X") — frase inteira quebrava a busca real do WooCommerce mesmo com o produto existindo', () => {
+  assert.equal(extrairNomeProdutoCitado('Eu quero uma ramalhete'), 'ramalhete')
+  assert.equal(extrairNomeProdutoCitado('queria um buquê de rosas'), 'buquê de rosas')
+  assert.equal(extrairNomeProdutoCitado('gostaria de uma orquídea'), 'orquídea')
+  assert.equal(extrairNomeProdutoCitado('preciso de uns girassóis'), 'girassóis')
 })
 
 test('2. produto citado com referência ao site mas não encontrado na busca real (ex.: produto de teste/indisponível) pergunta onde o cliente encontrou, pra ajudar a localizar — nunca insiste nas opções antigas em loop', async () => {

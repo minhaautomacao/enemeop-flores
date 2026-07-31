@@ -207,6 +207,39 @@ test('20b. Flora rejeita confirmacao de pagamento quando nao ha paymentId regist
   assert.throws(() => confirmarPagamento(estado, 'qualquer-coisa'))
 })
 
+// QR Code Pix — cliente pede explicitamente enquanto aguarda pagamento do link já gerado.
+test('QR Pix 1 — cliente pede "pix" na fase aguardando_pagamento: Flora gera o QR Code real pro mesmo pedido', async () => {
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140 },
+      valorTotal: 162.5,
+      pedidoId: 'pedido_real_001',
+      linkPagamento: 'https://pagamento.exemplo/pedido_real_001',
+      paymentId: 'pedido_real_001',
+    },
+    perguntasFeitas: [],
+  }
+  const intencao = classificarIntencao('pix', estado.fase)
+  const r = await avancarFunil(estado, 'pix', intencao, depsFake())
+  assert.equal(r.estado.fase, 'aguardando_pagamento', 'pedir o QR Code nunca muda a fase — o pedido/link original continuam os mesmos')
+  assert.match(r.mensagem, /QR Code Pix/i)
+  assert.match(r.mensagem, /00020126pedido_real_001/, 'deve incluir o codigo copia-e-cola real devolvido por gerarPagamentoPix')
+  assert.equal(r.fotoUrl, 'https://storage.exemplo/pedido_real_001.png', 'a imagem do QR Code deve vir em fotoUrl, mesmo mecanismo ja usado pra fotos de produto')
+})
+
+test('QR Pix 2 — sem pedidoId (estado inconsistente), nunca chama gerarPagamentoPix e cai na resposta padrao de aguardando_pagamento', async () => {
+  const estado: EstadoConversa = {
+    fase: 'aguardando_pagamento',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140 }, valorTotal: 162.5, linkPagamento: 'https://pagamento.exemplo/x', paymentId: 'pay_x' },
+    perguntasFeitas: [],
+  }
+  const deps = depsFake({ gerarPagamentoPix: async () => { throw new Error('nunca deveria ser chamado sem pedidoId'); } })
+  const r = await avancarFunil(estado, 'pix', classificarIntencao('pix', estado.fase), deps)
+  assert.match(r.mensagem, /pagamento\.exemplo\/x/, 'sem pedidoId, cai no reenvio normal do link real')
+  assert.equal(r.fotoUrl, undefined)
+})
+
 // 11. pedido criado
 test('11. pedido so e criado depois da fase pagamento_confirmado', async () => {
   const estadoConfirmado: EstadoConversa = {
@@ -684,6 +717,7 @@ function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
       return { entregaPrometidaEmISO: iso, despachoEmISO: iso, imediato: true }
     },
     gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
+    gerarPagamentoPix: async (pedidoId) => ({ qrCodeUrl: `https://storage.exemplo/${pedidoId}.png`, copiaCola: `00020126${pedidoId}` }),
     criarPedido: async () => ({ pedidoId: 'pedido_fake_001' }),
     buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'],
     ...overrides,

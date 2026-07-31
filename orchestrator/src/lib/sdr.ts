@@ -259,6 +259,13 @@ function construirDependenciasFunil(opts: {
     consultarCep: consultarCepReal,
     calcularAgendamento: calcularAgendamentoMinimo,
     gerarPagamento: gerarPagamentoReal,
+    // Este caminho (Node/SDR, pagamento.ts) usa Cielo, sem credencial
+    // configurada (ver mercadopago.ts) e sem integração de Pix — QR Code
+    // Pix real só existe hoje nos canais Deno (webhook-meta/webhook-whatsapp/
+    // flora-internal-test, ver _shared/mercadopago.ts). Aqui só o suficiente
+    // pra satisfazer DependenciasFunil sem quebrar o build; nunca gera QR
+    // Code, cai no reenvio normal do link (ver aguardando_pagamento).
+    gerarPagamentoPix: async () => null,
     criarPedido: (dados) => criarPedidoProvisorio(dados, opts.cliente),
     buscarFormasPagamento: buscarFormasPagamentoReal,
   }

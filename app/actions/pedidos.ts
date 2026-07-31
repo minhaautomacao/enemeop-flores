@@ -24,9 +24,14 @@ export async function criarPedido(data: PedidoInsert) {
   revalidatePath('/dashboard/pedidos');
 }
 
-type StatusPedido = Database['public']['Tables']['pedidos']['Row']['status'];
+type StatusPedido    = Database['public']['Tables']['pedidos']['Row']['status'];
+type StatusProducao  = Database['public']['Tables']['pedidos']['Row']['status_producao'];
 
-const PROXIMO_STATUS: Record<StatusPedido, StatusPedido | null> = {
+// Só se aplica ao fluxo manual antigo (criado via "+ Novo pedido", `status`
+// aqui é o próprio ciclo de vida do pedido). Pedidos reais da Flora usam
+// `status` para PAGAMENTO — nunca avançados por aqui, ver
+// avancarStatusProducao abaixo.
+const PROXIMO_STATUS: Partial<Record<StatusPedido, StatusPedido | null>> = {
   novo:       'confirmado',
   confirmado: 'preparando',
   preparando: 'saiu',
@@ -37,9 +42,35 @@ const PROXIMO_STATUS: Record<StatusPedido, StatusPedido | null> = {
 
 export async function atualizarStatusPedido(id: string, statusAtual: StatusPedido) {
   const proximo = PROXIMO_STATUS[statusAtual];
+  if (proximo === undefined) throw new Error('Este pedido usa o fluxo real (pagamento) — use avancarStatusProducao.');
   if (!proximo) throw new Error('Status já é final.');
   const supabase = await createClient();
   const { error } = await asUpdatable(supabase.from('pedidos')).update({ status: proximo }).eq('id', id);
+  if (error) throw new Error(error.message);
+  revalidatePath('/dashboard/pedidos');
+}
+
+// Pedidos reais (criados pela Flora): `status` é o pagamento — só o webhook
+// real do Mercado Pago confirma isso, NUNCA esta tela. O que a equipe avança
+// manualmente aqui é a produção (status_producao), e só depois que o
+// pagamento já foi confirmado de verdade.
+const PROXIMO_STATUS_PRODUCAO: Record<StatusProducao, StatusProducao | null> = {
+  novo:       'confirmado',
+  confirmado: 'preparando',
+  preparando: 'pronto',
+  pronto:     'saiu',
+  saiu:       'entregue',
+  entregue:   null,
+};
+
+export async function avancarStatusProducao(id: string, statusPagamento: StatusPedido, statusProducaoAtual: StatusProducao) {
+  if (statusPagamento !== 'pago') {
+    throw new Error('Pedido ainda não foi pago — a produção só avança depois da confirmação real do pagamento.');
+  }
+  const proximo = PROXIMO_STATUS_PRODUCAO[statusProducaoAtual];
+  if (!proximo) throw new Error('Produção já está no status final.');
+  const supabase = await createClient();
+  const { error } = await asUpdatable(supabase.from('pedidos')).update({ status_producao: proximo }).eq('id', id);
   if (error) throw new Error(error.message);
   revalidatePath('/dashboard/pedidos');
 }

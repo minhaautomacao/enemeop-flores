@@ -13,8 +13,6 @@
  * NUNCA:
  *   - chama Z-API/Evolution ou qualquer envio externo de mensagem;
  *   - dispara captacao-leads/whatsapp-sdr (SDR/campanha);
- *   - cria preference real no Mercado Pago (gerarPagamento é mockado aqui —
- *     usar apenas sandbox/mock, nunca cobrança real);
  *   - cria corrida real na Lalamove (calcularFrete só cota — cotação real,
  *     nunca corrida; corrida real só existe num processo totalmente
  *     separado, pós-pagamento + aprovação humana, nunca acionado aqui);
@@ -23,8 +21,19 @@
  *     conversas.modo_atendimento diretamente, nunca entra na fila real de
  *     atendimento humano).
  *
+ * Pagamento: mockado por padrão (gerarPagamentoMock, nunca cobrança real).
+ * Só quando FLORA_INTERNAL_REAL_ORDER='true' (além de FLORA_INTERNAL_TEST_MODE
+ * já ativo) o pagamento passa a usar a MESMA função real de
+ * webhook-whatsapp/webhook-meta (gerarOuReusarPreference +
+ * criarPreferenciaMercadoPago, ver ../_shared/pedido-repositorio.ts) — gera
+ * preference/cobrança real no Mercado Pago. Usado só em teste real
+ * controlado (um pedido por vez, sob supervisão direta), nunca por padrão.
+ *
  * Dados de teste são sempre conversas.canal='internal_test' — nunca se
- * mistura com conversas reais, fácil de identificar/filtrar depois.
+ * mistura com conversas reais, fácil de identificar/filtrar depois. Em modo
+ * FLORA_INTERNAL_REAL_ORDER, o pedido real criado carrega cliente_nome
+ * ='TESTE REAL CONTROLADO' (além de canal/canal_origem='internal_test'),
+ * pra nunca ser confundido com um pedido de cliente real na tela de pedidos.
  *
  * Variáveis de ambiente:
  *   FLORA_INTERNAL_TEST_MODE — precisa ser exatamente 'true'; qualquer
@@ -32,6 +41,8 @@
  *   FLORA_INTERNAL_TEST_TOKEN — obrigatório, comparado em tempo constante
  *     (ver ../_shared/auth-crm.ts, mesmo mecanismo do FACTORY_SECRET do
  *     CRM) via header "Authorization: Bearer <token>". Nunca logado.
+ *   FLORA_INTERNAL_REAL_ORDER — 'true' liga o pagamento real (ver acima);
+ *     qualquer outro valor (ou ausente) mantém o pagamento mockado.
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
@@ -40,7 +51,8 @@ import { mensagemDuplicada } from '../_shared/dedup.ts';
 import { mensagemDeOptOut, mensagemConfirmacaoOptOut } from '../_shared/whatsapp-guard.ts';
 import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPorTermoReal, revalidarProdutoReal } from '../_shared/catalogo-woocommerce.ts';
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
-import { criarOuReusarPedido, buscarFormasPagamentoReal, type DadosClientePedido } from '../_shared/pedido-repositorio.ts';
+import { criarPreferenciaMercadoPago, criarPagamentoPixMercadoPago } from '../_shared/mercadopago.ts';
+import { criarOuReusarPedido, gerarOuReusarPreference, gerarOuReusarPagamentoPix, buscarFormasPagamentoReal, type DadosClientePedido } from '../_shared/pedido-repositorio.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -63,6 +75,9 @@ const WORKSPACE_ID = Deno.env.get('SAAS_WORKSPACE_ID') ?? Deno.env.get('WORKSPAC
 const LEAD_TIME_MINUTOS = Number(Deno.env.get('LOGISTICA_LEAD_TIME_MINUTOS') ?? '30');
 const FACTORY_SECRET = Deno.env.get('FACTORY_SECRET') ?? '';
 const TIMEOUT_FRETE_MS = 25_000;
+// 'true' liga pagamento real (ver cabeçalho do arquivo) — qualquer outro
+// valor (padrão) mantém gerarPagamentoMock.
+const REAL_ORDER = Deno.env.get('FLORA_INTERNAL_REAL_ORDER') === 'true';
 
 function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
@@ -155,9 +170,24 @@ async function consultarCepReal(cep: string): Promise<{ rua?: string; bairro?: s
   }
 }
 
-/** Único ponto mockado — nunca cria preference real no Mercado Pago (ETAPA 6: "usar apenas sandbox, mock ou ambiente controlado"). */
+/** Pagamento mockado — comportamento padrão (REAL_ORDER=false), nunca cria preference real. */
 async function gerarPagamentoMock(pedidoId: string, valorTotal: number): Promise<{ link: string; paymentId: string } | null> {
   return { link: `https://mock-pagamento.teste-interno.invalid/pedido/${pedidoId}?valor=${valorTotal}`, paymentId: `mock-${pedidoId}` };
+}
+
+/** Pagamento real — mesma função usada por webhook-whatsapp/webhook-meta. Só chamada quando REAL_ORDER=true (teste real controlado). */
+async function gerarPagamentoReal(pedidoId: string): Promise<{ link: string; paymentId: string } | null> {
+  return gerarOuReusarPreference(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'flora-internal-test', criarPreferenciaMercadoPago);
+}
+
+/** QR Code Pix mockado — nunca cria pagamento real (comportamento padrão, REAL_ORDER=false). */
+async function gerarPagamentoPixMock(pedidoId: string): Promise<{ qrCodeUrl: string; copiaCola: string } | null> {
+  return { qrCodeUrl: `https://mock-pagamento.teste-interno.invalid/pix/${pedidoId}.png`, copiaCola: `00020126-mock-${pedidoId}` };
+}
+
+/** QR Code Pix real — mesma função usada por webhook-whatsapp/webhook-meta. Só chamada quando REAL_ORDER=true. */
+async function gerarPagamentoPixReal(pedidoId: string): Promise<{ qrCodeUrl: string; copiaCola: string } | null> {
+  return gerarOuReusarPagamentoPix(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'flora-internal-test', criarPagamentoPixMercadoPago);
 }
 
 function construirDependenciasFunilTeste(cliente: DadosClientePedido): DependenciasFunil {
@@ -172,7 +202,8 @@ function construirDependenciasFunilTeste(cliente: DadosClientePedido): Dependenc
       const r = calcularAgendamentoEntrega(dataEntrega, periodoEntrega, new Date(), { leadTimeMinutos: LEAD_TIME_MINUTOS });
       return { entregaPrometidaEmISO: r.entregaPrometidaEm.toISOString(), despachoEmISO: r.despachoEm.toISOString(), imediato: r.imediato };
     },
-    gerarPagamento: gerarPagamentoMock,
+    gerarPagamento: REAL_ORDER ? gerarPagamentoReal : gerarPagamentoMock,
+    gerarPagamentoPix: REAL_ORDER ? gerarPagamentoPixReal : gerarPagamentoPixMock,
     criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'flora-internal-test'),
     buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
   };
@@ -180,7 +211,7 @@ function construirDependenciasFunilTeste(cliente: DadosClientePedido): Dependenc
 
 // ── Processamento — mesmo fluxo de decisão de webhook-whatsapp/webhook-meta ─
 
-async function processarMensagemTeste(conversaId: string, mensagemCliente: string, mid?: string): Promise<{ mensagem: string; fase: string }> {
+async function processarMensagemTeste(conversaId: string, mensagemCliente: string, mid?: string): Promise<{ mensagem: string; fase: string; fotoUrl?: string | null }> {
   const conversaRow = await buscarOuCriarConversaTeste(conversaId);
 
   if (mensagemDuplicada(conversaRow.historico ?? [], mensagemCliente, mid)) {
@@ -219,6 +250,7 @@ async function processarMensagemTeste(conversaId: string, mensagemCliente: strin
 
   const intencao = classificarIntencao(mensagemCliente, estado.fase);
   let respostaFinal: string;
+  let fotoUrl: string | null | undefined;
 
   if (intencaoInterrompeFluxo(intencao)) {
     if (intencao === 'assunto_fora_escopo') {
@@ -236,10 +268,16 @@ async function processarMensagemTeste(conversaId: string, mensagemCliente: strin
       estado = { ...estado, fase: 'transferido_humano' };
     }
   } else {
-    const deps = construirDependenciasFunilTeste({ nome: 'Cliente Teste', canal: 'internal_test', canalId: conversaId, conversaId: conversaRow.id });
+    const deps = construirDependenciasFunilTeste({
+      nome: REAL_ORDER ? 'TESTE REAL CONTROLADO' : 'Cliente Teste',
+      canal: 'internal_test',
+      canalId: conversaId,
+      conversaId: conversaRow.id,
+    });
     const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps, false, undefined);
     estado = resultado.estado;
     respostaFinal = resultado.mensagem;
+    fotoUrl = resultado.fotoUrl;
   }
 
   const historicoFinal = [...historico, { role: 'assistant' as const, content: respostaFinal, ts: new Date().toISOString() }].slice(-20);
@@ -250,7 +288,7 @@ async function processarMensagemTeste(conversaId: string, mensagemCliente: strin
   } as Partial<ConversaRow>);
 
   console.log(`[TESTE INTERNO] conversa=${conversaId} fase=${conversaRow.fase}→${estado.fase} resposta="${respostaFinal.slice(0, 60)}"`);
-  return { mensagem: respostaFinal, fase: estado.fase };
+  return { mensagem: respostaFinal, fase: estado.fase, fotoUrl };
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────

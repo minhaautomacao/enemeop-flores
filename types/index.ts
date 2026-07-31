@@ -30,12 +30,28 @@ export type Database = {
           cliente_nome: string;
           cliente_telefone: string;
           produto: string;
+          produtos: Json | null;
           valor: number;
-          status: 'novo' | 'confirmado' | 'preparando' | 'saiu' | 'entregue' | 'cancelado';
+          // `status` = status de PAGAMENTO para pedidos reais criados pela Flora
+          // (aguardando_pagamento/pago/pagamento_recusado/reembolsado, ver
+          // supabase/migrations/202607180001_mercadopago_pagamento.sql) — os
+          // demais valores (novo/confirmado/preparando/saiu/entregue/cancelado/
+          // pendente/em_preparo/saiu_para_entrega) são do fluxo manual antigo
+          // (criação via "+ Novo pedido", sem integração de pagamento real).
+          // NUNCA alterar manualmente um status de pagamento pela tela — só o
+          // webhook real do Mercado Pago confirma isso.
+          status: 'novo' | 'pendente' | 'confirmado' | 'preparando' | 'em_preparo' | 'saiu' | 'saiu_para_entrega' | 'entregue' | 'cancelado' | 'aguardando_pagamento' | 'pago' | 'pagamento_recusado' | 'reembolsado';
+          // Workflow de produção/cozinha — independente do status de pagamento.
+          status_producao: 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue';
+          // Workflow de logística real (Lalamove) — null até o pedido ser pago.
+          status_logistica: 'pendente' | 'criada' | 'erro_logistica' | 'revisao_logistica' | 'agendada' | null;
           horario_entrega: string | null;
           bairro: string | null;
           canal: string;
+          canal_origem: string | null;
           obs: string | null;
+          pago_em: string | null;
+          numero_pedido: number | null;
           criado_em: string;
           atualizado_em: string;
         };
@@ -44,7 +60,7 @@ export type Database = {
           cliente_telefone: string;
           produto: string;
           valor?: number;
-          status?: 'novo' | 'confirmado' | 'preparando' | 'saiu' | 'entregue' | 'cancelado';
+          status?: 'novo' | 'pendente' | 'confirmado' | 'preparando' | 'em_preparo' | 'saiu' | 'saiu_para_entrega' | 'entregue' | 'cancelado' | 'aguardando_pagamento' | 'pago' | 'pagamento_recusado' | 'reembolsado';
           horario_entrega?: string | null;
           bairro?: string | null;
           canal?: string;
@@ -55,7 +71,8 @@ export type Database = {
           cliente_telefone?: string;
           produto?: string;
           valor?: number;
-          status?: 'novo' | 'confirmado' | 'preparando' | 'saiu' | 'entregue' | 'cancelado';
+          status?: 'novo' | 'pendente' | 'confirmado' | 'preparando' | 'em_preparo' | 'saiu' | 'saiu_para_entrega' | 'entregue' | 'cancelado' | 'aguardando_pagamento' | 'pago' | 'pagamento_recusado' | 'reembolsado';
+          status_producao?: 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue';
           horario_entrega?: string | null;
           bairro?: string | null;
           canal?: string;

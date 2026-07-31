@@ -36,10 +36,11 @@ type DbClient = any;
 // que também nunca importa mercadopago.ts inteiro por esse motivo) —
 // quem chama em produção (webhook-meta/webhook-whatsapp) injeta a função
 // real via parâmetro.
-import type { OpcoesPreferencia, ResultadoPreferencia } from './mercadopago.ts';
+import type { OpcoesPreferencia, ResultadoPreferencia, OpcoesPagamentoPix, ResultadoPagamentoPix } from './mercadopago.ts';
 import { dataCalendarioParaISO, type DadosPedido } from './funil.ts';
 
 export type CriadorPreferencia = (workspaceId: string | undefined, opcoes: OpcoesPreferencia) => Promise<ResultadoPreferencia>;
+export type CriadorPagamentoPix = (workspaceId: string | undefined, opcoes: OpcoesPagamentoPix) => Promise<ResultadoPagamentoPix>;
 
 export interface DadosClientePedido {
   nome: string;
@@ -88,7 +89,7 @@ export async function criarOuReusarPedido(
       canal_id: cliente.canalId ?? null,
       canal_origem: cliente.canal,
       produto: produto.nome,
-      produtos: [{ nome: produto.nome, codigo: produto.codigo, woocommerce_product_id: produto.idExterno ?? null, preco: produto.preco, quantidade: produto.quantidade ?? 1 }],
+      produtos: [{ nome: produto.nome, codigo: produto.codigo, woocommerce_product_id: produto.idExterno ?? null, preco: produto.preco, quantidade: produto.quantidade ?? 1, fotoUrl: produto.fotoUrl ?? null }],
       valor: dados.valorTotal,
       valor_frete: dados.valorFrete ?? null,
       status: 'aguardando_pagamento',
@@ -289,6 +290,89 @@ export async function gerarOuReusarPreference(
   }
 
   return { link: resultado.initPoint, paymentId: resultado.preferenceId };
+}
+
+/**
+ * Gera (ou reaproveita, se ainda não expirado) um pagamento Pix real com QR
+ * Code pro MESMO pedido já criado (mesmo external_reference da preference —
+ * o webhook-mercadopago localiza o pedido por esse campo, nunca por um novo).
+ * A imagem do QR Code é persistida no Storage (bucket público pix-qrcodes,
+ * necessário pra Graph API do Meta buscar a URL sem autenticação) e a URL
+ * pública + o código copia-e-cola ficam salvos no pedido.
+ */
+export async function gerarOuReusarPagamentoPix(
+  db: DbClient,
+  pedidoId: string,
+  workspaceId: string,
+  supabaseUrl: string,
+  logPrefix: string,
+  criarPagamentoPix: CriadorPagamentoPix,
+): Promise<{ qrCodeUrl: string; copiaCola: string } | null> {
+  const { data: atual, error: erroLeitura } = await db
+    .from('pedidos')
+    .select('valor, external_reference, produto, pix_qr_code_url, pix_copia_cola, pix_expires_at')
+    .eq('id', pedidoId)
+    .maybeSingle();
+  if (erroLeitura || !atual) {
+    console.error(`[${logPrefix}] gerarOuReusarPagamentoPix: falha ao ler pedido: ${erroLeitura?.message ?? 'nao encontrado'}`);
+    return null;
+  }
+
+  const aindaValido = atual.pix_qr_code_url && atual.pix_copia_cola && atual.pix_expires_at
+    && new Date(atual.pix_expires_at as string).getTime() > Date.now();
+  if (aindaValido) {
+    return { qrCodeUrl: atual.pix_qr_code_url as string, copiaCola: atual.pix_copia_cola as string };
+  }
+
+  const valorTotal = Number(atual.valor ?? 0);
+  if (!(valorTotal > 0)) {
+    console.error(`[${logPrefix}] gerarOuReusarPagamentoPix: pedido sem valor cobravel, QR Code nao gerado`);
+    return null;
+  }
+  const externalReference = (atual.external_reference as string | null) ?? `enemeop-${pedidoId}`;
+
+  const resultado = await criarPagamentoPix(workspaceId, {
+    externalReference,
+    valorTotal,
+    descricao: (atual.produto as string | null) ?? 'Pedido Enemeop Flores',
+    notificationUrl: `${supabaseUrl}/functions/v1/webhook-mercadopago`,
+  });
+  if (!resultado.criado || !resultado.qrCodeBase64 || !resultado.qrCodeCopiaCola) {
+    console.error(`[${logPrefix}] falha ao criar pagamento Pix Mercado Pago: ${resultado.erro}`);
+    return null;
+  }
+
+  const bytesQrCode = Uint8Array.from(atob(resultado.qrCodeBase64), c => c.charCodeAt(0));
+  const caminhoArquivo = `${pedidoId}.png`;
+  const { error: erroUpload } = await db.storage
+    .from('pix-qrcodes')
+    .upload(caminhoArquivo, bytesQrCode, { contentType: 'image/png', upsert: true });
+  if (erroUpload) {
+    console.error(`[${logPrefix}] falha ao subir QR Code Pix pro Storage: ${erroUpload.message}`);
+    return null;
+  }
+  const { data: urlPublica } = db.storage.from('pix-qrcodes').getPublicUrl(caminhoArquivo);
+  const qrCodeUrl = urlPublica.publicUrl as string;
+
+  const { error: persistError } = await db
+    .from('pedidos')
+    .update({
+      pix_payment_id: resultado.paymentId,
+      pix_qr_code_url: qrCodeUrl,
+      pix_copia_cola: resultado.qrCodeCopiaCola,
+      pix_expires_at: resultado.expiraEm ?? null,
+    })
+    .eq('id', pedidoId);
+  if (persistError) {
+    // O pagamento Pix já existe no Mercado Pago — se a persistência falhar,
+    // a próxima tentativa cria um pagamento Pix novo em vez de reaproveitar
+    // (custo é só um QR Code Pix extra pendente, nunca uma cobrança
+    // duplicada — Pix só debita quando escaneado). Devolve mesmo assim o
+    // QR Code já gerado pra não bloquear o cliente agora.
+    console.error(`[${logPrefix}] QR Code Pix criado (paymentId=${resultado.paymentId}) mas falha ao persistir no pedido: ${persistError.message}`);
+  }
+
+  return { qrCodeUrl, copiaCola: resultado.qrCodeCopiaCola };
 }
 
 /** Formas de pagamento realmente habilitadas agora — nunca inventa Pix/cartão sem credencial real configurada. */

@@ -40,11 +40,11 @@
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { criarPreferenciaMercadoPago } from '../_shared/mercadopago.ts';
+import { criarPreferenciaMercadoPago, criarPagamentoPixMercadoPago } from '../_shared/mercadopago.ts';
 import { mensagemDuplicada } from '../_shared/dedup.ts';
 import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPorTermoReal, revalidarProdutoReal } from '../_shared/catalogo-woocommerce.ts';
 import { dentroDoHorarioComercial, textoProximaAberturaComercial } from '../_shared/horario-comercial.ts';
-import { type DadosClientePedido, criarOuReusarPedido, gerarOuReusarPreference, buscarFormasPagamentoReal } from '../_shared/pedido-repositorio.ts';
+import { type DadosClientePedido, criarOuReusarPedido, gerarOuReusarPreference, gerarOuReusarPagamentoPix, buscarFormasPagamentoReal } from '../_shared/pedido-repositorio.ts';
 import { type OrigemHandoff, criarOuReusarAtendimento } from '../_shared/handoff.ts';
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { validarTokenWebhook } from '../_shared/zapi-auth.ts';
@@ -318,6 +318,7 @@ function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFu
       return { entregaPrometidaEmISO: r.entregaPrometidaEm.toISOString(), despachoEmISO: r.despachoEm.toISOString(), imediato: r.imediato };
     },
     gerarPagamento: (pedidoId) => gerarOuReusarPreference(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'webhook-whatsapp', criarPreferenciaMercadoPago),
+    gerarPagamentoPix: (pedidoId) => gerarOuReusarPagamentoPix(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'webhook-whatsapp', criarPagamentoPixMercadoPago),
     criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'webhook-whatsapp'),
     buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
   };

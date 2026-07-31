@@ -1375,6 +1375,19 @@ export interface RespostaPagamento {
   paymentId: string | null
 }
 
+export type GeradorPagamentoPix = (pedidoId: string, valorTotal: number) => Promise<{ qrCodeUrl: string; copiaCola: string } | null>
+
+// "pix" sozinho já é inequívoco aqui — só é checado dentro de
+// aguardando_pagamento (Etapa 8, ver dispatcher), fase em que um link real
+// já existe e o cliente falando de pix só pode significar "quero pagar por
+// pix" (nunca confundido com a resposta genérica de FAQ de formas de
+// pagamento, que só roda fora dessa fase).
+const REGEX_PEDIDO_QRCODE_PIX = /\bpix\b|\bqr\s*code\b|\bqrcode\b/i
+
+export function pedeQrCodePix(mensagem: string): boolean {
+  return REGEX_PEDIDO_QRCODE_PIX.test(mensagem)
+}
+
 export async function gerarPagamentoEtapa(dados: DadosPedido, gerar: GeradorPagamento): Promise<RespostaPagamento> {
   if (dados.valorTotal == null) {
     throw new Error('gerarPagamentoEtapa: valorTotal ausente — nao deve gerar link antes de confirmar produto, entrega e valor total')
@@ -1478,6 +1491,8 @@ export interface DependenciasFunil {
   calcularAgendamento: (dataEntrega: DataCalendario, periodoEntrega: PeriodoEntrega | null) => { entregaPrometidaEmISO: string; despachoEmISO: string; imediato: boolean }
   /** Recebe o pedido já criado (pedidoId) e o valor total, devolve link + identificador de pagamento. */
   gerarPagamento: (pedidoId: string, valorTotal: number) => Promise<{ link: string; paymentId: string } | null>
+  /** Gera (ou reaproveita, se ainda válido) um QR Code Pix real pro mesmo pedido — só chamado quando o cliente pede Pix explicitamente na fase aguardando_pagamento (ver pedeQrCodePix). */
+  gerarPagamentoPix: GeradorPagamentoPix
   /** Cria o registro do pedido (rascunho, ainda sem pagamento) e devolve o id. */
   criarPedido: CriadorPedido
   /** Formas de pagamento realmente habilitadas na configuração/integração de
@@ -2818,8 +2833,22 @@ export async function avancarFunil(
         return etapaAguardandoAprovacaoFrete({ ...estado, fase: 'aguardando_aprovacao_frete' }, mensagemCliente, deps, agora)
       }
       return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA }
-    case 'aguardando_pagamento':
+    case 'aguardando_pagamento': {
+      // Cliente pede Pix explicitamente: gera (ou reaproveita) o QR Code
+      // real pro MESMO pedido — nunca substitui o link do Checkout Pro já
+      // enviado, só oferece uma segunda forma de pagar o mesmo pedido.
+      if (pedeQrCodePix(mensagemCliente) && estado.dados.pedidoId && estado.dados.valorTotal != null) {
+        const pix = await deps.gerarPagamentoPix(estado.dados.pedidoId, estado.dados.valorTotal)
+        if (pix) {
+          return {
+            estado,
+            mensagem: `Aqui está o QR Code Pix para pagamento (R$ ${estado.dados.valorTotal.toFixed(2).replace('.', ',')}):\n\nPix Copia e Cola:\n${pix.copiaCola}\n\nAssim que identificarmos o pagamento, seu pedido é confirmado automaticamente.`,
+            fotoUrl: pix.qrCodeUrl,
+          }
+        }
+      }
       return { estado, mensagem: montarMensagemAguardandoPagamento(estado.dados) }
+    }
     case 'pagamento_confirmado':
     case 'pedido_criado':
       return { estado, mensagem: mensagemFinalizacao() }

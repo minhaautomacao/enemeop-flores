@@ -106,6 +106,88 @@ export async function criarPreferenciaMercadoPago(
   }
 }
 
+export interface OpcoesPagamentoPix {
+  /** Mesmo external_reference já usado na preference/pedido — nunca um novo, pra o webhook sempre localizar o mesmo pedido. */
+  externalReference: string;
+  valorTotal: number;
+  descricao: string;
+  notificationUrl: string;
+}
+
+export interface ResultadoPagamentoPix {
+  criado: boolean;
+  paymentId?: string;
+  /** PNG em base64 retornado pela API — quem chama decide onde persistir/servir (ver pedido-repositorio.ts, que sobe pro Storage). */
+  qrCodeBase64?: string;
+  /** Código "Pix copia e cola" — enviado como texto junto da imagem do QR Code. */
+  qrCodeCopiaCola?: string;
+  /** Quando o QR Code expira, segundo o Mercado Pago. */
+  expiraEm?: string;
+  erro?: string;
+}
+
+/**
+ * Cria um pagamento Pix real (Payments API — diferente da preference do
+ * Checkout Pro criada por criarPreferenciaMercadoPago) para o MESMO pedido
+ * (mesmo externalReference), pra o cliente pagar escaneando um QR Code
+ * exibido na conversa em vez de abrir o link do Checkout Pro. Nunca cobra
+ * nada sozinho: o Pix só é debitado quando o cliente escaneia e confirma no
+ * app do banco dele — criar o pagamento aqui só gera a cobrança pendente.
+ */
+export async function criarPagamentoPixMercadoPago(
+  workspaceId: string | undefined,
+  opcoes: OpcoesPagamentoPix,
+): Promise<ResultadoPagamentoPix> {
+  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
+  if (!accessToken) {
+    return { criado: false, erro: 'Credenciais Mercado Pago (mp_access_token) não configuradas.' };
+  }
+
+  const payload = {
+    transaction_amount: opcoes.valorTotal,
+    description: opcoes.descricao,
+    payment_method_id: 'pix',
+    external_reference: opcoes.externalReference,
+    notification_url: opcoes.notificationUrl,
+    // payer.email é exigido pela API pra pagamento Pix direto — endereço
+    // técnico no domínio real da loja, nunca exibido ao cliente nem usado
+    // pra contato, só satisfaz o schema obrigatório do Mercado Pago.
+    payer: { email: `pedido-${opcoes.externalReference}@enemeopflores.com.br` },
+  };
+
+  try {
+    const resp = await fetch(`${API_BASE}/v1/payments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        // Chave real de idempotência da API de pagamentos (diferente de
+        // preferences, que não documenta isso) — reenviar a mesma chamada
+        // (retry de rede) nunca cria um segundo pagamento Pix.
+        'X-Idempotency-Key': `pix-${opcoes.externalReference}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const err = await resp.text().catch(() => String(resp.status));
+      return { criado: false, erro: `HTTP ${resp.status}: ${err}` };
+    }
+    const data = await resp.json() as {
+      id?: number;
+      point_of_interaction?: { transaction_data?: { qr_code_base64?: string; qr_code?: string } };
+      date_of_expiration?: string;
+    };
+    const qrBase64 = data.point_of_interaction?.transaction_data?.qr_code_base64;
+    const copiaCola = data.point_of_interaction?.transaction_data?.qr_code;
+    if (!data.id || !qrBase64 || !copiaCola) {
+      return { criado: false, erro: 'Resposta da API sem QR Code Pix (id/qr_code_base64/qr_code ausente).' };
+    }
+    return { criado: true, paymentId: String(data.id), qrCodeBase64: qrBase64, qrCodeCopiaCola: copiaCola, expiraEm: data.date_of_expiration };
+  } catch (e) {
+    return { criado: false, erro: String(e) };
+  }
+}
+
 export interface PagamentoReal {
   id: string;
   /** 'approved' | 'pending' | 'in_process' | 'rejected' | 'cancelled' | 'refunded' | ... */

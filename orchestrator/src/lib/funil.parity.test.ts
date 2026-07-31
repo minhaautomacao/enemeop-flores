@@ -72,6 +72,7 @@ test('nucleo Deno (_shared/funil.ts) produz exatamente os mesmos resultados que 
       return { entregaPrometidaEmISO: iso, despachoEmISO: iso, imediato: true }
     },
     gerarPagamento: async (pedidoId: string) => ({ link: `https://pag/${pedidoId}`, paymentId: pedidoId }),
+    gerarPagamentoPix: async (pedidoId: string) => ({ qrCodeUrl: `https://pag/${pedidoId}.png`, copiaCola: `pix-${pedidoId}` }),
     criarPedido: async () => ({ pedidoId: 'pedido_x' }),
     buscarFormasPagamento: async () => ['Pix'],
   }

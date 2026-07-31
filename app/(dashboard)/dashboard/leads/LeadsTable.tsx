@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { formatTempo } from '@/lib/utils';
 
 const INTENCAO_LABEL: Record<string, string> = {
@@ -68,10 +68,6 @@ function formatHora(iso: string): string {
   return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
 
-// conversas-enemeop foi migrada para enemeop-flores/supabase/functions/ —
-// pendente de deploy no projeto Enemeop (ver docs/DEPLOYMENT.md).
-const FUNCTIONS_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
-
 function ExpandirConversa({ canalId }: { canalId: string | null }) {
   const [aberto, setAberto] = useState(false);
   const [historico, setHistorico] = useState<Mensagem[]>([]);
@@ -83,7 +79,10 @@ function ExpandirConversa({ canalId }: { canalId: string | null }) {
 
     setCarregando(true);
     try {
-      const res = await fetch(`${FUNCTIONS_URL}/functions/v1/conversas-enemeop?canal_id=${canalId}`);
+      // /api/dashboard/conversas — proxy que mantém o FACTORY_SECRET no
+      // servidor. Antes chamava a Edge Function direto do navegador sem
+      // header de autorização e sempre recebia 401 (ficava sempre vazio).
+      const res = await fetch(`/api/dashboard/conversas?canal_id=${canalId}`);
       if (res.ok) {
         const data = await res.json();
         const conv = (data.conversas ?? []).find(
@@ -207,5 +206,72 @@ export function LeadsTable({ leads }: { leads: Lead[] }) {
         })}
       </tbody>
     </table>
+  );
+}
+
+// Dono do polling + estatísticas — a página server-rendered só faz a
+// primeira busca (first paint rápido); daqui pra frente tudo é atualizado
+// via /api/dashboard/leads (mesmo endpoint, roda no servidor, nunca expõe
+// o FACTORY_SECRET ao navegador).
+export function LeadsDashboard({ initialLeads, initialErro }: { initialLeads: Lead[]; initialErro: string | null }) {
+  const [leads, setLeads] = useState<Lead[]>(initialLeads);
+  const [erro, setErro] = useState<string | null>(initialErro);
+
+  const carregar = useCallback(async () => {
+    try {
+      const res = await fetch('/api/dashboard/leads', { cache: 'no-store' });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? 'Falha ao carregar leads');
+      setLeads(json.leads ?? []);
+      setErro(null);
+    } catch (e) {
+      setErro(e instanceof Error ? e.message : 'Falha ao carregar leads');
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(carregar, 15000);
+    return () => window.clearInterval(timer);
+  }, [carregar]);
+
+  const urgentes = leads.filter(l => l.intencao === 'urgente').length;
+  const comNome  = leads.filter(l => !!(l.nome_exibido ?? l.nome)).length;
+
+  return (
+    <div className="p-6 space-y-5">
+
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        {[
+          { label: 'Total leads',   valor: leads.length, cor: 'text-text-primary' },
+          { label: 'Urgentes',      valor: urgentes,     cor: 'text-status-error' },
+          { label: 'Com nome',      valor: comNome,      cor: 'text-status-success' },
+          { label: 'Último',        valor: leads[0] ? formatTempo(leads[0].criado_em) : '—', cor: 'text-gold' },
+        ].map((s) => (
+          <div key={s.label} className="stat-card">
+            <p className="text-xs text-text-muted uppercase tracking-wide">{s.label}</p>
+            <p className={`mt-2 text-2xl font-bold ${s.cor}`}>{s.valor}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="card p-0 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <p className="text-sm font-medium text-text-primary">{leads.length} contatos</p>
+        </div>
+
+        {erro ? (
+          <div className="px-4 py-12 text-center">
+            <p className="text-status-error text-sm font-medium">Não foi possível carregar os leads.</p>
+            <p className="text-text-faint text-xs mt-1">{erro}</p>
+          </div>
+        ) : leads.length === 0 ? (
+          <div className="px-4 py-12 text-center text-text-muted text-sm">
+            Nenhum lead captado ainda. Aguardando mensagens no Instagram.
+          </div>
+        ) : (
+          <LeadsTable leads={leads} />
+        )}
+      </div>
+    </div>
   );
 }

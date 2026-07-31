@@ -1,36 +1,18 @@
-// Origem: recuperado da versão implantada no projeto Supabase da Fábrica
-// (ebeapnydeiwuewxatuuw, slug atualizar-nomes-leads, v3) em 2026-07-10.
-// Nunca esteve versionado em nenhum repositório Git antes desta migração.
-// Sanitização aplicada: IG_PAGE_ID hardcoded movido para env var
-// META_INSTAGRAM_ID (ver .env.example) — sem alteração de comportamento
-// quando a env var está configurada com o mesmo valor.
+// Backfill de nomes reais para leads/conversas do Instagram que ficaram
+// sem nome. Usa a mesma chamada Graph API do webhook-meta
+// (buscarNomeCliente: GET /v19.0/{canalId}?fields=name), com o token
+// guardado em funcao_configs (o secret de ambiente META_IG_ACCESS_TOKEN
+// estava desatualizado e a Graph API rejeitava com "Cannot parse access
+// token" — corrigido também em webhook-meta v89).
+//
+// LIMITAÇÃO CONHECIDA (não é bug de código): o Meta App ainda não tem
+// Advanced Access pra permissão instagram_manage_messages. Enquanto isso,
+// a Graph API só retorna o nome de usuários que têm um papel no App (ex.:
+// a própria conta de teste do desenvolvedor) — pra clientes reais, retorna
+// 403 "App does not have Advanced Access...". Precisa de App Review no
+// Meta for Developers pra resolver de verdade pra todo mundo.
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
-
-const PAGE_ID = Deno.env.get('META_INSTAGRAM_ID') ?? '';
-
-async function getVaultSecret(sb: ReturnType<typeof createClient>, name: string): Promise<string | null> {
-  try {
-    const { data } = await sb.rpc('get_vault_secret', { secret_name: name });
-    return data as string | null;
-  } catch { return null; }
-}
-
-async function buscarNomeViaConversas(canalId: string, igToken: string): Promise<string | null> {
-  // Tenta via endpoint de conversas (retorna participantes com nome)
-  try {
-    const url = `https://graph.facebook.com/v19.0/me/conversations?user_id=${canalId}&fields=participants&access_token=${igToken}`;
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const data = await res.json();
-    const conversations = data.data as Array<{participants: {data: Array<{name: string; id: string}>}}>;
-    if (!conversations?.length) return null;
-    // Pega o participante que NÃO é a página (id diferente de canal_id da página)
-    const participantes = conversations[0]?.participants?.data ?? [];
-    const cliente = participantes.find((p) => p.id !== PAGE_ID);
-    return cliente?.name ?? null;
-  } catch { return null; }
-}
 
 Deno.serve(async (_req: Request) => {
   const sb = createClient(
@@ -39,45 +21,42 @@ Deno.serve(async (_req: Request) => {
     { auth: { persistSession: false } },
   );
 
-  const igToken = Deno.env.get('META_IG_ACCESS_TOKEN') || await getVaultSecret(sb, 'META_IG_ACCESS_TOKEN') || '';
-  if (!igToken) return new Response(JSON.stringify({ erro: 'token nao encontrado' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  const { data: cfg } = await sb.from('funcao_configs').select('valor').eq('chave', 'META_IG_ACCESS_TOKEN').single();
+  const token = (cfg?.valor as string) ?? '';
+  if (!token) return new Response(JSON.stringify({ erro: 'token nao encontrado em funcao_configs' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
 
-  const { data: leads } = await sb
-    .from('leads')
-    .select('id, canal_id')
-    .is('nome', null)
-    .not('canal_id', 'is', null);
-
-  if (!leads || leads.length === 0) {
-    return new Response(JSON.stringify({ mensagem: 'Nenhum lead sem nome', atualizados: 0 }), { headers: { 'Content-Type': 'application/json' } });
+  async function buscarNome(canalId: string): Promise<string | null> {
+    try {
+      const res = await fetch(`https://graph.facebook.com/v19.0/${canalId}?fields=name&access_token=${token}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return (data.name as string) ?? null;
+    } catch { return null; }
   }
 
-  const porId = new Map<string, string[]>();
-  for (const l of leads) {
-    if (!l.canal_id) continue;
-    if (!porId.has(l.canal_id)) porId.set(l.canal_id, []);
-    porId.get(l.canal_id)!.push(l.id);
-  }
+  const { data: leads } = await sb.from('leads').select('id, canal_id').is('nome', null).not('canal_id', 'is', null).eq('canal', 'instagram');
+  const { data: conversas } = await sb.from('conversas').select('id, canal_id').is('nome_cliente', null).eq('canal', 'instagram');
 
-  let totalAtualizados = 0;
-  const detalhes: Array<{ canal_id: string; nome: string | null; leads: number }> = [];
+  const canalIds = new Set<string>();
+  for (const l of leads ?? []) if (l.canal_id) canalIds.add(l.canal_id);
+  for (const c of conversas ?? []) if (c.canal_id) canalIds.add(c.canal_id);
 
-  for (const [canalId, ids] of porId.entries()) {
-    const nome = await buscarNomeViaConversas(canalId, igToken);
+  let atualizados = 0;
+  const detalhes: Array<{ canal_id: string; nome: string | null }> = [];
 
+  for (const canalId of canalIds) {
+    const nome = await buscarNome(canalId);
+    detalhes.push({ canal_id: canalId, nome });
     if (nome) {
-      await sb.from('leads').update({ nome }).in('id', ids);
-      // Atualiza também em conversas
-      await sb.from('conversas').update({ nome_cliente: nome }).eq('canal_id', canalId);
-      totalAtualizados += ids.length;
+      await sb.from('leads').update({ nome }).eq('canal_id', canalId).is('nome', null);
+      await sb.from('conversas').update({ nome_cliente: nome }).eq('canal_id', canalId).is('nome_cliente', null);
+      atualizados++;
     }
-
-    detalhes.push({ canal_id: canalId, nome, leads: ids.length });
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 250));
   }
 
   return new Response(
-    JSON.stringify({ atualizados: totalAtualizados, total_leads: leads.length, detalhes }),
+    JSON.stringify({ canais_tentados: canalIds.size, canais_com_nome_encontrado: atualizados, detalhes }, null, 2),
     { headers: { 'Content-Type': 'application/json' } },
   );
 });

@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
-import { LeadsTable, type Lead } from './LeadsTable';
-import { formatTempo } from '@/lib/utils';
+import { LeadsDashboard, type Lead } from './LeadsTable';
 
 export const metadata: Metadata = { title: 'Clientes / CRM' };
 
@@ -42,9 +41,6 @@ async function getLeads(): Promise<{ leads: Lead[]; erro: string | null }> {
 export default async function LeadsPage() {
   const { leads, erro } = await getLeads();
 
-  const urgentes = leads.filter(l => l.intencao === 'urgente').length;
-  const comNome  = leads.filter(l => !!(l.nome_exibido ?? l.nome)).length;
-
   return (
     <div>
       <header className="page-header">
@@ -55,41 +51,7 @@ export default async function LeadsPage() {
         <span className="text-xs text-text-faint">Atualiza a cada 15s</span>
       </header>
 
-      <div className="p-6 space-y-5">
-
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          {[
-            { label: 'Total leads',   valor: leads.length, cor: 'text-text-primary' },
-            { label: 'Urgentes',      valor: urgentes,     cor: 'text-status-error' },
-            { label: 'Com nome',      valor: comNome,      cor: 'text-status-success' },
-            { label: 'Último',        valor: leads[0] ? formatTempo(leads[0].criado_em) : '—', cor: 'text-gold' },
-          ].map((s) => (
-            <div key={s.label} className="stat-card">
-              <p className="text-xs text-text-muted uppercase tracking-wide">{s.label}</p>
-              <p className={`mt-2 text-2xl font-bold ${s.cor}`}>{s.valor}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="card p-0 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-            <p className="text-sm font-medium text-text-primary">{leads.length} contatos</p>
-          </div>
-
-          {erro ? (
-            <div className="px-4 py-12 text-center">
-              <p className="text-status-error text-sm font-medium">Não foi possível carregar os leads.</p>
-              <p className="text-text-faint text-xs mt-1">{erro}</p>
-            </div>
-          ) : leads.length === 0 ? (
-            <div className="px-4 py-12 text-center text-text-muted text-sm">
-              Nenhum lead captado ainda. Aguardando mensagens no Instagram.
-            </div>
-          ) : (
-            <LeadsTable leads={leads} />
-          )}
-        </div>
-      </div>
+      <LeadsDashboard initialLeads={leads} initialErro={erro} />
     </div>
   );
 }

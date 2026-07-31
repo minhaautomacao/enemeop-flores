@@ -114,7 +114,12 @@ function handoffRealmenteAtivo(row: ConversaRow): boolean {
 }
 
 async function buscarNomeCliente(canalId: string): Promise<string | null> {
-  const token = IG_TOKEN || await buscarConfigDB('META_IG_ACCESS_TOKEN');
+  // funcao_configs é a fonte com o token realmente válido hoje — o secret
+  // de ambiente META_IG_ACCESS_TOKEN ficou desatualizado (Graph API retorna
+  // "Cannot parse access token" para ele) mas continuava vencendo o fallback
+  // por não estar vazio; buscarConfigDB primeiro corrige isso sem tocar em
+  // nenhum outro uso de IG_TOKEN (envio de mensagem continua como estava).
+  const token = await buscarConfigDB('META_IG_ACCESS_TOKEN') || IG_TOKEN;
   if (!token) return null;
   try {
     const res = await fetch(
@@ -454,7 +459,11 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
   }
 
   let nomeCliente = conversaRow.nome_cliente ?? null;
-  if (!nomeCliente && (conversaRow.historico ?? []).length === 0) {
+  // Antes só tentava na primeira mensagem (historico vazio) — se a chamada
+  // à Graph API falhasse ali (token ruim, instabilidade), a conversa ficava
+  // sem nome pra sempre. Agora tenta de novo em toda mensagem enquanto o
+  // nome continuar nulo — mesma chamada, sem custo extra quando já tem nome.
+  if (!nomeCliente) {
     nomeCliente = await buscarNomeCliente(canalId);
     if (nomeCliente) await salvarConversa(conversaRow.id, { nome_cliente: nomeCliente });
   }

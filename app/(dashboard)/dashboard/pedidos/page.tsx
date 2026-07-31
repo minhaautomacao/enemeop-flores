@@ -126,7 +126,15 @@ export default function PedidosPage() {
     setCarregando(false);
   }, []);
 
-  useEffect(() => { carregarPedidos(); }, [carregarPedidos]);
+  useEffect(() => {
+    carregarPedidos();
+    const supabase = createClient();
+    const canal = supabase.channel('dashboard-pedidos')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pedidos' }, () => carregarPedidos())
+      .subscribe();
+    const timer = window.setInterval(() => carregarPedidos(), 15000);
+    return () => { window.clearInterval(timer); supabase.removeChannel(canal); };
+  }, [carregarPedidos]);
 
   const pedidosFiltrados = pedidos
     .filter(p => filtro === 'todos' || p.status === filtro)

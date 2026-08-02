@@ -33,6 +33,7 @@ import {
   pareceSaudacaoSimples,
   extrairTermoDisponibilidade,
   extrairNomeProdutoCitado,
+  extrairFormularioEntregaLivre,
   montarMensagemRetomada,
   montarMensagemAguardandoPagamento,
   estadoComPedidoInconsistente,
@@ -1049,6 +1050,64 @@ test('1e. extrairNomeProdutoCitado remove abertura de desejo ("eu quero um/uma X
   assert.equal(extrairNomeProdutoCitado('queria um buquê de rosas'), 'buquê de rosas')
   assert.equal(extrairNomeProdutoCitado('gostaria de uma orquídea'), 'orquídea')
   assert.equal(extrairNomeProdutoCitado('preciso de uns girassóis'), 'girassóis')
+})
+
+test('1f. extrairFormularioEntregaLivre reconhece vários campos numa frase em linguagem natural, sem nenhum rótulo "Campo: valor" (caso real de pedido em produção, 2026-07-31)', () => {
+  assert.deepEqual(
+    extrairFormularioEntregaLivre('Carlos enviar para Maria. O celular dela é no 11948579179, cep 04204-001  numero 1223, casa'),
+    { cep: '04204-001', telefoneDestinatario: '+5511948579179', numero: '1223', complemento: 'casa', nomeComprador: 'Carlos', nomeDestinatario: 'Maria' },
+  )
+})
+
+test('1g. extrairFormularioEntregaLivre aceita a variação "de X para Y" pros nomes, e "apto N" como complemento', () => {
+  const r = extrairFormularioEntregaLivre('de João para Ana, telefone 11912345678, cep 01310-100, número 500, apto 12')
+  assert.equal(r.nomeComprador, 'João')
+  assert.equal(r.nomeDestinatario, 'Ana')
+  assert.equal(r.telefoneDestinatario, '+5511912345678')
+  assert.equal(r.cep, '01310-100')
+  assert.equal(r.numero, '500')
+})
+
+test('1h. extrairFormularioEntregaLivre nunca inventa: mensagem sem nenhum padrão reconhecível devolve objeto vazio', () => {
+  assert.deepEqual(extrairFormularioEntregaLivre('oi tudo bem, ainda não decidi'), {})
+})
+
+test('1i. extrairFormularioEntregaLivre reconhece CEP sem hífen (8 dígitos) sem confundir com telefone', () => {
+  const r = extrairFormularioEntregaLivre('Meu CEP é 04204001')
+  assert.equal(r.cep, '04204001')
+  assert.equal(r.telefoneDestinatario, undefined)
+})
+
+test('1j. etapaFormulario (via avancarFunil) processa a frase em linguagem natural de ponta a ponta — nome, telefone e CEP de uma vez, sem repetir o formulário (caso real de pedido em produção, 2026-07-31)', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = { fase: 'aguardando_formulario', dados: { produto: { nome: 'Produto Teste', preco: 1, quantidade: 1, dataEntrega: 'hoje' } }, perguntasFeitas: [] }
+  const r = await avancarFunil(estado, 'Carlos enviar para Maria. O celular dela é no 11948579179, cep 04204-001  numero 1223, casa', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.nomeComprador, 'Carlos')
+  assert.equal(r.estado.dados.formulario?.nomeDestinatario, 'Maria')
+  assert.equal(r.estado.dados.formulario?.telefoneDestinatario, '+5511948579179')
+  assert.equal(r.estado.dados.formulario?.numero, '1223')
+  assert.equal(r.estado.dados.formulario?.complemento, 'casa')
+  // CEP válido + endereço já completo (rua/bairro/cidade/UF do ViaCEP fake) +
+  // número já veio na mesma frase + data já veio da etapa anterior (produto)
+  // — nada mais falta, então já avança pra confirmação em vez de repetir
+  // qualquer pergunta.
+  assert.equal(r.estado.fase, 'confirmando_formulario')
+})
+
+test('1k. depois que nome/telefone/CEP já foram capturados, uma resposta livre só de número+complemento continua funcionando (nunca é engolida pelo reconhecimento genérico da Etapa 1)', async () => {
+  const deps = depsFake()
+  const estado: EstadoConversa = {
+    fase: 'aguardando_formulario',
+    dados: {
+      produto: { nome: 'Produto Teste', preco: 1, quantidade: 1, dataEntrega: 'hoje' },
+      formulario: { nomeComprador: 'Carlos', nomeDestinatario: 'Maria', telefoneDestinatario: '+5511948579179', cep: '04204-001' },
+      cepConsultadoViaApi: '04204-001',
+    },
+    perguntasFeitas: [],
+  }
+  const r = await avancarFunil(estado, '1223 casa', 'compra_produto', deps)
+  assert.equal(r.estado.dados.formulario?.numero, '1223')
+  assert.equal(r.estado.dados.formulario?.complemento, 'casa')
 })
 
 test('2. produto citado com referência ao site mas não encontrado na busca real (ex.: produto de teste/indisponível) pergunta onde o cliente encontrou, pra ajudar a localizar — nunca insiste nas opções antigas em loop', async () => {

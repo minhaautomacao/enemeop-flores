@@ -358,6 +358,71 @@ export function extrairFormularioEntrega(texto: string): FormularioEntregaDados 
   return dados
 }
 
+/** Nomes reconhecidos de complemento — só um destes, sozinho na frase, nunca um adjetivo qualquer interpretado como complemento. */
+const COMPLEMENTOS_CONHECIDOS_LIVRE = ['apartamento', 'apto', 'ap', 'bloco', 'sobrado', 'fundos', 'sala', 'casa']
+
+/**
+ * Extrai vários campos de UMA mensagem em linguagem natural, sem nenhum
+ * rótulo "Campo: valor" — ex.: "Carlos enviar para Maria. O celular dela é
+ * 11948579179, cep 04204-001 numero 1223, casa" (caso real observado num
+ * pedido real em produção, 2026-07-31: extrairFormularioEntrega não achava
+ * nada porque a mensagem não tem nenhum ":", e a Flora ficava repetindo o
+ * mesmo formulário pedido). Só chamada quando extrairFormularioEntrega não
+ * reconheceu nenhum campo rotulado (ver etapaFormulario) — nunca compete com
+ * um formulário rotulado real.
+ *
+ * Diferente de interpretarTelefoneLivre/extrairNumeroComplementoLivre (que
+ * tratam a mensagem INTEIRA como um único campo isolado): aqui vários campos
+ * coexistem na mesma frase. Cada um só é reconhecido por um padrão de alta
+ * confiança — nunca adivinha:
+ *   - CEP: 8 dígitos (com/sem hífen) nunca se confunde com telefone (10-11
+ *     dígitos) só pela contagem de dígitos.
+ *   - Telefone: procurado DEPOIS de remover o CEP já encontrado do texto
+ *     (evita ler os 8 dígitos do CEP como parte de um telefone), validado
+ *     pela mesma normalizarTelefoneDestinatarioBR usada em todo o resto do
+ *     formulário — candidato que não validar é descartado, nunca salvo.
+ *   - Número da casa: só reconhecido com a palavra "número"/"nº" citada
+ *     explicitamente do lado — nunca um número solto qualquer (poderia ser
+ *     o CEP ou o telefone mal segmentados).
+ *   - Complemento: só uma palavra de uma lista curta e conhecida
+ *     (COMPLEMENTOS_CONHECIDOS_LIVRE) — nunca um texto livre qualquer.
+ *   - Nomes: só no padrão explícito "X enviar/mandar para Y" ou "de X para
+ *     Y" — fora desse conectivo claro, nunca tenta adivinhar quem é
+ *     remetente e quem é destinatário.
+ * Qualquer campo fora desses padrões simplesmente não aparece no resultado
+ * — continua sendo pedido normalmente, nunca inventado.
+ */
+export function extrairFormularioEntregaLivre(texto: string): FormularioEntregaDados {
+  const dados: FormularioEntregaDados = {}
+
+  const mCep = texto.match(/\b\d{5}-?\d{3}\b/)
+  if (mCep) dados.cep = mCep[0]
+
+  const semCep = mCep ? texto.replace(mCep[0], ' ') : texto
+  const candidatosTelefone = semCep.match(/(?:\+?55\s?)?\(?\d{2}\)?[\s.-]?9?\d{4}[\s.-]?\d{4}\b/g) ?? []
+  for (const candidato of candidatosTelefone) {
+    const normalizado = normalizarTelefoneDestinatarioBR(candidato)
+    if (normalizado) { dados.telefoneDestinatario = normalizado; break }
+  }
+
+  const mNumero = texto.match(/\bn[uú]mero\s*[:\-]?\s*(\d{1,5})\b/i) ?? texto.match(/\bn[º°]\s*(\d{1,5})\b/i)
+  if (mNumero) dados.numero = mNumero[1]
+
+  const reComplemento = new RegExp(`\\b(${COMPLEMENTOS_CONHECIDOS_LIVRE.join('|')})\\b.*$`, 'i')
+  const mComplemento = texto.match(reComplemento)
+  if (mComplemento) dados.complemento = mComplemento[0].trim()
+
+  const mNomes =
+    texto.match(/\b([A-ZÀ-Ýa-zà-ÿ]+)\s+(?:enviar|mandar|manda|envia)\s+(?:pra|para)\s+([A-ZÀ-Ýa-zà-ÿ]+)/i) ??
+    texto.match(/\bde\s+([A-ZÀ-Ýa-zà-ÿ]+)\s+(?:pra|para)\s+([A-ZÀ-Ýa-zà-ÿ]+)\b/i)
+  if (mNomes) {
+    dados.nomeComprador = mNomes[1]
+    dados.nomeDestinatario = mNomes[2]
+  }
+
+  return dados
+}
+
 /** true quando o cliente confirmou explicitamente que quer cartão impresso — ausência de resposta nunca bloqueia (equivale a "não"). */
 export function querCartaoImpresso(dados: FormularioEntregaDados): boolean {
   return dados.querCartaoImpresso != null && pareceConfirmacao(dados.querCartaoImpresso)
@@ -2049,7 +2114,20 @@ function mensagemEnderecoLocalizado(rua: string, bairro: string, cidade: string,
  */
 async function etapaFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil): Promise<ResultadoEtapa> {
   const formularioAnterior = estado.dados.formulario ?? {}
-  const extraido = extrairFormularioEntrega(mensagemCliente)
+  const extraidoRotulado = extrairFormularioEntrega(mensagemCliente)
+  // Nenhum campo rotulado ("Rótulo: valor") reconhecido — tenta ler vários
+  // campos de uma frase em linguagem natural (ver extrairFormularioEntregaLivre),
+  // mas só enquanto ainda estivermos na Etapa 1 (nome/telefone/CEP faltando).
+  // Depois que só sobra número/complemento, quem já trata resposta livre
+  // corretamente é extrairNumeroComplementoLivre mais abaixo — nunca deixa
+  // o reconhecimento genérico competir com ele (bug real: uma resposta como
+  // "105 apto 61" capturava só o complemento aqui e nunca mais chegava no
+  // fallback certo, porque extraido deixava de estar vazio).
+  const CAMPOS_ETAPA1_FORMULARIO = ['nomeComprador', 'nomeDestinatario', 'telefoneDestinatario', 'cep'] as const
+  const aindaFaltaAlgoDaEtapa1 = CAMPOS_ETAPA1_FORMULARIO.some(c => !formularioAnterior[c])
+  const extraido = Object.keys(extraidoRotulado).length > 0
+    ? extraidoRotulado
+    : aindaFaltaAlgoDaEtapa1 ? extrairFormularioEntregaLivre(mensagemCliente) : {}
   let formularioAtual: FormularioEntregaDados = { ...formularioAnterior, ...extraido }
   // Reaproveita a data de entrega já informada na etapa de detalhes do
   // produto (produto.dataEntrega, pergunta "Pra quando você precisa da

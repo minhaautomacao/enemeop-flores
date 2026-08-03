@@ -50,6 +50,7 @@ import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { validarTokenWebhook } from '../_shared/zapi-auth.ts';
 import { canSendWhatsAppMessage, mensagemDeOptOut, mensagemConfirmacaoOptOut } from '../_shared/whatsapp-guard.ts';
 import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
+import { registrarEventoInterpretacao, gateDeInterpretacaoEnvolvido, eventoDoResultado } from '../_shared/interpretador-telemetria.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -552,8 +553,16 @@ async function processarMensagem(phone: string, nomeRemetente: string | null, me
       respostaFinal = 'Oi! Pode me dizer seu nome pra eu te atender melhor?';
     } else {
       const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', telefone: phone, canal: 'whatsapp', canalId: phone, conversaId: conversaRow.id });
+      const faseAntesDoFunil = estado.fase;
+      const inicioFunilMs = Date.now();
       const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps, foraDoHorario, proximoHorarioTexto);
+      const duracaoFunilMs = Date.now() - inicioFunilMs;
       estado = resultado.estado;
+      // Telemetria da camada de interpretação contextual — mesmo critério de
+      // flora-internal-test/index.ts (referência de wiring), nunca bloqueante.
+      if (gateDeInterpretacaoEnvolvido(faseAntesDoFunil, estado)) {
+        void registrarEventoInterpretacao(eventoDoResultado(resultado, faseAntesDoFunil, conversaRow.id, duracaoFunilMs));
+      }
       if (estado.fase === 'transferido_humano') {
         // O funil decidiu internamente transferir (CEP/frete falhou, falha
         // ao gerar pagamento, ou fase inesperada) — a mensagem de

@@ -967,6 +967,30 @@ export function pareceNovaIntencaoDeCompra(mensagem: string, faseAtual: Fase): b
   return temSaudacao && temTipoProdutoOuOcasiao
 }
 
+// Subconjunto de FRASES_NOVO_PEDIDO que é puramente sobre CANCELAR (nunca
+// sobre trocar/começar um pedido novo) — historicamente agrupado junto
+// pra resolver um bug real ("cancele este pedido. Vamos fazer um novo"
+// ficava preso repetindo o link de pagamento antigo, ver monitoramento
+// 2026-07-24). Mas cancelamento PURO (sem nenhum sinal de que o cliente
+// quer um pedido novo na mesma mensagem) nunca deveria reiniciar a jornada
+// SILENCIOSAMENTE — reiniciar apaga produto/formulário/frete já coletados
+// sem o cliente nunca ter confirmado que é isso que ele quer (Prioridade:
+// "cancelamento, desistência e negativa indireta" tratados à parte de
+// "iniciar nova compra"; critério de rollout "zero cancelamento indevido").
+// Mensagens compostas (cancelar + sinal explícito de novo pedido/troca na
+// MESMA mensagem) continuam reiniciando direto — comportamento já coberto
+// pelo teste existente, nunca alterado aqui.
+const FRASES_CANCELAMENTO_PEDIDO = ['cancelar pedido', 'cancele o pedido', 'cancele este pedido', 'cancelar este pedido']
+
+export function pareceApenasCancelamento(mensagem: string, faseAtual: Fase): boolean {
+  if (!FASES_COMPRA_EM_ANDAMENTO.includes(faseAtual)) return false
+  const n = normalizarFrase(mensagem)
+  const temFraseDeCancelamento = FRASES_CANCELAMENTO_PEDIDO.some(p => n.includes(normalizarFrase(p)))
+  if (!temFraseDeCancelamento) return false
+  const outrosSinaisDeNovoPedido = FRASES_NOVO_PEDIDO.filter(p => !FRASES_CANCELAMENTO_PEDIDO.includes(p))
+  return !outrosSinaisDeNovoPedido.some(p => n.includes(normalizarFrase(p)))
+}
+
 /**
  * Reinicia a jornada: limpa produto, quantidade, data, endereço,
  * destinatário, cotação/quotationId, frete, total, pedidoId, preference e
@@ -1070,6 +1094,9 @@ const FRASES_QUER_PEDIDO_ANTERIOR = ['anterior', 'pedido anterior', 'o anterior'
 const CHAVE_GATE_RETOMADA = 'retomada_apos_intervalo'
 const INTENTS_VALIDAS_RETOMADA: IntencaoContextual[] = ['continuar_pedido_anterior', 'iniciar_nova_compra', 'falar_com_humano', 'ambigua', 'incompleta']
 
+/** Chave global (não amarrada a nenhuma fase específica) da confirmação de cancelamento aberta por uma frase de cancelamento puro (ver pareceApenasCancelamento) — checada no topo de avancarFunil, funciona não importa em qual fase o cliente estava. */
+const CHAVE_GATE_CANCELAMENTO_GLOBAL = 'confirmar_cancelamento_pedido'
+
 /**
  * Prompt mínimo necessário (nunca decide preço/disponibilidade/regra
  * comercial) pra camada de interpretação contextual resolver a ambiguidade
@@ -1109,6 +1136,9 @@ async function resolverRetomadaAposIntervalo(
   agora: Date,
 ): Promise<ResultadoEtapa | null> {
   const n = normalizarFrase(mensagemCliente)
+  const tentativasAnterioresParaDiag = estado.dados.tentativasInterpretacao?.[CHAVE_GATE_RETOMADA] ?? 0
+  const comDiagRetomada = (r: ResultadoEtapa | null, motivo: string, diag: Partial<DiagnosticoGateBinario> = {}): ResultadoEtapa | null =>
+    r ? { ...r, diagnosticoInterpretacao: { gate: CHAVE_GATE_RETOMADA, motivo, fallbackAcionado: false, tentativaNumero: tentativasAnterioresParaDiag, ...diag } } : null
 
   const resolverComoNovaCompra = (): ResultadoEtapa | null => {
     // Mesma pergunta de reaproveitamento de dados já usada quando "nova
@@ -1140,7 +1170,7 @@ async function resolverRetomadaAposIntervalo(
   }
 
   if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizarFrase(p)))) {
-    return resolverComoNovaCompra()
+    return comDiagRetomada(resolverComoNovaCompra(), 'nova_compra_deterministica', { intencaoPrimaria: 'iniciar_nova_compra' })
   }
 
   const trouxeDadosDoFormulario = Object.keys(extrairFormularioEntrega(mensagemCliente)).length > 0
@@ -1164,9 +1194,10 @@ async function resolverRetomadaAposIntervalo(
         ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString(),
         ultimaPergunta: undefined, tentativasInterpretacao: undefined,
       }
-      return etapaFormulario({ ...estado, fase: 'aguardando_formulario', dados: dadosLimpos }, mensagemCliente, deps)
+      const resultadoFormulario = await etapaFormulario({ ...estado, fase: 'aguardando_formulario', dados: dadosLimpos }, mensagemCliente, deps)
+      return comDiagRetomada(resultadoFormulario, 'continuar_com_dados_de_formulario', { intencaoPrimaria: 'continuar_pedido_anterior' })
     }
-    return resolverComoContinuar()
+    return comDiagRetomada(resolverComoContinuar(), 'continuar_deterministico', { intencaoPrimaria: 'continuar_pedido_anterior' })
   }
 
   // Caminho determinístico não decidiu — antes de repetir a pergunta,
@@ -1179,25 +1210,36 @@ async function resolverRetomadaAposIntervalo(
   const tentativasAnteriores = estado.dados.tentativasInterpretacao?.[CHAVE_GATE_RETOMADA] ?? 0
 
   const escolhaNumerica = tentativasAnteriores >= 2 ? detectarEscolhaNumericaRetomada(mensagemCliente) : null
-  if (escolhaNumerica === 'continuar') return resolverComoContinuar()
+  if (escolhaNumerica === 'continuar') return comDiagRetomada(resolverComoContinuar(), 'escolha_numerica', { intencaoPrimaria: 'continuar_pedido_anterior', tentativaNumero: tentativasAnteriores })
   // null aqui é um retorno intencional (mesmo contrato de resolverComoNovaCompra):
   // sinaliza pro chamador (avancarFunil) reiniciar a jornada normalmente,
   // nunca um erro — nunca substituído por resolverComoContinuar().
-  if (escolhaNumerica === 'nova') return resolverComoNovaCompra()
+  if (escolhaNumerica === 'nova') return comDiagRetomada(resolverComoNovaCompra(), 'escolha_numerica', { intencaoPrimaria: 'iniciar_nova_compra', tentativaNumero: tentativasAnteriores })
 
   const interpretado = await interpretarComFallback(deps, montarPromptInterpretacaoRetomada(estado), mensagemCliente)
+  const diagInterpretado: DiagnosticoGateBinario = {
+    intencaoPrimaria: interpretado?.intencaoPrimaria,
+    intencoesSecundarias: interpretado?.intencoesSecundarias,
+    confianca: interpretado?.confianca,
+    precisaEsclarecimento: interpretado?.precisaEsclarecimento,
+    fallbackAcionado: !!deps.interpretarIntencao && !interpretado,
+    tentativaNumero: tentativasAnteriores,
+  }
 
   if (interpretado && interpretado.confianca !== 'baixa' && !interpretado.precisaEsclarecimento) {
-    if (interpretado.intencaoPrimaria === 'continuar_pedido_anterior') return resolverComoContinuar()
+    if (interpretado.intencaoPrimaria === 'continuar_pedido_anterior') {
+      return { ...resolverComoContinuar(), diagnosticoInterpretacao: { gate: CHAVE_GATE_RETOMADA, motivo: 'continuar_interpretado', ...diagInterpretado } }
+    }
     if (interpretado.intencaoPrimaria === 'iniciar_nova_compra') {
       const resultado = resolverComoNovaCompra()
-      if (resultado) return resultado
+      if (resultado) return { ...resultado, diagnosticoInterpretacao: { gate: CHAVE_GATE_RETOMADA, motivo: 'nova_compra_interpretada', ...diagInterpretado } }
       return null
     }
     if (interpretado.intencaoPrimaria === 'falar_com_humano') {
       return {
         estado: transferirParaHumano(estado, 'falar_com_humano (gate retomada_apos_intervalo)'),
         mensagem: mensagemTransferencia(),
+        diagnosticoInterpretacao: { gate: CHAVE_GATE_RETOMADA, motivo: 'falar_com_humano', ...diagInterpretado },
       }
     }
   }
@@ -1217,6 +1259,7 @@ async function resolverRetomadaAposIntervalo(
       },
     },
     mensagem: mensagemEsclarecimentoPorTentativa(tentativas),
+    diagnosticoInterpretacao: { gate: CHAVE_GATE_RETOMADA, motivo: 'ambiguo_anti_loop', ...diagInterpretado, tentativaNumero: tentativas },
   }
 }
 
@@ -1356,6 +1399,19 @@ function reconhecimentoAberturaForaDoHorario(mensagemCliente: string): string {
  */
 function mensagemPerguntaReaproveitarDados(): string {
   return 'Você quer usar os mesmos dados de entrega do pedido anterior (destinatário, endereço e telefone)? Responda "sim" para reaproveitar, ou "não" para informar dados novos.'
+}
+
+/** Prompt mínimo pro gate de reaproveitamento de dados — mesma filosofia de montarPromptInterpretacaoRetomada (Fatia 1), restrito às duas únicas intenções válidas aqui. */
+function montarPromptReaproveitarDados(): string {
+  return [
+    'Você é um interpretador de intenção para um funil de vendas de flores (WhatsApp/Instagram). NUNCA decida preço, disponibilidade ou regras comerciais — só identifique a intenção do cliente na resposta abaixo.',
+    `A Flora acabou de perguntar ao cliente: "${mensagemPerguntaReaproveitarDados()}"`,
+    'Intenções válidas para esta resposta específica: confirmar, negar, ambigua, incompleta.',
+    'Considere "confirmar" respostas que aceitam reaproveitar os dados anteriores, mesmo indiretas ou informais.',
+    'Considere "negar" respostas que preferem informar dados novos.',
+    'Se não for possível ter certeza real, classifique como ambigua ou incompleta, com confianca "baixa" e precisaEsclarecimento true — nunca invente uma decisão que o texto não sustenta.',
+    'Responda APENAS com um JSON válido, sem texto antes ou depois, no formato exato: {"intencaoPrimaria": "...", "intencoesSecundarias": [], "entidades": {}, "camposParaAtualizar": [], "confianca": "alta"|"media"|"baixa", "evidenciaContextual": "...", "acaoRecomendada": "...", "precisaEsclarecimento": true|false}',
+  ].join('\n')
 }
 
 export function mensagemAvisoForaDoHorarioComOpcao(mensagemCliente = ''): string {
@@ -1877,6 +1933,20 @@ export interface ResultadoEtapa {
    * uma amarrada ao código/ID do produto real, nunca por posição. Quando
    * presente, tem prioridade sobre `fotoUrl` no envio. */
   fotos?: { codigo?: string; nome: string; url: string }[]
+  /**
+   * Diagnóstico da camada de interpretação contextual, presente só quando
+   * um gate que usa essa camada esteve envolvido nesta mensagem — nunca
+   * populado pelas outras ~30 etapas do funil que não usam interpretação
+   * (permanece `undefined` para elas, sem quebrar nenhum call site
+   * existente). Contrato estável pra quem chama `avancarFunil` (os 4
+   * canais reais) registrar telemetria sem nunca precisar ler
+   * `estado.dados` bruto (que pode conter nome/telefone/endereço) — ver
+   * `DiagnosticoInterpretacao` e `INTERPRETADOR_PRIVACIDADE.md`. `funil.ts`
+   * nunca importa nada pra fora (zero imports, ver cabeçalho) — este campo
+   * é o único acoplamento com telemetria, e é só um objeto de dados, nunca
+   * uma chamada de banco.
+   */
+  diagnosticoInterpretacao?: DiagnosticoInterpretacao
 }
 
 // "quero ele"/"quero ela" incluídos aqui (regressão real observada
@@ -1976,6 +2046,207 @@ function pareceConfirmacao(mensagem: string): boolean {
 function pareceNegacao(mensagem: string): boolean {
   const lower = mensagem.toLowerCase().trim()
   return PALAVRAS_NEGACAO.some(p => lower.includes(p))
+}
+
+// ── Gate binário genérico com interpretação contextual (Fatia 2 — correção
+// estrutural) ──────────────────────────────────────────────────────────────
+//
+// Generaliza o padrão do gate `resolverRetomadaAposIntervalo` (Fatia 1) pra
+// qualquer ponto do funil que hoje decide só por pareceConfirmacao/
+// pareceNegacao, sem memória da pergunta pendente nem fallback pra
+// formulações inéditas. Cada gate que passa a usar isto ganha, de graça:
+// interpretação contextual pra respostas ambíguas, proteção anti-loop
+// (reformula → opções numeradas → oferece humano, nunca repete a mesma
+// pergunta duas vezes seguidas), e reconhecimento de que a resposta pode não
+// ser um "sim"/"não" puro (cancelamento, troca de produto/dado, pergunta de
+// preço etc.) sem descartar essa informação.
+//
+// Regra de custo/segurança: o caminho determinístico rápido só resolve
+// sozinho quando a mensagem, depois de normalizada, é EXATAMENTE uma palavra
+// de confirmação/negação conhecida — nunca um prefixo/sufixo dela. Isso é
+// deliberadamente mais restrito que `pareceConfirmacao`/`pareceNegacao`
+// (usadas em gates mais antigos): "sim" sozinho nunca precisa do modelo,
+// mas "sim, mas troca o endereço" não pode ser resolvido só pela palavra
+// "sim" — precisa passar pelo interpretador pra nunca descartar a troca.
+// Quando não há interpretador conectado (canal sem rollout, ou o modelo
+// falhou/expirou), cai de volta no comportamento determinístico mais
+// permissivo de sempre (`pareceConfirmacao`/`pareceNegacao`) — nunca pior
+// que o gate era antes desta camada.
+
+export interface ConfigGateBinario {
+  /** Identificador estável do gate (nunca o texto da pergunta) — chave de tentativasInterpretacao/ultimaPergunta, sobrevive a reformulações. */
+  chave: string
+  perguntaAtual: string
+  perguntaReformulada: string
+  perguntaComOpcoes: string
+  /** Intenções contextuais que fazem sentido nesta pergunta específica — sempre inclui ao menos confirmar/negar. */
+  intentsValidas: IntencaoContextual[]
+  /** Linhas extras de contexto pro prompt (produto/fase/dados relevantes) — nunca decide preço/regra comercial, só dá contexto textual. */
+  linhasContexto: string[]
+}
+
+/**
+ * Diagnóstico de UMA decisão do gate binário — nunca inclui o texto da
+ * mensagem do cliente nem valores de campo (só nomes/metadados), pra poder
+ * ser persistido em telemetria sem risco de vazar dado pessoal (ver
+ * INTERPRETADOR_PRIVACIDADE.md). `fallbackAcionado` é true só quando o
+ * interpretador foi de fato chamado E não devolveu um resultado usável
+ * nesta mensagem específica — nunca confundido com "canal sem rollout"
+ * (aí nunca chega a chamar nada, então é `false`, comportamento normal).
+ */
+export interface DiagnosticoGateBinario {
+  intencaoPrimaria?: IntencaoContextual
+  intencoesSecundarias?: IntencaoContextual[]
+  confianca?: NivelConfianca
+  precisaEsclarecimento?: boolean
+  fallbackAcionado: boolean
+  tentativaNumero: number
+}
+
+/**
+ * Mesmo diagnóstico acima, mais o identificador do gate e (quando houve
+ * mudança real de dado) os nomes dos campos alterados — nunca os valores.
+ * É exatamente o subconjunto de campos que `funil_interpretacao_eventos`
+ * persiste (ver migration 202608030001) — qualquer campo novo pedido por
+ * telemetria deve nascer aqui, nunca ser lido de `estado.dados` bruto por
+ * quem chama.
+ */
+export interface DiagnosticoInterpretacao extends DiagnosticoGateBinario {
+  gate: string
+  /** Motivo curto e não-livre da decisão (ex.: 'confirmou', 'cancelamento_pendente_confirmacao', 'trocou_produto') — nunca texto do cliente nem frase gerada por IA. */
+  motivo: string
+  /** Nomes dos campos que mudaram nesta mensagem — nunca os valores antes/depois. */
+  camposAlterados?: string[]
+}
+
+export type ResultadoGateBinario =
+  | { decisao: 'confirmou'; diagnostico: DiagnosticoGateBinario }
+  | { decisao: 'negou'; diagnostico: DiagnosticoGateBinario }
+  /** O cliente respondeu outra coisa reconhecível (cancelar, trocar produto/dado, pergunta, falar com humano...), sozinha ou junto de confirmar/negar (ação composta) — nunca descartada. */
+  | { decisao: 'outra'; resultado: ResultadoInterpretacao; diagnostico: DiagnosticoGateBinario }
+  | { decisao: 'pendente'; estado: EstadoConversa; mensagem: string; diagnostico: DiagnosticoGateBinario }
+
+function respostaBinariaLimpa(mensagem: string, palavras: string[]): boolean {
+  const n = normalizarFrase(mensagem)
+  return palavras.some(p => n === normalizarFrase(p))
+}
+
+/** "1"/"2" isolado em resposta às opções numeradas (2ª+ falha) — fast-path determinístico, nunca precisa do modelo pra isso. Generaliza detectarEscolhaNumericaRetomada pra qualquer gate binário. */
+function detectarEscolhaNumericaSimNao(mensagemCliente: string): 'sim' | 'nao' | null {
+  const numeros = extrairNumeros(mensagemCliente)
+  if (numeros.length !== 1) return null
+  if (numeros[0] === 1) return 'sim'
+  if (numeros[0] === 2) return 'nao'
+  return null
+}
+
+function montarPromptGateBinario(cfg: ConfigGateBinario): string {
+  return [
+    'Você é um interpretador de intenção para um funil de vendas de flores (WhatsApp/Instagram). NUNCA decida preço, disponibilidade ou regras comerciais — só identifique a intenção do cliente na resposta abaixo.',
+    `A Flora acabou de perguntar/mostrar ao cliente: "${cfg.perguntaAtual}"`,
+    ...cfg.linhasContexto,
+    `Intenções válidas para esta resposta específica: ${cfg.intentsValidas.join(', ')}.`,
+    'Considere "confirmar" respostas afirmativas diretas ou indiretas, mesmo com erro de digitação, sem acento, abreviadas ou informais.',
+    'Considere "negar" respostas negativas diretas ou indiretas, inclusive quando o cliente rejeita implicitamente ao pedir outra coisa em vez de seguir.',
+    'Se o cliente pedir para cancelar ou desistir do pedido, classifique como cancelar ou desistir — nunca como negar simples.',
+    'Se o cliente perguntar preço, disponibilidade, prazo ou forma de entrega antes de responder, classifique a pergunta correspondente (perguntar_preco/perguntar_disponibilidade/perguntar_prazo/perguntar_entrega).',
+    'Se o cliente quiser trocar o produto, o pedido, a quantidade, ou corrigir/alterar um dado (destinatário, endereço, data, horário, mensagem do cartão), classifique a intenção específica de troca/alteração correspondente. Preencha "entidades" só com os valores que o próprio texto realmente traz (nunca invente um valor que o cliente não disse), usando EXATAMENTE estas chaves quando aplicável: nomeDestinatario, nomeComprador, telefoneDestinatario, cep, rua, numero, complemento, bairro, dataEntrega, periodo, quantidade, mensagemCartao — nunca outras chaves. Liste em "camposParaAtualizar" o nome de cada uma dessas chaves que você preencheu.',
+    'Se o cliente pedir explicitamente para falar com uma pessoa/atendente, classifique como falar_com_humano.',
+    'Mensagens podem trazer mais de uma intenção ao mesmo tempo (ex.: "sim, mas troca o endereço", "mantém o pedido e entrega amanhã") — registre a intenção principal em intencaoPrimaria e as demais em intencoesSecundarias, na ordem em que aparecem no texto, sem descartar nenhuma.',
+    'Se não for possível ter certeza real, classifique como ambigua (mensagem existe mas não dá pra saber) ou incompleta (faltou informação), com confianca "baixa" e precisaEsclarecimento true — nunca invente uma decisão que o texto não sustenta.',
+    'Responda APENAS com um JSON válido, sem texto antes ou depois, no formato exato: {"intencaoPrimaria": "...", "intencoesSecundarias": [], "entidades": {}, "camposParaAtualizar": [], "confianca": "alta"|"media"|"baixa", "evidenciaContextual": "...", "acaoRecomendada": "...", "precisaEsclarecimento": true|false}',
+  ].join('\n')
+}
+
+function mensagemGateBinarioPorTentativa(cfg: ConfigGateBinario, tentativas: number): string {
+  if (tentativas <= 0) return cfg.perguntaAtual
+  if (tentativas === 1) return cfg.perguntaReformulada
+  return cfg.perguntaComOpcoes
+}
+
+/** Limpa ultimaPergunta/tentativasInterpretacao — só no único caminho de sucesso de cada gate, nunca silenciosamente (mesma regra da Fatia 1). */
+function limparPendenciaInterpretacao(dados: DadosPedido): DadosPedido {
+  return { ...dados, ultimaPergunta: undefined, tentativasInterpretacao: undefined }
+}
+
+async function avaliarGateBinario(
+  cfg: ConfigGateBinario,
+  estado: EstadoConversa,
+  mensagemCliente: string,
+  deps: DependenciasFunil,
+): Promise<ResultadoGateBinario> {
+  const tentativasAnteriores = estado.dados.tentativasInterpretacao?.[cfg.chave] ?? 0
+  const diagnosticoSemChamada = (intencaoPrimaria?: IntencaoContextual): DiagnosticoGateBinario => ({
+    intencaoPrimaria, fallbackAcionado: false, tentativaNumero: tentativasAnteriores,
+  })
+
+  if (respostaBinariaLimpa(mensagemCliente, PALAVRAS_CONFIRMACAO)) return { decisao: 'confirmou', diagnostico: diagnosticoSemChamada('confirmar') }
+  if (respostaBinariaLimpa(mensagemCliente, PALAVRAS_NEGACAO)) return { decisao: 'negou', diagnostico: diagnosticoSemChamada('negar') }
+
+  // Sem interpretador conectado: mantém o comportamento determinístico mais
+  // permissivo de sempre — nunca pior que o gate era antes desta camada.
+  // Nunca conta como fallback_acionado (nada foi chamado pra falhar).
+  if (!deps.interpretarIntencao) {
+    if (pareceConfirmacao(mensagemCliente)) return { decisao: 'confirmou', diagnostico: diagnosticoSemChamada('confirmar') }
+    if (pareceNegacao(mensagemCliente)) return { decisao: 'negou', diagnostico: diagnosticoSemChamada('negar') }
+  }
+
+  const escolhaNumerica = tentativasAnteriores >= 2 ? detectarEscolhaNumericaSimNao(mensagemCliente) : null
+  if (escolhaNumerica === 'sim') return { decisao: 'confirmou', diagnostico: diagnosticoSemChamada('confirmar') }
+  if (escolhaNumerica === 'nao') return { decisao: 'negou', diagnostico: diagnosticoSemChamada('negar') }
+
+  const interpretado = await interpretarComFallback(deps, montarPromptGateBinario(cfg), mensagemCliente)
+  if (interpretado && interpretado.confianca !== 'baixa' && !interpretado.precisaEsclarecimento) {
+    const composta = interpretado.intencoesSecundarias.length > 0
+    const diagnosticoInterpretado: DiagnosticoGateBinario = {
+      intencaoPrimaria: interpretado.intencaoPrimaria,
+      intencoesSecundarias: interpretado.intencoesSecundarias,
+      confianca: interpretado.confianca,
+      precisaEsclarecimento: interpretado.precisaEsclarecimento,
+      fallbackAcionado: false,
+      tentativaNumero: tentativasAnteriores,
+    }
+    if (interpretado.intencaoPrimaria === 'confirmar' && !composta) return { decisao: 'confirmou', diagnostico: diagnosticoInterpretado }
+    if (interpretado.intencaoPrimaria === 'negar' && !composta) return { decisao: 'negou', diagnostico: diagnosticoInterpretado }
+    if (interpretado.intencaoPrimaria !== 'ambigua' && interpretado.intencaoPrimaria !== 'incompleta') {
+      return { decisao: 'outra', resultado: interpretado, diagnostico: diagnosticoInterpretado }
+    }
+  }
+
+  // Chegou até aqui sem decidir. `fallbackAcionado` é true só quando o
+  // interpretador foi chamado e falhou de verdade (null/timeout/JSON
+  // inválido) — nunca quando ele respondeu com confiança baixa/precisa
+  // esclarecimento/ambígua/incompleta: isso é o modelo funcionando
+  // corretamente e admitindo incerteza, um sinal de produto (registrado à
+  // parte em `confianca`/`precisaEsclarecimento`), não uma falha de
+  // infraestrutura.
+  const fallbackAcionado = !!deps.interpretarIntencao && !interpretado
+  if (!interpretado) {
+    if (pareceConfirmacao(mensagemCliente)) return { decisao: 'confirmou', diagnostico: { fallbackAcionado, tentativaNumero: tentativasAnteriores } }
+    if (pareceNegacao(mensagemCliente)) return { decisao: 'negou', diagnostico: { fallbackAcionado, tentativaNumero: tentativasAnteriores } }
+  }
+
+  const tentativas = tentativasAnteriores + 1
+  return {
+    decisao: 'pendente',
+    diagnostico: {
+      intencaoPrimaria: interpretado?.intencaoPrimaria,
+      intencoesSecundarias: interpretado?.intencoesSecundarias,
+      confianca: interpretado?.confianca,
+      precisaEsclarecimento: interpretado?.precisaEsclarecimento,
+      fallbackAcionado,
+      tentativaNumero: tentativas,
+    },
+    estado: {
+      ...estado,
+      dados: {
+        ...estado.dados,
+        ultimaPergunta: { chave: cfg.chave, textoExibido: cfg.perguntaAtual, intentsValidas: cfg.intentsValidas },
+        tentativasInterpretacao: { ...estado.dados.tentativasInterpretacao, [cfg.chave]: tentativas },
+      },
+    },
+    mensagem: mensagemGateBinarioPorTentativa(cfg, tentativas),
+  }
 }
 
 // ── Catálogo conversacional dinâmico (categorias reais, ao vivo) ──────────
@@ -2753,44 +3024,166 @@ function pareceRejeicaoSemCampo(mensagem: string): boolean {
 }
 
 /** Coleta a confirmação dos dados do formulário — nunca cota frete antes disso (Parte 3.3/3.4). Cliente pode corrigir um campo em vez de confirmar; nunca perde os dados já certos. */
-async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, agora: Date): Promise<ResultadoEtapa> {
-  if (!pareceConfirmacao(mensagemCliente)) {
-    const rotulada = extrairFormularioEntrega(mensagemCliente)
-    const correcao = Object.keys(rotulada).length > 0 ? limparCamposCorrecao(rotulada) : extrairCorrecaoLivre(mensagemCliente)
+const CHAVE_GATE_CONFIRMANDO_FORMULARIO = 'confirmando_formulario'
+const CHAVE_GATE_CANCELAMENTO_FORMULARIO = 'cancelamento_confirmando_formulario'
+const INTENTS_VALIDAS_CONFIRMANDO_FORMULARIO: IntencaoContextual[] = [
+  'confirmar', 'negar', 'cancelar', 'desistir', 'trocar_produto',
+  'alterar_destinatario', 'alterar_endereco', 'alterar_data', 'alterar_horario',
+  'corrigir_informacao', 'substituir_informacao',
+  'perguntar_preco', 'perguntar_disponibilidade', 'perguntar_prazo', 'perguntar_entrega', 'falar_com_humano',
+  'ambigua', 'incompleta',
+]
 
-    if (correcao && Object.keys(correcao).length > 0) {
-      const formularioAtualizado = { ...(estado.dados.formulario ?? {}), ...correcao }
-      // Corrigir qualquer campo do formulário invalida uma cotação anterior
-      // (Parte 4: "mudança de endereço invalida a cotação") — nunca deixa
-      // uma cotação de um endereço/data diferente sobreviver pra aprovação.
+function configGateConfirmandoFormulario(estado: EstadoConversa): ConfigGateBinario {
+  const resumo = montarResumoFormulario(estado.dados.formulario ?? {})
+  return {
+    chave: CHAVE_GATE_CONFIRMANDO_FORMULARIO,
+    perguntaAtual: resumo,
+    // Reformulações continuam mostrando o resumo (nunca só a pergunta) —
+    // o cliente precisa ver os dados reais pra saber o que está
+    // confirmando/corrigindo, mesmo numa 1ª/2ª tentativa sem sucesso.
+    perguntaReformulada: `Só confirmando os dados abaixo: eles estão certos, ou algo precisa ser corrigido?\n\n${resumo}`,
+    perguntaComOpcoes: `Não consegui identificar sua resposta. Pode escolher uma das opções abaixo (vale número, texto, ou do seu jeito):\n\n1. Sim, os dados estão certos\n2. Não, preciso corrigir algo\n\nSe preferir, também posso te transferir para um atendente.\n\n${resumo}`,
+    intentsValidas: INTENTS_VALIDAS_CONFIRMANDO_FORMULARIO,
+    linhasContexto: [],
+  }
+}
+
+/** Aplica ao formulário qualquer campo que o interpretador contextual indicou em camposParaAtualizar com valor em entidades — último recurso, só quando os parsers determinísticos (extrairFormularioEntrega/extrairCorrecaoLivre) já não encontraram nada; nunca inventa um campo fora desta lista. */
+function aplicarCamposInterpretados(resultado: ResultadoInterpretacao): Partial<FormularioEntregaDados> {
+  const camposValidos: (keyof FormularioEntregaDados)[] = ['nomeComprador', 'nomeDestinatario', 'telefoneDestinatario', 'cep', 'rua', 'numero', 'complemento', 'bairro', 'dataEntrega', 'periodo']
+  const aplicado: Partial<FormularioEntregaDados> = {}
+  for (const campo of resultado.camposParaAtualizar) {
+    if (!camposValidos.includes(campo as keyof FormularioEntregaDados)) continue
+    const valor = resultado.entidades[campo]
+    if (typeof valor === 'string' && valor.trim()) (aplicado as Record<string, string>)[campo] = limparValorCorrecao(valor)
+  }
+  return aplicado
+}
+
+async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, agora: Date): Promise<ResultadoEtapa> {
+  // Correção determinística (rotulada ou em linguagem livre) tem prioridade
+  // sobre qualquer outra leitura da mensagem — nunca descarta uma correção
+  // reconhecível só porque a mensagem também soa como confirmação (ex.:
+  // "sim destinatário é Maria" corrige o destinatário em vez de confirmar
+  // cegamente com o dado antigo).
+  const rotulada = extrairFormularioEntrega(mensagemCliente)
+  const correcao = Object.keys(rotulada).length > 0 ? limparCamposCorrecao(rotulada) : extrairCorrecaoLivre(mensagemCliente)
+  if (correcao && Object.keys(correcao).length > 0) {
+    const formularioAtualizado = { ...(estado.dados.formulario ?? {}), ...correcao }
+    // Corrigir qualquer campo do formulário invalida uma cotação anterior
+    // (Parte 4: "mudança de endereço invalida a cotação") — nunca deixa
+    // uma cotação de um endereço/data diferente sobreviver pra aprovação.
+    const dadosSemCotacaoAntiga: DadosPedido = {
+      ...limparPendenciaInterpretacao(estado.dados),
+      formulario: formularioAtualizado,
+      valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined,
+      entregaPrometidaEmISO: undefined, despachoEmISO: undefined, entregaImediata: undefined,
+    }
+    return {
+      estado: { ...estado, dados: dadosSemCotacaoAntiga },
+      mensagem: montarResumoFormulario(formularioAtualizado),
+    }
+  }
+
+  // Sub-gate de confirmação de cancelamento, se estava pendente.
+  if (estado.dados.ultimaPergunta?.chave === CHAVE_GATE_CANCELAMENTO_FORMULARIO) {
+    const decisaoCancelamento = await avaliarGateBinario(
+      { chave: CHAVE_GATE_CANCELAMENTO_FORMULARIO, perguntaAtual: mensagemConfirmarCancelamentoPedido(), perguntaReformulada: 'Só confirmando: você quer cancelar este pedido mesmo, ou prefere continuar?', perguntaComOpcoes: '1. Sim, cancelar\n2. Não, continuar o pedido', intentsValidas: INTENTS_VALIDAS_CANCELAMENTO, linhasContexto: [] },
+      estado, mensagemCliente, deps,
+    )
+    const diagCancelamento = (motivo: string): DiagnosticoInterpretacao => ({ ...decisaoCancelamento.diagnostico, gate: CHAVE_GATE_CANCELAMENTO_FORMULARIO, motivo })
+    if (decisaoCancelamento.decisao === 'confirmou') {
+      return {
+        estado: { ...estado, fase: 'encerrado_sem_venda', dados: { ...limparPendenciaInterpretacao(estado.dados), produto: undefined, formulario: undefined } },
+        mensagem: 'Seu pedido foi cancelado, sem custo nenhum. Se quiser começar um novo pedido, é só me chamar!',
+        diagnosticoInterpretacao: diagCancelamento('cancelamento_confirmado'),
+      }
+    }
+    if (decisaoCancelamento.decisao === 'negou') {
+      const dadosSemPendencia = limparPendenciaInterpretacao(estado.dados)
+      return { estado: { ...estado, dados: dadosSemPendencia }, mensagem: `Combinado, seguimos com o pedido!\n\n${montarResumoFormulario(dadosSemPendencia.formulario ?? {})}`, diagnosticoInterpretacao: diagCancelamento('cancelamento_desistido') }
+    }
+    if (decisaoCancelamento.decisao === 'outra' && decisaoCancelamento.resultado.intencaoPrimaria === 'falar_com_humano') {
+      return { estado: transferirParaHumano(estado, 'falar_com_humano (confirmação de cancelamento)'), mensagem: mensagemTransferencia(), diagnosticoInterpretacao: diagCancelamento('falar_com_humano') }
+    }
+    if (decisaoCancelamento.decisao === 'pendente') return { estado: decisaoCancelamento.estado, mensagem: decisaoCancelamento.mensagem, diagnosticoInterpretacao: diagCancelamento('cancelamento_ambiguo_anti_loop') }
+    return { estado, mensagem: mensagemConfirmarCancelamentoPedido(), diagnosticoInterpretacao: diagCancelamento('cancelamento_outra_intencao_nao_tratada') }
+  }
+
+  const decisao = await avaliarGateBinario(configGateConfirmandoFormulario(estado), estado, mensagemCliente, deps)
+
+  if (decisao.decisao === 'negou') {
+    const dadosSemPendencia = limparPendenciaInterpretacao(estado.dados)
+    // "está errado"/"tá errado" sozinho, sem indicar qual campo: bug real —
+    // a Flora repetia o mesmo resumo sem perguntar nada. Agora pergunta
+    // objetivamente qual dado corrigir; só reenvia o resumo depois de uma
+    // correção real.
+    if (pareceRejeicaoSemCampo(mensagemCliente)) {
+      return { estado: { ...estado, dados: dadosSemPendencia }, mensagem: 'Qual dado você deseja corrigir?', diagnosticoInterpretacao: { ...decisao.diagnostico, gate: CHAVE_GATE_CONFIRMANDO_FORMULARIO, motivo: 'negou_sem_campo' } }
+    }
+    return { estado: { ...estado, dados: dadosSemPendencia }, mensagem: `Sem problemas — me avisa quando os dados estiverem certos.\n\n${montarResumoFormulario(dadosSemPendencia.formulario ?? {})}`, diagnosticoInterpretacao: { ...decisao.diagnostico, gate: CHAVE_GATE_CONFIRMANDO_FORMULARIO, motivo: 'negou' } }
+  }
+
+  if (decisao.decisao === 'outra') {
+    const resultado = decisao.resultado
+    const intencoes = new Set<IntencaoContextual>([resultado.intencaoPrimaria, ...resultado.intencoesSecundarias])
+    const diagOutra = (motivo: string, camposAlterados?: string[]): DiagnosticoInterpretacao => ({ ...decisao.diagnostico, gate: CHAVE_GATE_CONFIRMANDO_FORMULARIO, motivo, camposAlterados })
+
+    if (intencoes.has('cancelar') || intencoes.has('desistir')) {
+      return {
+        estado: { ...estado, dados: { ...limparPendenciaInterpretacao(estado.dados), ultimaPergunta: { chave: CHAVE_GATE_CANCELAMENTO_FORMULARIO, textoExibido: mensagemConfirmarCancelamentoPedido(), intentsValidas: INTENTS_VALIDAS_CANCELAMENTO } } },
+        mensagem: mensagemConfirmarCancelamentoPedido(),
+        diagnosticoInterpretacao: diagOutra('cancelamento_pendente_confirmacao'),
+      }
+    }
+    if (intencoes.has('falar_com_humano')) {
+      return { estado: transferirParaHumano(estado, 'falar_com_humano (gate confirmando_formulario)'), mensagem: mensagemTransferencia(), diagnosticoInterpretacao: diagOutra('falar_com_humano') }
+    }
+    if (intencoes.has('trocar_produto')) {
+      return {
+        estado: {
+          ...estado,
+          fase: 'escolha_categoria',
+          dados: { ...limparPendenciaInterpretacao(estado.dados), produto: undefined, valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined, categoriaEscolhida: undefined, opcoesRecomendadas: undefined, recomendacaoApresentada: undefined },
+        },
+        mensagem: 'Sem problemas! Me conta o que você procura (cor, estilo, ocasião), ou posso te mostrar as categorias de novo.',
+        diagnosticoInterpretacao: diagOutra('trocou_produto'),
+      }
+    }
+    // Correção em formulação inédita, não coberta pelos parsers
+    // determinísticos acima — último recurso, só aplica campos que o
+    // próprio interpretador aponta explicitamente em camposParaAtualizar.
+    const camposInterpretados = aplicarCamposInterpretados(resultado)
+    if (Object.keys(camposInterpretados).length > 0) {
+      const formularioAtualizado = { ...(estado.dados.formulario ?? {}), ...camposInterpretados }
       const dadosSemCotacaoAntiga: DadosPedido = {
-        ...estado.dados,
+        ...limparPendenciaInterpretacao(estado.dados),
         formulario: formularioAtualizado,
         valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined,
         entregaPrometidaEmISO: undefined, despachoEmISO: undefined, entregaImediata: undefined,
       }
-      return {
-        estado: { ...estado, dados: dadosSemCotacaoAntiga },
-        mensagem: montarResumoFormulario(formularioAtualizado),
-      }
+      return { estado: { ...estado, dados: dadosSemCotacaoAntiga }, mensagem: montarResumoFormulario(formularioAtualizado), diagnosticoInterpretacao: diagOutra('corrigiu_campo_interpretado', Object.keys(camposInterpretados)) }
     }
-
-    // "está errado"/"tá errado" sozinho, sem indicar qual campo: bug real —
-    // a Flora repetia o mesmo resumo sem perguntar nada. Agora pergunta
-    // objetivamente qual dado corrigir; só reenvia o resumo depois de uma
-    // correção real. Mensagens não reconhecidas como rejeição "vazia" caem
-    // no comportamento já existente (reenvia o resumo, pede confirmação).
-    if (pareceRejeicaoSemCampo(mensagemCliente)) {
-      return { estado, mensagem: 'Qual dado você deseja corrigir?' }
+    if (intencoes.has('perguntar_disponibilidade') || intencoes.has('perguntar_prazo') || intencoes.has('perguntar_entrega') || intencoes.has('perguntar_preco')) {
+      const dadosSemPendencia = limparPendenciaInterpretacao(estado.dados)
+      return { estado: { ...estado, dados: dadosSemPendencia }, mensagem: `Ainda vamos calcular o frete depois de confirmar os dados de entrega — o total sai na próxima etapa.\n\n${montarResumoFormulario(dadosSemPendencia.formulario ?? {})}`, diagnosticoInterpretacao: diagOutra('respondeu_pergunta') }
     }
-
-    return { estado, mensagem: `Sem problemas — me avisa quando os dados estiverem certos.\n\n${montarResumoFormulario(estado.dados.formulario ?? {})}` }
+    return { estado, mensagem: `Sem problemas — me avisa quando os dados estiverem certos.\n\n${montarResumoFormulario(estado.dados.formulario ?? {})}`, diagnosticoInterpretacao: diagOutra('outra_intencao_nao_tratada') }
   }
+
+  if (decisao.decisao === 'pendente') {
+    return { estado: decisao.estado, mensagem: decisao.mensagem, diagnosticoInterpretacao: { ...decisao.diagnostico, gate: CHAVE_GATE_CONFIRMANDO_FORMULARIO, motivo: 'ambiguo_anti_loop' } }
+  }
+
+  // decisao.decisao === 'confirmou'
+  estado = { ...estado, dados: limparPendenciaInterpretacao(estado.dados) }
+  const diagConfirmouFormulario = (motivo: string): DiagnosticoInterpretacao => ({ ...decisao.diagnostico, gate: CHAVE_GATE_CONFIRMANDO_FORMULARIO, motivo })
 
   if (!estado.dados.formulario || !formularioCompleto(estado.dados.formulario)) {
     // Estado inconsistente (nunca deveria chegar aqui sem formulário
     // completo) — nunca cota frete com dados incompletos, reenvia o formulário.
-    return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA }
+    return { estado: { ...estado, fase: 'aguardando_formulario' }, mensagem: TEXTO_FORMULARIO_ENTREGA, diagnosticoInterpretacao: diagConfirmouFormulario('confirmou_formulario_incompleto') }
   }
 
   // Data de entrega tem que ser reconhecível e nunca no passado ANTES de
@@ -2802,6 +3195,7 @@ async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemClient
     return {
       estado: { ...estado, fase: 'confirmando_formulario' },
       mensagem: 'Não consegui identificar a data de entrega — pode confirmar usando "hoje", "amanhã", o dia da semana ou uma data no formato DD/MM?',
+      diagnosticoInterpretacao: diagConfirmouFormulario('confirmou_data_invalida'),
     }
   }
 
@@ -2811,7 +3205,249 @@ async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemClient
     dataEntregaSolicitada: dataParseada!,
     periodoEntrega: normalizarPeriodoEntregaTexto(estado.dados.formulario.periodo),
   }
-  return etapaCalculoFrete({ ...estadoSincronizado, dados: dadosComDataTipada, fase: 'calculando_frete' }, deps, agora)
+  const resultadoCalculoFrete = await etapaCalculoFrete({ ...estadoSincronizado, dados: dadosComDataTipada, fase: 'calculando_frete' }, deps, agora)
+  return { ...resultadoCalculoFrete, diagnosticoInterpretacao: diagConfirmouFormulario('confirmou_avancou_para_frete') }
+}
+
+// Chaves estáveis dos gates desta etapa na proteção anti-loop/interpretação
+// contextual — nunca o texto da pergunta em si, pra sobreviver a reformulações.
+const CHAVE_GATE_APROVACAO_FRETE = 'aprovacao_frete'
+const CHAVE_GATE_CANCELAMENTO_APROVACAO_FRETE = 'cancelamento_aprovacao_frete'
+const INTENTS_VALIDAS_APROVACAO_FRETE: IntencaoContextual[] = [
+  'confirmar', 'negar', 'cancelar', 'desistir', 'trocar_produto', 'alterar_quantidade',
+  'alterar_destinatario', 'alterar_endereco', 'alterar_data', 'alterar_horario', 'alterar_mensagem_cartao',
+  'corrigir_informacao', 'substituir_informacao',
+  'perguntar_preco', 'perguntar_disponibilidade', 'perguntar_prazo', 'perguntar_entrega', 'falar_com_humano',
+  'ambigua', 'incompleta',
+]
+const INTENTS_VALIDAS_CANCELAMENTO: IntencaoContextual[] = ['confirmar', 'negar', 'falar_com_humano', 'ambigua', 'incompleta']
+
+/** Campos do formulário cuja alteração invalida a cotação de frete já feita (Parte 4: endereço/data novos exigem recotar) — nome/telefone/complemento não mudam a entrega em si. */
+const CAMPOS_FORMULARIO_QUE_INVALIDAM_COTACAO: (keyof FormularioEntregaDados)[] = ['cep', 'rua', 'numero', 'bairro', 'dataEntrega']
+
+function mensagemConfirmarCancelamentoPedido(): string {
+  return 'Você quer mesmo cancelar esse pedido? Nada foi cobrado ainda. Responda "sim" para cancelar, ou "não" para continuar de onde paramos.'
+}
+
+function configGateAprovacaoFrete(estado: EstadoConversa): ConfigGateBinario {
+  return {
+    chave: CHAVE_GATE_APROVACAO_FRETE,
+    perguntaAtual: montarMensagemAprovacaoFrete(estado.dados),
+    perguntaReformulada: 'Só quero confirmar: posso seguir com o pedido nesses termos, ou você prefere mudar alguma coisa antes?',
+    perguntaComOpcoes: 'Não consegui identificar sua resposta. Pode escolher uma das opções abaixo (vale número, texto, ou do seu jeito):\n\n1. Sim, pode seguir\n2. Não, quero mudar algo\n\nSe preferir, também posso te transferir para um atendente.',
+    intentsValidas: INTENTS_VALIDAS_APROVACAO_FRETE,
+    linhasContexto: [
+      `Produto combinado: ${estado.dados.produto?.nome ?? 'não informado'} (quantidade ${estado.dados.produto?.quantidade ?? 1}).`,
+      `Total combinado até agora: ${formatarPreco(estado.dados.valorTotal)}.`,
+    ],
+  }
+}
+
+/** Extrai a mesma correção de campo (rotulada ou em linguagem livre) já usada em etapaConfirmandoFormulario — reaproveitada aqui pra nunca duplicar a lógica de reconhecer "o endereço agora é..."/"CEP: ..." etc. */
+function extrairCorrecaoFormulario(mensagemCliente: string): Partial<FormularioEntregaDados> {
+  const rotulada = extrairFormularioEntrega(mensagemCliente)
+  if (Object.keys(rotulada).length > 0) return limparCamposCorrecao(rotulada)
+  const livre = extrairCorrecaoLivre(mensagemCliente)
+  if (livre) return livre
+  // Último recurso: reconhece CEP/número/complemento soltos no texto, sem
+  // exigir o conector "é/eh/para" (ex.: "número 55, cep 04204-030") — mesmo
+  // parser já usado na coleta inicial do formulário (extrairFormularioEntregaLivre).
+  return extrairFormularioEntregaLivre(mensagemCliente)
+}
+
+// "entrega amanhã"/"pode ser sábado" — data mencionada solta no meio da
+// frase, sem o conector "data... é/para" que extrairCorrecaoFormulario
+// exige. Reconhece só os mesmos termos que normalizarDataEntregaTexto sabe
+// interpretar (hoje/amanhã/dia da semana/DD-MM) — nunca inventa uma data
+// que o texto não traga literalmente.
+const REGEX_DATA_LIVRE_EM_MENSAGEM = /\b(hoje|amanha|segunda(?:-?feira)?|terca(?:-?feira)?|quarta(?:-?feira)?|quinta(?:-?feira)?|sexta(?:-?feira)?|sabado|domingo|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/i
+
+function extrairDataLivreDeMensagem(mensagemCliente: string): string | undefined {
+  const m = normalizar(mensagemCliente).match(REGEX_DATA_LIVRE_EM_MENSAGEM)
+  return m?.[1]
+}
+
+/** "a mensagem do cartão agora é ..."/"mensagem no cartão: ..." — único campo de texto livre do produto que pode ser alterado nesta etapa, nunca confundido com os campos do formulário de entrega. */
+function extrairNovaMensagemCartao(mensagemCliente: string, entidades: Record<string, string | number>): string | undefined {
+  const m = mensagemCliente.match(/mensagem(?:\s+d[oe])?\s+cart[ãa]o[^\n]*?\s(?:é|eh|para|:)\s+(.+)$/i)
+  if (m) return limparValorCorrecao(m[1])
+  return typeof entidades.mensagemCartao === 'string' ? entidades.mensagemCartao.trim() || undefined : undefined
+}
+
+function responderPerguntaDuranteAprovacaoFrete(intencoes: Set<IntencaoContextual>, dados: DadosPedido): string {
+  const partes: string[] = []
+  if (intencoes.has('perguntar_preco')) {
+    partes.push(`O valor total combinado é ${formatarPreco(dados.valorTotal)} (produto + frete).`)
+  }
+  if (intencoes.has('perguntar_disponibilidade')) {
+    partes.push(`${dados.produto?.nome ?? 'O produto'} segue disponível, confirmado na revalidação mais recente.`)
+  }
+  if (intencoes.has('perguntar_prazo') || intencoes.has('perguntar_entrega')) {
+    partes.push(dados.entregaPrometidaEmISO ? `Entrega prevista: ${textoJanelaPrometida(dados.entregaPrometidaEmISO)}.` : 'A janela de entrega já cotada continua valendo.')
+  }
+  return partes.join(' ')
+}
+
+/**
+ * Aplica a intenção (primária + secundárias) que o interpretador contextual
+ * reconheceu na resposta do cliente a esta etapa — nunca descarta nenhuma
+ * das intenções detectadas, todas são processadas na mesma mensagem
+ * ("mantém o pedido e entrega amanhã", "troca o destinatário e aumenta a
+ * quantidade", "não quero cancelar, quero trocar"). Ordem de prioridade:
+ * saída (cancelar/desistir/falar_com_humano) > troca de produto > alteração
+ * de dados > confirmação (só depois de aplicar qualquer alteração) >
+ * pergunta > nenhuma ação reconhecida (volta pro esclarecimento do gate).
+ */
+async function processarOutraRespostaAprovacaoFrete(
+  estado: EstadoConversa,
+  resultado: ResultadoInterpretacao,
+  mensagemCliente: string,
+  deps: DependenciasFunil,
+  agora: Date,
+): Promise<ResultadoEtapa> {
+  const intencoes = new Set<IntencaoContextual>([resultado.intencaoPrimaria, ...resultado.intencoesSecundarias])
+  const diagBase = (motivo: string, camposAlterados?: string[]): DiagnosticoInterpretacao => ({
+    gate: CHAVE_GATE_APROVACAO_FRETE,
+    intencaoPrimaria: resultado.intencaoPrimaria,
+    intencoesSecundarias: resultado.intencoesSecundarias,
+    confianca: resultado.confianca,
+    precisaEsclarecimento: resultado.precisaEsclarecimento,
+    fallbackAcionado: false,
+    tentativaNumero: estado.dados.tentativasInterpretacao?.[CHAVE_GATE_APROVACAO_FRETE] ?? 0,
+    motivo,
+    camposAlterados,
+  })
+
+  // Cancelamento/desistência nunca é automático — pede confirmação explícita
+  // antes de encerrar de fato ("zero cancelamento indevido"), preservando
+  // todo o estado enquanto isso.
+  if (intencoes.has('cancelar') || intencoes.has('desistir')) {
+    return {
+      estado: {
+        ...estado,
+        dados: {
+          ...limparPendenciaInterpretacao(estado.dados),
+          ultimaPergunta: { chave: CHAVE_GATE_CANCELAMENTO_APROVACAO_FRETE, textoExibido: mensagemConfirmarCancelamentoPedido(), intentsValidas: INTENTS_VALIDAS_CANCELAMENTO },
+        },
+      },
+      mensagem: mensagemConfirmarCancelamentoPedido(),
+      diagnosticoInterpretacao: diagBase('cancelamento_pendente_confirmacao'),
+    }
+  }
+  if (intencoes.has('falar_com_humano')) {
+    return { estado: transferirParaHumano(estado, 'falar_com_humano (gate aprovacao_frete)'), mensagem: mensagemTransferencia(), diagnosticoInterpretacao: diagBase('falar_com_humano') }
+  }
+
+  // Troca de produto: volta pra escolha, preserva o formulário de entrega já
+  // coletado (o cliente não pediu pra mudar isso) — nunca obriga a
+  // redigitar os dados de entrega só porque o produto mudou.
+  if (intencoes.has('trocar_produto')) {
+    return {
+      estado: {
+        ...estado,
+        fase: 'escolha_categoria',
+        dados: {
+          ...limparPendenciaInterpretacao(estado.dados),
+          produto: undefined, valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined,
+          categoriaEscolhida: undefined, opcoesRecomendadas: undefined, recomendacaoApresentada: undefined,
+        },
+      },
+      mensagem: 'Sem problemas! Me conta o que você procura (cor, estilo, ocasião), ou posso te mostrar as categorias de novo.',
+      diagnosticoInterpretacao: diagBase('trocou_produto'),
+    }
+  }
+
+  // Alterações de dado — aplicadas em conjunto, sem descartar nenhuma.
+  const pedeAlteracaoCampo = ['alterar_destinatario', 'alterar_endereco', 'alterar_data', 'alterar_horario', 'corrigir_informacao', 'substituir_informacao']
+    .some(i => intencoes.has(i as IntencaoContextual))
+  // Mensagens compostas ("troca o destinatário e aumenta a quantidade para
+  // 3") podem ter mais de um conector "para" na mesma frase — os parsers
+  // determinísticos (que assumem UM campo por mensagem) podem associar o
+  // valor errado ao campo errado. Por isso o valor que o próprio
+  // interpretador já indicou em entidades/camposParaAtualizar (contrato de
+  // chaves fixo, ver montarPromptGateBinario) tem prioridade; o parser
+  // determinístico só preenche os campos que o interpretador não cobriu.
+  const correcaoDeterministica = pedeAlteracaoCampo ? extrairCorrecaoFormulario(mensagemCliente) : {}
+  const correcaoInterpretada = pedeAlteracaoCampo ? aplicarCamposInterpretados(resultado) : {}
+  const correcao: Partial<FormularioEntregaDados> = { ...correcaoDeterministica, ...correcaoInterpretada }
+  // "mantém o pedido e entrega amanhã"/"pode ser sábado" — data solta no
+  // texto, sem o conector "data... é/para" que extrairCorrecaoFormulario
+  // exige. Só tentada quando nada acima já achou uma data, nunca sobrescreve
+  // uma correção já reconhecida.
+  if ((intencoes.has('alterar_data') || intencoes.has('alterar_horario')) && !correcao.dataEntrega) {
+    const dataLivre = extrairDataLivreDeMensagem(mensagemCliente)
+    if (dataLivre) correcao.dataEntrega = dataLivre
+  }
+  const novaMensagemCartao = intencoes.has('alterar_mensagem_cartao') ? extrairNovaMensagemCartao(mensagemCliente, resultado.entidades) : undefined
+  const novaQuantidade = intencoes.has('alterar_quantidade')
+    ? (typeof resultado.entidades.quantidade === 'number' ? resultado.entidades.quantidade : extrairNumeros(mensagemCliente)[0])
+    : undefined
+
+  const temCorrecaoDeCampo = Object.keys(correcao).length > 0
+  const cotacaoInvalidada = temCorrecaoDeCampo && CAMPOS_FORMULARIO_QUE_INVALIDAM_COTACAO.some(c => c in correcao)
+
+  if (temCorrecaoDeCampo || novaMensagemCartao || (novaQuantidade != null && novaQuantidade > 0)) {
+    const formularioAtualizado = temCorrecaoDeCampo ? { ...(estado.dados.formulario ?? {}), ...correcao } : estado.dados.formulario
+    let produtoAtualizado = estado.dados.produto
+    if (novaMensagemCartao) produtoAtualizado = { ...produtoAtualizado, mensagemCartao: novaMensagemCartao } as ProdutoSelecionado
+    if (novaQuantidade != null && novaQuantidade > 0) produtoAtualizado = { ...produtoAtualizado, quantidade: Math.round(novaQuantidade) } as ProdutoSelecionado
+
+    const totalRecalculado = produtoAtualizado?.preco != null && produtoAtualizado.quantidade != null && estado.dados.valorFrete != null
+      ? produtoAtualizado.preco * produtoAtualizado.quantidade + estado.dados.valorFrete
+      : estado.dados.valorTotal
+
+    const dadosAtualizados: DadosPedido = {
+      ...limparPendenciaInterpretacao(estado.dados),
+      formulario: formularioAtualizado,
+      produto: produtoAtualizado,
+      ...(cotacaoInvalidada
+        ? { valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined, entregaPrometidaEmISO: undefined, despachoEmISO: undefined, entregaImediata: undefined }
+        : { valorTotal: totalRecalculado }),
+    }
+
+    const camposAlterados = [...Object.keys(correcao), ...(novaMensagemCartao ? ['mensagemCartao'] : []), ...(novaQuantidade != null && novaQuantidade > 0 ? ['quantidade'] : [])]
+
+    // Confirmação junto da alteração ("mantém o pedido e entrega amanhã")
+    // só segue direto quando a cotação continua válida (troca não afetou
+    // endereço/data) — nunca pula a recotação/reaprovação quando ela mudou.
+    if (intencoes.has('confirmar') && !cotacaoInvalidada) {
+      const resultadoRecursivo = await etapaAguardandoAprovacaoFrete({ ...estado, dados: dadosAtualizados }, 'sim', deps, agora)
+      // A chamada recursiva resolve por confirmação determinística direta
+      // (mensagem literal 'sim'), então nunca carrega diagnóstico próprio —
+      // preserva aqui o diagnóstico real desta mensagem original, com os
+      // campos que de fato mudaram.
+      return { ...resultadoRecursivo, diagnosticoInterpretacao: diagBase('confirmou_e_alterou_campo', camposAlterados) }
+    }
+    if (cotacaoInvalidada) {
+      const resultadoRecotacao = await etapaCalculoFrete({ ...estado, dados: dadosAtualizados, fase: 'calculando_frete' }, deps, agora)
+      return { ...resultadoRecotacao, diagnosticoInterpretacao: diagBase('alterou_campo_recotando', camposAlterados) }
+    }
+    return { estado: { ...estado, dados: dadosAtualizados }, mensagem: `Combinado! ${montarMensagemAprovacaoFrete(dadosAtualizados)}`, diagnosticoInterpretacao: diagBase('alterou_campo', camposAlterados) }
+  }
+
+  // Perguntas do cliente durante a aprovação (preço/prazo/disponibilidade/
+  // entrega) — responde com o que já se sabe, sem perder nada do estado, e
+  // volta a pedir a mesma aprovação (nunca avança nem cancela sozinho).
+  if (intencoes.has('perguntar_preco') || intencoes.has('perguntar_disponibilidade') || intencoes.has('perguntar_prazo') || intencoes.has('perguntar_entrega')) {
+    const resposta = responderPerguntaDuranteAprovacaoFrete(intencoes, estado.dados)
+    return { estado, mensagem: `${resposta}\n\n${montarMensagemAprovacaoFrete(estado.dados)}`, diagnosticoInterpretacao: diagBase('respondeu_pergunta') }
+  }
+
+  // Nenhuma ação reconhecida com informação suficiente pra agir — nunca
+  // assume, devolve pro esclarecimento normal do gate (anti-loop).
+  const tentativas = (estado.dados.tentativasInterpretacao?.[CHAVE_GATE_APROVACAO_FRETE] ?? 0) + 1
+  return {
+    estado: {
+      ...estado,
+      dados: {
+        ...estado.dados,
+        ultimaPergunta: { chave: CHAVE_GATE_APROVACAO_FRETE, textoExibido: montarMensagemAprovacaoFrete(estado.dados), intentsValidas: INTENTS_VALIDAS_APROVACAO_FRETE },
+        tentativasInterpretacao: { ...estado.dados.tentativasInterpretacao, [CHAVE_GATE_APROVACAO_FRETE]: tentativas },
+      },
+    },
+    mensagem: mensagemGateBinarioPorTentativa(configGateAprovacaoFrete(estado), tentativas),
+    diagnosticoInterpretacao: diagBase('acao_nao_reconhecida_anti_loop'),
+  }
 }
 
 async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCliente: string, deps: DependenciasFunil, agora: Date): Promise<ResultadoEtapa> {
@@ -2824,9 +3460,54 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
     return etapaCalculoFrete({ ...estado, fase: 'calculando_frete' }, deps, agora)
   }
 
-  if (!pareceConfirmacao(mensagemCliente)) {
-    return { estado, mensagem: `Sem problemas — me avisa quando quiser seguir.\n\n${montarMensagemAprovacaoFrete(estado.dados)}` }
+  // Sub-gate de confirmação de cancelamento (aberto por processarOutraRespostaAprovacaoFrete)
+  // — checado antes do gate normal, tem prioridade enquanto estiver pendente.
+  if (estado.dados.ultimaPergunta?.chave === CHAVE_GATE_CANCELAMENTO_APROVACAO_FRETE) {
+    const decisaoCancelamento = await avaliarGateBinario(
+      { chave: CHAVE_GATE_CANCELAMENTO_APROVACAO_FRETE, perguntaAtual: mensagemConfirmarCancelamentoPedido(), perguntaReformulada: 'Só confirmando: você quer cancelar este pedido mesmo, ou prefere continuar?', perguntaComOpcoes: '1. Sim, cancelar\n2. Não, continuar o pedido', intentsValidas: INTENTS_VALIDAS_CANCELAMENTO, linhasContexto: [] },
+      estado, mensagemCliente, deps,
+    )
+    const diagCancelamento = (motivo: string): DiagnosticoInterpretacao => ({ ...decisaoCancelamento.diagnostico, gate: CHAVE_GATE_CANCELAMENTO_APROVACAO_FRETE, motivo })
+    if (decisaoCancelamento.decisao === 'confirmou') {
+      return {
+        estado: {
+          ...estado,
+          fase: 'encerrado_sem_venda',
+          dados: { ...limparPendenciaInterpretacao(estado.dados), produto: undefined, formulario: undefined, valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined, pedidoId: undefined, linkPagamento: undefined },
+        },
+        mensagem: 'Seu pedido foi cancelado, sem custo nenhum. Se quiser começar um novo pedido, é só me chamar!',
+        diagnosticoInterpretacao: diagCancelamento('cancelamento_confirmado'),
+      }
+    }
+    if (decisaoCancelamento.decisao === 'negou') {
+      const dadosSemPendencia = limparPendenciaInterpretacao(estado.dados)
+      return { estado: { ...estado, dados: dadosSemPendencia }, mensagem: `Combinado, seguimos com o pedido!\n\n${montarMensagemAprovacaoFrete(dadosSemPendencia)}`, diagnosticoInterpretacao: diagCancelamento('cancelamento_desistido') }
+    }
+    if (decisaoCancelamento.decisao === 'outra' && decisaoCancelamento.resultado.intencaoPrimaria === 'falar_com_humano') {
+      return { estado: transferirParaHumano(estado, 'falar_com_humano (confirmação de cancelamento)'), mensagem: mensagemTransferencia(), diagnosticoInterpretacao: diagCancelamento('falar_com_humano') }
+    }
+    if (decisaoCancelamento.decisao === 'pendente') return { estado: decisaoCancelamento.estado, mensagem: decisaoCancelamento.mensagem, diagnosticoInterpretacao: diagCancelamento('cancelamento_ambiguo_anti_loop') }
+    // 'outra' não reconhecida (ambigua/incompleta já tratadas dentro do gate) — repete a pergunta de cancelamento, nunca assume.
+    return { estado, mensagem: mensagemConfirmarCancelamentoPedido(), diagnosticoInterpretacao: diagCancelamento('cancelamento_outra_intencao_nao_tratada') }
   }
+
+  const decisao = await avaliarGateBinario(configGateAprovacaoFrete(estado), estado, mensagemCliente, deps)
+  if (decisao.decisao === 'negou') {
+    return {
+      estado: { ...estado, dados: limparPendenciaInterpretacao(estado.dados) },
+      mensagem: `Sem problemas — me avisa quando quiser seguir.\n\n${montarMensagemAprovacaoFrete(estado.dados)}`,
+      diagnosticoInterpretacao: { ...decisao.diagnostico, gate: CHAVE_GATE_APROVACAO_FRETE, motivo: 'negou' },
+    }
+  }
+  if (decisao.decisao === 'outra') {
+    return processarOutraRespostaAprovacaoFrete(estado, decisao.resultado, mensagemCliente, deps, agora)
+  }
+  if (decisao.decisao === 'pendente') {
+    return { estado: decisao.estado, mensagem: decisao.mensagem, diagnosticoInterpretacao: { ...decisao.diagnostico, gate: CHAVE_GATE_APROVACAO_FRETE, motivo: 'ambiguo_anti_loop' } }
+  }
+  // decisao.decisao === 'confirmou' — segue o fluxo normal abaixo.
+  estado = { ...estado, dados: limparPendenciaInterpretacao(estado.dados) }
+  const diagConfirmou = (motivo: string): DiagnosticoInterpretacao => ({ ...decisao.diagnostico, gate: CHAVE_GATE_APROVACAO_FRETE, motivo })
 
   // Guarda defensiva: nunca gera link de pagamento faltando produto,
   // quantidade, data, cotação real de frete ou endereço/destinatário
@@ -2844,6 +3525,7 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
     return {
       estado: { ...estado, fase: 'aguardando_formulario' },
       mensagem: 'Antes de confirmar, preciso terminar de coletar os dados da entrega.\n\n' + TEXTO_FORMULARIO_ENTREGA,
+      diagnosticoInterpretacao: diagConfirmou('confirmou_dados_incompletos'),
     }
   }
 
@@ -2859,6 +3541,7 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
       return {
         estado: { ...estado, fase: 'escolha_categoria', dados: { ...estado.dados, produto: undefined, valorTotal: undefined } },
         mensagem: `Poxa, o ${produtoAtual.nome} saiu de disponibilidade agora há pouco. Quer que eu te mostre outra opção parecida?`,
+        diagnosticoInterpretacao: diagConfirmou('confirmou_produto_indisponivel'),
       }
     }
     const precoMudou = real.preco != null && real.preco !== produtoAtual.preco
@@ -2869,6 +3552,7 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
       return {
         estado: { ...estado, dados: { ...estado.dados, produto: produtoAtualizado, valorTotal: valorTotalAtualizado } },
         mensagem: `O preço do ${produtoAtual.nome} foi atualizado para ${formatarPreco(precoNovo)} — o novo total fica ${formatarPreco(valorTotalAtualizado)}. Confirma?`,
+        diagnosticoInterpretacao: diagConfirmou('confirmou_preco_mudou'),
       }
     }
     if ((real.fotoUrl && real.fotoUrl !== produtoAtual.fotoUrl) || (real.nome && real.nome !== produtoAtual.nome)) {
@@ -2878,7 +3562,7 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
 
   const criado = await deps.criarPedido(estado.dados)
   if (!criado) {
-    return { estado: transferirParaHumano(estado, 'Falha ao criar pedido antes do pagamento'), mensagem: mensagemTransferencia() }
+    return { estado: transferirParaHumano(estado, 'Falha ao criar pedido antes do pagamento'), mensagem: mensagemTransferencia(), diagnosticoInterpretacao: diagConfirmou('confirmou_falha_criar_pedido') }
   }
 
   const dadosComPedido = { ...estado.dados, pedidoId: criado.pedidoId }
@@ -2887,6 +3571,7 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
     return {
       estado: transferirParaHumano({ ...estado, dados: dadosComPedido }, 'Falha ao gerar link de pagamento'),
       mensagem: resultadoPagamento.mensagem,
+      diagnosticoInterpretacao: diagConfirmou('confirmou_falha_gerar_pagamento'),
     }
   }
 
@@ -2895,7 +3580,7 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
     fase: 'aguardando_pagamento',
     dados: { ...dadosComPedido, linkPagamento: resultadoPagamento.link, paymentId: resultadoPagamento.paymentId ?? criado.pedidoId },
   }
-  return { estado: novoEstado, mensagem: resultadoPagamento.mensagem }
+  return { estado: novoEstado, mensagem: resultadoPagamento.mensagem, diagnosticoInterpretacao: diagConfirmou('confirmou_pagamento_gerado') }
 }
 
 async function gerarPagamentoComPedido(
@@ -2960,6 +3645,40 @@ export async function avancarFunil(
   agora: Date = new Date(),
 ): Promise<ResultadoEtapa> {
   let estado: EstadoConversa = { ...estadoRecebido, dados: extrairDadosQualificacao(mensagemCliente, estadoRecebido.dados) }
+
+  // Confirmação de cancelamento (aberta por uma frase de cancelamento puro,
+  // ver pareceApenasCancelamento abaixo) tem prioridade sobre qualquer outro
+  // gate — pode ter sido aberta em qualquer fase da compra, nunca decide
+  // sozinha (Prioridade: cancelamento/desistência nunca é automático).
+  if (estado.dados.ultimaPergunta?.chave === CHAVE_GATE_CANCELAMENTO_GLOBAL) {
+    const decisaoCancelamento = await avaliarGateBinario(
+      {
+        chave: CHAVE_GATE_CANCELAMENTO_GLOBAL,
+        perguntaAtual: mensagemConfirmarCancelamentoPedido(),
+        perguntaReformulada: 'Só confirmando: você quer cancelar este pedido mesmo, ou prefere continuar de onde paramos?',
+        perguntaComOpcoes: '1. Sim, cancelar\n2. Não, continuar o pedido',
+        intentsValidas: INTENTS_VALIDAS_CANCELAMENTO,
+        linhasContexto: [],
+      },
+      estado, mensagemCliente, deps,
+    )
+    const diagCancelamentoGlobal = (motivo: string): DiagnosticoInterpretacao => ({ ...decisaoCancelamento.diagnostico, gate: CHAVE_GATE_CANCELAMENTO_GLOBAL, motivo })
+    if (decisaoCancelamento.decisao === 'confirmou') {
+      return {
+        estado: { ...estadoInicial(), dados: { jornadaIniciadaEm: new Date().toISOString() } },
+        mensagem: 'Seu pedido foi cancelado, sem custo nenhum. Se quiser começar um novo pedido, é só me chamar!',
+        diagnosticoInterpretacao: diagCancelamentoGlobal('cancelamento_confirmado'),
+      }
+    }
+    if (decisaoCancelamento.decisao === 'negou') {
+      return { estado: { ...estado, dados: limparPendenciaInterpretacao(estado.dados) }, mensagem: 'Combinado, seguimos com o pedido! Me avisa se quiser fazer alguma alteração.', diagnosticoInterpretacao: diagCancelamentoGlobal('cancelamento_desistido') }
+    }
+    if (decisaoCancelamento.decisao === 'outra' && decisaoCancelamento.resultado.intencaoPrimaria === 'falar_com_humano') {
+      return { estado: transferirParaHumano(estado, 'falar_com_humano (confirmação de cancelamento)'), mensagem: mensagemTransferencia(), diagnosticoInterpretacao: diagCancelamentoGlobal('falar_com_humano') }
+    }
+    if (decisaoCancelamento.decisao === 'pendente') return { estado: decisaoCancelamento.estado, mensagem: decisaoCancelamento.mensagem, diagnosticoInterpretacao: diagCancelamentoGlobal('cancelamento_ambiguo_anti_loop') }
+    return { estado, mensagem: mensagemConfirmarCancelamentoPedido(), diagnosticoInterpretacao: diagCancelamentoGlobal('cancelamento_outra_intencao_nao_tratada') }
+  }
 
   // Gate de retomada após intervalo sem interação (Parte 3): verificado
   // antes de qualquer outro gate. Nunca dispara sozinho — só quando chega
@@ -3026,7 +3745,35 @@ export async function avancarFunil(
       estado = { ...estado, fase: 'inicio', dados: { ...estado.dados, formularioAnterior: undefined } }
       // segue o fluxo normal abaixo, pedindo o formulário do zero.
     } else {
-      return { estado, mensagem: mensagemPerguntaReaproveitarDados() }
+      // Nem confirmação nem negação pelo caminho determinístico — antes de
+      // só repetir a pergunta, tenta a interpretação contextual (só quando
+      // conectada; sem ela, mantém exatamente o comportamento anterior a
+      // esta camada). Confiança baixa/composta nunca decide sozinha aqui.
+      const interpretado = await interpretarComFallback(deps, montarPromptReaproveitarDados(), mensagemCliente)
+      if (interpretado && interpretado.confianca !== 'baixa' && !interpretado.precisaEsclarecimento && interpretado.intencoesSecundarias.length === 0 && interpretado.intencaoPrimaria === 'confirmar') {
+        estado = {
+          ...estado,
+          fase: 'inicio',
+          dados: { ...estado.dados, formulario: estado.dados.formularioAnterior, formularioAnterior: undefined },
+        }
+      } else if (interpretado && interpretado.confianca !== 'baixa' && !interpretado.precisaEsclarecimento && interpretado.intencoesSecundarias.length === 0 && interpretado.intencaoPrimaria === 'negar') {
+        estado = { ...estado, fase: 'inicio', dados: { ...estado.dados, formularioAnterior: undefined } }
+      } else {
+        // Diagnóstico só é anexado aqui (caso ambíguo, com retorno direto) —
+        // os casos de sucesso (confirmar/negar) seguem o fluxo normal do
+        // dispatcher abaixo, cujo retorno final já pertence a outra etapa;
+        // ainda assim continuam contabilizados na telemetria via a fase
+        // anterior ('aguardando_reaproveitar_dados'), só sem o diagnóstico
+        // detalhado de intenção/confiança nesse caso específico.
+        return {
+          estado, mensagem: mensagemPerguntaReaproveitarDados(),
+          diagnosticoInterpretacao: {
+            gate: 'aguardando_reaproveitar_dados', motivo: 'ambiguo',
+            intencaoPrimaria: interpretado?.intencaoPrimaria, confianca: interpretado?.confianca, precisaEsclarecimento: interpretado?.precisaEsclarecimento,
+            fallbackAcionado: !!deps.interpretarIntencao && !interpretado, tentativaNumero: 0,
+          },
+        }
+      }
     }
   }
 
@@ -3045,6 +3792,18 @@ export async function avancarFunil(
     // parte pelo chamador) e reinicia o funil (ver Parte 1).
     estado = reiniciarJornada(mensagemCliente)
     intencao = classificarIntencao(mensagemCliente, estado.fase)
+  } else if (pareceApenasCancelamento(mensagemCliente, estado.fase)) {
+    // Cancelamento puro (sem nenhum sinal de "novo pedido"/"trocar" na
+    // mesma mensagem) nunca reinicia a jornada silenciosamente — pede
+    // confirmação explícita antes de apagar produto/formulário/frete já
+    // coletados (ver pareceApenasCancelamento).
+    return {
+      estado: {
+        ...estado,
+        dados: { ...estado.dados, ultimaPergunta: { chave: CHAVE_GATE_CANCELAMENTO_GLOBAL, textoExibido: mensagemConfirmarCancelamentoPedido(), intentsValidas: INTENTS_VALIDAS_CANCELAMENTO } },
+      },
+      mensagem: mensagemConfirmarCancelamentoPedido(),
+    }
   } else if (pareceNovaIntencaoDeCompra(mensagemCliente, estado.fase)) {
     // Nova intenção comercial explícita numa fase de compra já avançada —
     // nunca reaproveita CEP/cotação/endereço/pagamento antigos (Parte 1;

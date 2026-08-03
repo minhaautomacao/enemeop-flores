@@ -33,6 +33,7 @@ import { type DadosClientePedido, criarOuReusarPedido, gerarOuReusarPreference, 
 import { type OrigemHandoff, criarOuReusarAtendimento } from '../_shared/handoff.ts';
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
+import { registrarEventoInterpretacao, gateDeInterpretacaoEnvolvido, eventoDoResultado } from '../_shared/interpretador-telemetria.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -516,8 +517,16 @@ async function processarDM(canalId: string, canal: string, mensagemCliente: stri
       respostaFinal = 'Oi! Pode me dizer seu nome pra eu te atender melhor?';
     } else {
       const deps = construirDependenciasFunil({ nome: nomeCliente ?? 'Cliente', canal, canalId, conversaId: conversaRow.id });
+      const faseAntesDoFunil = estado.fase;
+      const inicioFunilMs = Date.now();
       const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps, foraDoHorario, proximoHorarioTexto);
+      const duracaoFunilMs = Date.now() - inicioFunilMs;
       estado = resultado.estado;
+      // Telemetria da camada de interpretação contextual — mesmo critério de
+      // flora-internal-test/index.ts (referência de wiring), nunca bloqueante.
+      if (gateDeInterpretacaoEnvolvido(faseAntesDoFunil, estado)) {
+        void registrarEventoInterpretacao(eventoDoResultado(resultado, faseAntesDoFunil, conversaRow.id, duracaoFunilMs));
+      }
       if (estado.fase === 'transferido_humano') {
         // O funil decidiu internamente transferir (CEP/frete falhou, falha
         // ao gerar pagamento, ou fase inesperada) — a mensagem de

@@ -54,7 +54,7 @@ import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { criarPreferenciaMercadoPago, criarPagamentoPixMercadoPago } from '../_shared/mercadopago.ts';
 import { criarOuReusarPedido, gerarOuReusarPreference, gerarOuReusarPagamentoPix, buscarFormasPagamentoReal, type DadosClientePedido } from '../_shared/pedido-repositorio.ts';
 import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
-import { registrarEventoInterpretacao } from '../_shared/interpretador-telemetria.ts';
+import { registrarEventoInterpretacao, gateDeInterpretacaoEnvolvido, eventoDoResultado } from '../_shared/interpretador-telemetria.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -291,23 +291,15 @@ async function processarMensagemTeste(conversaId: string, mensagemCliente: strin
     respostaFinal = resultado.mensagem;
     fotoUrl = resultado.fotoUrl;
 
-    // Telemetria só quando o gate de interpretação contextual (fatia 1)
-    // esteve envolvido — nunca em toda mensagem, que poluiria a tabela sem
-    // sinal nenhum das outras etapas ainda não migradas. Fire-and-forget:
-    // nunca aguardado de forma bloqueante, nunca atrasa a resposta ao cliente.
-    if (faseAntes === 'retomada_apos_intervalo' || estado.fase === 'retomada_apos_intervalo') {
-      void registrarEventoInterpretacao({
-        conversaId: conversaRow.id,
-        fase: faseAntes,
-        ultimaPerguntaChave: estado.dados.ultimaPergunta?.chave,
-        ultimaPerguntaTexto: estado.dados.ultimaPergunta?.textoExibido,
-        mensagemRecebida: mensagemCliente,
-        acaoTomada: estado.fase,
-        avancou: estado.fase !== 'retomada_apos_intervalo',
-        tentativaNumero: estado.dados.tentativasInterpretacao?.['retomada_apos_intervalo'] ?? 0,
-        fallbackAcionado: !INTERPRETACAO_CONTEXTUAL_ATIVA,
-        duracaoMs,
-      });
+    // Telemetria só quando algum gate da camada de interpretação contextual
+    // esteve envolvido (fatia 1: retomada_apos_intervalo; fatia 2: aprovação
+    // de frete, confirmação de formulário, reaproveitamento de dados,
+    // confirmação de cancelamento) — nunca em toda mensagem, que poluiria a
+    // tabela sem sinal nenhum das etapas que ainda não usam esta camada.
+    // Fire-and-forget: nunca aguardado de forma bloqueante, nunca atrasa a
+    // resposta ao cliente.
+    if (gateDeInterpretacaoEnvolvido(faseAntes, estado)) {
+      void registrarEventoInterpretacao(eventoDoResultado(resultado, faseAntes, conversaRow.id, duracaoMs));
     }
   }
 

@@ -8,6 +8,7 @@ import { calcularFreteReal } from './frete.js'
 import { gerarPagamentoReal } from './pagamento.js'
 import { criarPedidoProvisorio } from './pedido.js'
 import { criarChamadorInterpretacao } from './ia-interprete.js'
+import { registrarEventoInterpretacao, gateDeInterpretacaoEnvolvido, eventoDoResultado } from './interpretador-telemetria.js'
 import { randomUUID } from 'crypto'
 import {
   classificarIntencao,
@@ -336,9 +337,19 @@ export async function processarMensagemSDR(numero: string, textoCliente: string,
     cliente: { nome: nomeCliente ?? 'Cliente', telefone: numero, canal: 'whatsapp', canalId: numero },
   })
 
+  const faseAntesDoFunil = estadoFunil.fase
+  const inicioFunilMs = Date.now()
   const resultado = await avancarFunil(estadoFunil, textoCliente, intencao, deps)
+  const duracaoFunilMs = Date.now() - inicioFunilMs
   estadoFunil = resultado.estado
   await salvarEstadoFunil('whatsapp', numero, estadoFunil)
+  // Telemetria da camada de interpretação contextual — mesmo critério de
+  // flora-internal-test/index.ts (referência de wiring), nunca bloqueante.
+  // Sem conversaId em UUID neste canal (SDR indexa por telefone) — campo
+  // omitido, nunca preenchido com um valor que não é um UUID real.
+  if (gateDeInterpretacaoEnvolvido(faseAntesDoFunil, estadoFunil)) {
+    void registrarEventoInterpretacao(eventoDoResultado(resultado, faseAntesDoFunil, undefined, duracaoFunilMs))
+  }
 
   const mensagemFinal = primeiraMensagem && nomeCliente ? `Oi, ${nomeCliente}! ${resultado.mensagem}` : resultado.mensagem
 
@@ -447,9 +458,17 @@ export async function processarMensagemSDRInstagram(
     cliente: { nome: nomeConhecido ?? 'Cliente', canal: 'instagram', canalId },
   })
 
+  const faseAntesDoFunilInsta = estadoFunil.fase
+  const inicioFunilInstaMs = Date.now()
   const resultado = await avancarFunil(estadoFunil, textoCliente, intencao, deps)
+  const duracaoFunilInstaMs = Date.now() - inicioFunilInstaMs
   estadoFunil = resultado.estado
   await salvarEstadoFunil('instagram', canalId, estadoFunil)
+  // Telemetria da camada de interpretação contextual — mesmo critério de
+  // flora-internal-test/index.ts (referência de wiring), nunca bloqueante.
+  if (gateDeInterpretacaoEnvolvido(faseAntesDoFunilInsta, estadoFunil)) {
+    void registrarEventoInterpretacao(eventoDoResultado(resultado, faseAntesDoFunilInsta, undefined, duracaoFunilInstaMs))
+  }
 
   const mensagemFinal = primeiraMensagem && nomeConhecido ? `Oi, ${nomeConhecido}! ${resultado.mensagem}` : resultado.mensagem
 

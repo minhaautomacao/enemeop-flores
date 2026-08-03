@@ -1,0 +1,19 @@
+-- ROLLBACK de 202608030001_funil_interpretacao_telemetria.sql
+--
+-- NÃO fica em supabase/migrations/ de propósito: um `supabase db push`
+-- futuro só aplica arquivos dentro de migrations/, então este rollback
+-- nunca é executado automaticamente por engano — só manualmente, se e
+-- quando alguém decidir reverter.
+--
+-- Único efeito: remove a tabela public.funil_interpretacao_eventos e tudo
+-- que depende só dela — índices (incluindo o de criado_em), comentários,
+-- as 3 constraints de integridade (tentativa_numero/duracao_ms/confianca),
+-- a sequência implícita da coluna identity (funil_interpretacao_eventos_id_seq)
+-- e os grants concedidos à service_role — todos removidos junto pelo DROP
+-- TABLE, sem precisar de comandos separados. Nenhuma outra tabela, view,
+-- função, sequência ou dado do sistema é tocado.
+--
+-- Seguro executar mais de uma vez (IF EXISTS). Destrutivo por natureza
+-- (é o rollback de um CREATE TABLE) — apaga os eventos de telemetria já
+-- registrados, nunca dados de pedido/conversa/pagamento reais.
+drop table if exists public.funil_interpretacao_eventos;

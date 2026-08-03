@@ -49,6 +49,7 @@ import { type OrigemHandoff, criarOuReusarAtendimento } from '../_shared/handoff
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { validarTokenWebhook } from '../_shared/zapi-auth.ts';
 import { canSendWhatsAppMessage, mensagemDeOptOut, mensagemConfirmacaoOptOut } from '../_shared/whatsapp-guard.ts';
+import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -73,6 +74,11 @@ const WORKSPACE_ID  = Deno.env.get('SAAS_WORKSPACE_ID') ?? Deno.env.get('WORKSPA
 const ZAPI_INSTANCE = Deno.env.get('ZAPI_INSTANCE_ID') ?? '';
 const ZAPI_TOKEN    = Deno.env.get('ZAPI_TOKEN') ?? '';
 const ZAPI_CLIENT   = Deno.env.get('ZAPI_CLIENT_TOKEN') ?? '';
+// Ativa a camada de interpretação contextual de intenção (ver Parte
+// "correção estrutural" em funil.ts) — flag de rollout por canal: ausente
+// (padrão), o comportamento é 100% determinístico, idêntico ao anterior a
+// essa camada. Nunca decide preço/disponibilidade/regra comercial.
+const INTERPRETACAO_CONTEXTUAL_ATIVA = Deno.env.get('FUNIL_INTERPRETACAO_CONTEXTUAL_ATIVA') === 'true';
 // Preparação do WhatsApp (2026-07-30) — número anterior banido; trava contra
 // reativar acidentalmente o número oficial protegido (ver whatsapp-guard.ts,
 // canSendWhatsAppMessage). Lido a cada chamada (nunca cacheado num const de
@@ -321,6 +327,7 @@ function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFu
     gerarPagamentoPix: (pedidoId) => gerarOuReusarPagamentoPix(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'webhook-whatsapp', criarPagamentoPixMercadoPago),
     criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'webhook-whatsapp'),
     buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
+    interpretarIntencao: INTERPRETACAO_CONTEXTUAL_ATIVA ? criarChamadorInterpretacao() : undefined,
   };
 }
 

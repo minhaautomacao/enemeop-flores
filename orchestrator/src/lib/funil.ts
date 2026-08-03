@@ -64,6 +64,152 @@ export type Intencao =
   | 'assunto_fora_escopo'
   | 'atendimento_humano'
 
+// ── Camada de interpretação contextual de intenção (Parte "correção
+// estrutural" — substitui comparação de frases fixas em pontos de ambiguidade
+// real) ────────────────────────────────────────────────────────────────────
+//
+// Diferente de `Intencao` acima (que classifica sobre O QUE o cliente está
+// falando — frete, pagamento, disponibilidade...), `IntencaoContextual`
+// classifica QUAL das opções em aberto numa pergunta pendente da Flora a
+// resposta do cliente resolve. É um eixo ortogonal, só relevante quando existe
+// uma pergunta pendente (`DadosPedido.ultimaPergunta`, ver abaixo) — nunca
+// substitui `classificarIntencao`, complementa os gates que hoje decidem só
+// por lista fixa de frases (`pareceConfirmacao`/`pareceNegacao`/
+// `FRASES_NOVO_PEDIDO`/etc.), permitindo estendê-los sem espalhar `if`s novos
+// pelo funil inteiro.
+export type IntencaoContextual =
+  | 'continuar_pedido_anterior'
+  | 'iniciar_nova_compra'
+  | 'retomar_atendimento'
+  | 'escolher_produto'
+  | 'trocar_produto'
+  | 'trocar_pedido'
+  | 'alterar_quantidade'
+  | 'corrigir_informacao'
+  | 'substituir_informacao'
+  | 'remover_informacao'
+  | 'confirmar'
+  | 'negar'
+  | 'cancelar'
+  | 'desistir'
+  | 'voltar_etapa'
+  | 'avancar'
+  | 'fornecer_dado'
+  | 'perguntar_preco'
+  | 'perguntar_disponibilidade'
+  | 'perguntar_prazo'
+  | 'perguntar_entrega'
+  | 'pedir_recomendacao'
+  | 'alterar_destinatario'
+  | 'alterar_endereco'
+  | 'alterar_data'
+  | 'alterar_horario'
+  | 'alterar_mensagem_cartao'
+  | 'falar_com_humano'
+  | 'fora_de_contexto'
+  | 'ambigua'
+  | 'incompleta'
+
+export type NivelConfianca = 'alta' | 'media' | 'baixa'
+
+/**
+ * Contrato estruturado e auditável devolvido pela camada de interpretação
+ * contextual (via LLM, ver `DependenciasFunil.interpretarIntencao`) — nunca
+ * usado sem passar antes por `validarRespostaInterpretacao`. Nunca contém
+ * decisão comercial (preço, disponibilidade, regra de negócio) — só intenção
+ * e entidades extraídas do texto do cliente; quem decide preço/disponibilidade
+ * continua sendo o código determinístico existente (`selecionarRecomendacoes`,
+ * `revalidarProduto`, etc.), nunca este resultado.
+ */
+export interface ResultadoInterpretacao {
+  intencaoPrimaria: IntencaoContextual
+  /** Múltiplas intenções na mesma mensagem (ex.: "quero continuar, mas com outro produto") — nunca descartadas, preservadas em ordem. */
+  intencoesSecundarias: IntencaoContextual[]
+  /** Valores extraídos do texto (nunca inventados) — ex.: {"produto": "outro"}. */
+  entidades: Record<string, string | number>
+  camposParaAtualizar: string[]
+  confianca: NivelConfianca
+  /** Trecho/paráfrase curta do texto do cliente que evidencia a intenção — trilha de auditoria (nunca usado pra decisão, só pra registro/telemetria). */
+  evidenciaContextual: string
+  acaoRecomendada: string
+  precisaEsclarecimento: boolean
+}
+
+const INTENCOES_CONTEXTUAIS_VALIDAS = new Set<IntencaoContextual>([
+  'continuar_pedido_anterior', 'iniciar_nova_compra', 'retomar_atendimento',
+  'escolher_produto', 'trocar_produto', 'trocar_pedido', 'alterar_quantidade',
+  'corrigir_informacao', 'substituir_informacao', 'remover_informacao',
+  'confirmar', 'negar', 'cancelar', 'desistir', 'voltar_etapa', 'avancar',
+  'fornecer_dado', 'perguntar_preco', 'perguntar_disponibilidade', 'perguntar_prazo',
+  'perguntar_entrega', 'pedir_recomendacao', 'alterar_destinatario', 'alterar_endereco',
+  'alterar_data', 'alterar_horario', 'alterar_mensagem_cartao', 'falar_com_humano',
+  'fora_de_contexto', 'ambigua', 'incompleta',
+])
+const NIVEIS_CONFIANCA_VALIDOS = new Set<NivelConfianca>(['alta', 'media', 'baixa'])
+
+/**
+ * Validação hand-rolled (sem zod/ajv — este arquivo nunca importa nada, ver
+ * cabeçalho) do JSON bruto devolvido pelo modelo. Qualquer campo fora do
+ * formato esperado invalida o resultado inteiro — nunca aceita parcialmente,
+ * nunca corrige/completa o que faltar. Resultado inválido é tratado
+ * exatamente como indisponibilidade do modelo (cai no fallback determinístico
+ * de quem chamou, ver `interpretarComFallback`).
+ */
+export function validarRespostaInterpretacao(bruto: unknown): ResultadoInterpretacao | null {
+  if (!bruto || typeof bruto !== 'object') return null
+  const r = bruto as Record<string, unknown>
+  if (typeof r.intencaoPrimaria !== 'string' || !INTENCOES_CONTEXTUAIS_VALIDAS.has(r.intencaoPrimaria as IntencaoContextual)) return null
+  if (typeof r.confianca !== 'string' || !NIVEIS_CONFIANCA_VALIDOS.has(r.confianca as NivelConfianca)) return null
+  if (typeof r.evidenciaContextual !== 'string') return null
+  if (typeof r.acaoRecomendada !== 'string') return null
+  if (typeof r.precisaEsclarecimento !== 'boolean') return null
+  const intencoesSecundarias = Array.isArray(r.intencoesSecundarias)
+    ? r.intencoesSecundarias.filter((i): i is IntencaoContextual => typeof i === 'string' && INTENCOES_CONTEXTUAIS_VALIDAS.has(i as IntencaoContextual))
+    : []
+  const entidades = (r.entidades && typeof r.entidades === 'object' && !Array.isArray(r.entidades))
+    ? Object.fromEntries(Object.entries(r.entidades as Record<string, unknown>).filter((entry): entry is [string, string | number] => typeof entry[1] === 'string' || typeof entry[1] === 'number'))
+    : {}
+  const camposParaAtualizar = Array.isArray(r.camposParaAtualizar)
+    ? r.camposParaAtualizar.filter((c): c is string => typeof c === 'string')
+    : []
+  return {
+    intencaoPrimaria: r.intencaoPrimaria as IntencaoContextual,
+    intencoesSecundarias,
+    entidades,
+    camposParaAtualizar,
+    confianca: r.confianca as NivelConfianca,
+    evidenciaContextual: r.evidenciaContextual,
+    acaoRecomendada: r.acaoRecomendada,
+    precisaEsclarecimento: r.precisaEsclarecimento,
+  }
+}
+
+/**
+ * Chama a camada de interpretação contextual com proteção completa: se a
+ * dependência não estiver conectada (canal ainda sem rollout, ou teste sem
+ * essa dependência fake), se o modelo expirar, falhar ou devolver algo que
+ * não valida no schema, devolve `null` — NUNCA lança exceção, nunca trava o
+ * atendimento. Quem chama trata `null` exatamente como "sem sinal do
+ * interpretador", caindo no fallback determinístico do próprio gate.
+ */
+async function interpretarComFallback(
+  deps: DependenciasFunil,
+  systemPrompt: string,
+  mensagemCliente: string,
+  timeoutMs = 3000,
+): Promise<ResultadoInterpretacao | null> {
+  if (!deps.interpretarIntencao) return null
+  try {
+    const bruto = await deps.interpretarIntencao(systemPrompt, mensagemCliente, timeoutMs)
+    if (!bruto) return null
+    const semCercas = bruto.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim()
+    const parsed = JSON.parse(semCercas)
+    return validarRespostaInterpretacao(parsed)
+  } catch {
+    return null
+  }
+}
+
 // ── Dados coletados durante a conversa ───────────────────────────────────
 
 export interface ProdutoSelecionado {
@@ -190,6 +336,27 @@ export interface DadosPedido {
   formularioAnterior?: FormularioEntregaDados
   /** true logo depois que a Flora pergunta o link/nome exato de um produto citado que a busca real não encontrou — a PRÓXIMA mensagem é tratada como a resposta a essa pergunta (busca ao vivo direto, sem precisar repetir "site"/"não está no catálogo"). Limpo assim que a próxima mensagem é processada, sucesso ou não. */
   aguardandoNomeProdutoCitado?: boolean
+  /**
+   * Registro estruturado da última pergunta pendente feita pela Flora — dá
+   * peso contextual real à resposta do cliente na camada de interpretação
+   * (ver `IntencaoContextual`/`interpretarComFallback`): a mesma resposta
+   * ("esse mesmo", "pode") significa coisas diferentes dependendo de qual
+   * pergunta está em aberto. `chave` é um identificador estável do gate
+   * (ex.: 'retomada_apos_intervalo') — nunca o texto em si, pra sobreviver a
+   * reformulações (ver `tentativasInterpretacao`). Nunca usado sozinho pra
+   * decidir nada — só como evidência que a interpretação consome junto da
+   * mensagem atual.
+   */
+  ultimaPergunta?: { chave: string; textoExibido: string; intentsValidas: IntencaoContextual[] }
+  /**
+   * Contador de tentativas de interpretação sem sucesso, por chave de
+   * pergunta pendente (`ultimaPergunta.chave`) — motor da proteção anti-loop.
+   * Persiste no mesmo JSONB que o resto de `dados` (nenhuma migration nova).
+   * Nunca reseta sozinho/silenciosamente — só no único caminho de sucesso de
+   * cada gate (ver `resolverRetomadaAposIntervalo`), nunca por mudança de
+   * fase nem por reinício de jornada disfarçado.
+   */
+  tentativasInterpretacao?: Record<string, number>
 }
 
 export interface EstadoConversa {
@@ -831,6 +998,23 @@ export function mensagemRetomadaAposIntervalo(): string {
   return 'Você deseja continuar o pedido anterior ou prefere iniciar uma nova compra?'
 }
 
+/** 1ª reformulação (mesma pergunta, palavras diferentes) — mostrada quando a 1ª tentativa de interpretar a resposta do cliente falha (ver mensagemEsclarecimentoPorTentativa). Nunca acumula com a mensagem anterior, substitui. */
+function mensagemRetomadaAposIntervaloVariante2(): string {
+  return 'Só pra eu confirmar certinho: você quer que eu continue de onde paramos no pedido anterior, ou prefere começar um pedido diferente agora?'
+}
+
+/** 2ª+ falha: opções curtas numeradas (aceitas por número, texto natural ou referência indireta) + oferta de atendimento humano — nunca força a transferência, só oferece (ver resolverRetomadaAposIntervalo, que continua tentando interpretar mesmo depois desta mensagem). */
+function mensagemRetomadaAposIntervaloOpcoes(): string {
+  return 'Não consegui identificar sua resposta. Pode escolher uma das opções abaixo (vale responder com o número, o texto, ou do seu jeito):\n\n1. Continuar o pedido anterior\n2. Começar uma compra nova\n\nSe preferir, também posso te transferir para um atendente — é só pedir.'
+}
+
+/** Escolhe qual variante da pergunta mostrar, escalando conforme o número de tentativas de interpretação já falhadas para esta chave (proteção anti-loop — nunca repete a mesma redação duas vezes seguidas). */
+function mensagemEsclarecimentoPorTentativa(tentativas: number): string {
+  if (tentativas <= 0) return mensagemRetomadaAposIntervalo()
+  if (tentativas === 1) return mensagemRetomadaAposIntervaloVariante2()
+  return mensagemRetomadaAposIntervaloOpcoes()
+}
+
 /** true só quando há uma compra em andamento e mais de 1h já passou desde a última interação real registrada. */
 export function deveGatilharRetomadaAposIntervalo(estado: EstadoConversa, agora: Date): boolean {
   if (!FASES_COMPRA_EM_ANDAMENTO.includes(estado.fase)) return false
@@ -882,6 +1066,42 @@ function normalizarFrase(texto: string): string {
 // inequívoco aqui, onde as únicas duas opções em jogo são "anterior" vs "nova".
 const FRASES_QUER_PEDIDO_ANTERIOR = ['anterior', 'pedido anterior', 'o anterior', 'continuar com o anterior', 'quero o anterior', 'quero o pedido anterior']
 
+/** Chave estável deste gate na proteção anti-loop/interpretação contextual — nunca o texto da pergunta em si, pra sobreviver a reformulações. */
+const CHAVE_GATE_RETOMADA = 'retomada_apos_intervalo'
+const INTENTS_VALIDAS_RETOMADA: IntencaoContextual[] = ['continuar_pedido_anterior', 'iniciar_nova_compra', 'falar_com_humano', 'ambigua', 'incompleta']
+
+/**
+ * Prompt mínimo necessário (nunca decide preço/disponibilidade/regra
+ * comercial) pra camada de interpretação contextual resolver a ambiguidade
+ * real deste gate: a mesma resposta curta do cliente ("pode", "esse mesmo")
+ * só faz sentido à luz da pergunta que a Flora acabou de fazer.
+ */
+function montarPromptInterpretacaoRetomada(estado: EstadoConversa): string {
+  const produtoResumo = estado.dados.produto?.nome
+    ? `Produto do pedido anterior em andamento: ${estado.dados.produto.nome}.`
+    : 'Nenhum produto específico registrado ainda no pedido anterior.'
+  return [
+    'Você é um interpretador de intenção para um funil de vendas de flores (WhatsApp/Instagram). NUNCA decida preço, disponibilidade ou regras comerciais — só identifique a intenção do cliente na resposta abaixo.',
+    `A Flora acabou de perguntar ao cliente: "${mensagemRetomadaAposIntervalo()}"`,
+    produtoResumo,
+    'Intenções válidas para esta resposta específica: continuar_pedido_anterior, iniciar_nova_compra, falar_com_humano, ambigua, incompleta.',
+    'Considere equivalentes a "continuar_pedido_anterior" respostas como: confirmações diretas ou indiretas, referências ao pedido/produto anterior, pedidos pra retomar/prosseguir/dar continuidade, mesmo com erro de digitação, sem acento, abreviadas, ou em linguagem bem informal.',
+    'Considere "iniciar_nova_compra" quando o cliente claramente quer algo diferente do pedido anterior.',
+    'Se o cliente pedir explicitamente para falar com uma pessoa/atendente, classifique como falar_com_humano.',
+    'Se não for possível ter certeza real, classifique como ambigua (mensagem existe mas não dá pra saber) ou incompleta (faltou informação) com confianca "baixa" e precisaEsclarecimento true — nunca invente uma escolha que o texto não sustenta.',
+    'Responda APENAS com um JSON válido, sem texto antes ou depois, no formato exato: {"intencaoPrimaria": "...", "intencoesSecundarias": [], "entidades": {}, "camposParaAtualizar": [], "confianca": "alta"|"media"|"baixa", "evidenciaContextual": "...", "acaoRecomendada": "...", "precisaEsclarecimento": true|false}',
+  ].join('\n')
+}
+
+/** "1"/"2" isolado em resposta às opções numeradas (2ª+ falha) — fast-path determinístico, nunca precisa do modelo pra isso. */
+function detectarEscolhaNumericaRetomada(mensagemCliente: string): 'continuar' | 'nova' | null {
+  const numeros = extrairNumeros(mensagemCliente)
+  if (numeros.length !== 1) return null
+  if (numeros[0] === 1) return 'continuar'
+  if (numeros[0] === 2) return 'nova'
+  return null
+}
+
 async function resolverRetomadaAposIntervalo(
   estado: EstadoConversa,
   mensagemCliente: string,
@@ -889,7 +1109,8 @@ async function resolverRetomadaAposIntervalo(
   agora: Date,
 ): Promise<ResultadoEtapa | null> {
   const n = normalizarFrase(mensagemCliente)
-  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizarFrase(p)))) {
+
+  const resolverComoNovaCompra = (): ResultadoEtapa | null => {
     // Mesma pergunta de reaproveitamento de dados já usada quando "nova
     // intenção de compra" reinicia a jornada em fases mais avançadas (ver
     // avancarFunil) — faltava aqui, no reinício vindo do gate de intervalo
@@ -909,26 +1130,93 @@ async function resolverRetomadaAposIntervalo(
     return null // sinaliza pro chamador reiniciar a jornada e seguir o fluxo normal
   }
 
+  const resolverComoContinuar = (): ResultadoEtapa => {
+    const faseAnterior = estado.dados.faseAntesDoIntervalo ?? 'inicio'
+    const dadosRestaurados: DadosPedido = {
+      ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString(),
+      ultimaPergunta: undefined, tentativasInterpretacao: undefined,
+    }
+    return { estado: { ...estado, fase: faseAnterior, dados: dadosRestaurados }, mensagem: montarMensagemRetomada(faseAnterior, dadosRestaurados) }
+  }
+
+  if (FRASES_NOVO_PEDIDO.some(p => n.includes(normalizarFrase(p)))) {
+    return resolverComoNovaCompra()
+  }
+
   const trouxeDadosDoFormulario = Object.keys(extrairFormularioEntrega(mensagemCliente)).length > 0
+  // Bug real (pego escrevendo os testes negativos desta correção): "não
+  // quero o pedido anterior" contém "pedido anterior" como substring, então
+  // FRASES_QUER_PEDIDO_ANTERIOR batia via .includes() mesmo com a negação —
+  // a Flora confirmava continuar exatamente o que o cliente disse que NÃO
+  // queria. `.includes()` nunca enxerga negação; a guarda abaixo nunca deixa
+  // uma frase negada (pareceNegacao, já usada em outros gates) contar como
+  // "quer continuar" — cai pra interpretação contextual (ou pro
+  // esclarecimento anti-loop) em vez de confiar cegamente na substring.
+  const negado = pareceNegacao(mensagemCliente)
   const querContinuar = trouxeDadosDoFormulario
-    || FRASES_CONTINUACAO.some(p => n.includes(normalizarFrase(p)))
-    || FRASES_QUER_PEDIDO_ANTERIOR.some(p => n === normalizarFrase(p) || n.includes(normalizarFrase(p)))
+    || (!negado && FRASES_CONTINUACAO.some(p => n.includes(normalizarFrase(p))))
+    || (!negado && FRASES_QUER_PEDIDO_ANTERIOR.some(p => n === normalizarFrase(p) || n.includes(normalizarFrase(p))))
     || pareceConfirmacao(mensagemCliente)
 
-  if (!querContinuar) {
-    return { estado, mensagem: mensagemRetomadaAposIntervalo() }
+  if (querContinuar) {
+    if (trouxeDadosDoFormulario) {
+      const dadosLimpos: DadosPedido = {
+        ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString(),
+        ultimaPergunta: undefined, tentativasInterpretacao: undefined,
+      }
+      return etapaFormulario({ ...estado, fase: 'aguardando_formulario', dados: dadosLimpos }, mensagemCliente, deps)
+    }
+    return resolverComoContinuar()
   }
 
-  const faseAnterior = estado.dados.faseAntesDoIntervalo ?? 'inicio'
-  const dadosRestaurados: DadosPedido = { ...estado.dados, faseAntesDoIntervalo: undefined, ultimaInteracaoEm: agora.toISOString() }
+  // Caminho determinístico não decidiu — antes de repetir a pergunta,
+  // tenta a camada de interpretação contextual (mensagem + qual pergunta
+  // está pendente + fase + dados coletados). Correção estrutural: em vez de
+  // cadastrar mais uma frase em FRASES_QUER_PEDIDO_ANTERIOR a cada novo
+  // sinônimo encontrado em produção, o interpretador cobre variações
+  // semânticas equivalentes ainda não previstas, sem precisar de deploy novo
+  // por frase.
+  const tentativasAnteriores = estado.dados.tentativasInterpretacao?.[CHAVE_GATE_RETOMADA] ?? 0
 
-  if (trouxeDadosDoFormulario) {
-    return etapaFormulario({ ...estado, fase: 'aguardando_formulario', dados: dadosRestaurados }, mensagemCliente, deps)
+  const escolhaNumerica = tentativasAnteriores >= 2 ? detectarEscolhaNumericaRetomada(mensagemCliente) : null
+  if (escolhaNumerica === 'continuar') return resolverComoContinuar()
+  // null aqui é um retorno intencional (mesmo contrato de resolverComoNovaCompra):
+  // sinaliza pro chamador (avancarFunil) reiniciar a jornada normalmente,
+  // nunca um erro — nunca substituído por resolverComoContinuar().
+  if (escolhaNumerica === 'nova') return resolverComoNovaCompra()
+
+  const interpretado = await interpretarComFallback(deps, montarPromptInterpretacaoRetomada(estado), mensagemCliente)
+
+  if (interpretado && interpretado.confianca !== 'baixa' && !interpretado.precisaEsclarecimento) {
+    if (interpretado.intencaoPrimaria === 'continuar_pedido_anterior') return resolverComoContinuar()
+    if (interpretado.intencaoPrimaria === 'iniciar_nova_compra') {
+      const resultado = resolverComoNovaCompra()
+      if (resultado) return resultado
+      return null
+    }
+    if (interpretado.intencaoPrimaria === 'falar_com_humano') {
+      return {
+        estado: transferirParaHumano(estado, 'falar_com_humano (gate retomada_apos_intervalo)'),
+        mensagem: mensagemTransferencia(),
+      }
+    }
   }
 
+  // Nem o determinístico nem o interpretador conseguiram resolver com
+  // confiança — proteção anti-loop: nunca repete a mesma redação da
+  // pergunta duas vezes seguidas, escala pra opções numeradas na 2ª+ falha,
+  // e nunca reseta o estado silenciosamente enquanto isso acontece.
+  const tentativas = tentativasAnteriores + 1
   return {
-    estado: { ...estado, fase: faseAnterior, dados: dadosRestaurados },
-    mensagem: montarMensagemRetomada(faseAnterior, dadosRestaurados),
+    estado: {
+      ...estado,
+      dados: {
+        ...estado.dados,
+        ultimaPergunta: { chave: CHAVE_GATE_RETOMADA, textoExibido: mensagemRetomadaAposIntervalo(), intentsValidas: INTENTS_VALIDAS_RETOMADA },
+        tentativasInterpretacao: { ...estado.dados.tentativasInterpretacao, [CHAVE_GATE_RETOMADA]: tentativas },
+      },
+    },
+    mensagem: mensagemEsclarecimentoPorTentativa(tentativas),
   }
 }
 
@@ -1565,6 +1853,20 @@ export interface DependenciasFunil {
    * produção agora — [] quando não há como confirmar (nunca inventa Pix/
    * cartão/dinheiro sem uma fonte real por trás). */
   buscarFormasPagamento: () => Promise<string[]>
+  /**
+   * Camada de compreensão contextual de intenção (ver `IntencaoContextual`/
+   * `ResultadoInterpretacao` acima) — chamada só quando um gate de ambiguidade
+   * real (ex.: `resolverRetomadaAposIntervalo`) não consegue decidir sozinho
+   * pelo caminho determinístico. Recebe o prompt já montado (contexto mínimo:
+   * mensagem, última pergunta, fase, dados coletados) e devolve o JSON bruto
+   * do modelo como string, ou `null` em caso de indisponibilidade/erro —
+   * NUNCA deve lançar exceção (a implementação real, fora deste arquivo,
+   * embrulha timeout/erro em `null`). Opcional de propósito: ausente (testes,
+   * ou canal ainda sem rollout do interpretador) significa comportamento
+   * 100% determinístico, idêntico ao anterior a esta camada — nunca decide
+   * preço, disponibilidade ou regra comercial, só intenção/entidades do texto.
+   */
+  interpretarIntencao?: (systemPrompt: string, mensagemCliente: string, timeoutMs: number) => Promise<string | null>
 }
 
 export interface ResultadoEtapa {
@@ -2674,7 +2976,10 @@ export async function avancarFunil(
       estado: {
         ...estado,
         fase: 'retomada_apos_intervalo',
-        dados: { ...estado.dados, faseAntesDoIntervalo: estado.fase, ultimaInteracaoEm: agora.toISOString() },
+        dados: {
+          ...estado.dados, faseAntesDoIntervalo: estado.fase, ultimaInteracaoEm: agora.toISOString(),
+          ultimaPergunta: { chave: CHAVE_GATE_RETOMADA, textoExibido: mensagemRetomadaAposIntervalo(), intentsValidas: INTENTS_VALIDAS_RETOMADA },
+        },
       },
       mensagem: mensagemRetomadaAposIntervalo(),
     }

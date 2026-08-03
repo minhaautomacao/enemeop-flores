@@ -7,6 +7,7 @@ import { searchLiveProductsFromSite, listCategoriesFromSite, fetchProductsByCate
 import { calcularFreteReal } from './frete.js'
 import { gerarPagamentoReal } from './pagamento.js'
 import { criarPedidoProvisorio } from './pedido.js'
+import { criarChamadorInterpretacao } from './ia-interprete.js'
 import { randomUUID } from 'crypto'
 import {
   classificarIntencao,
@@ -34,6 +35,12 @@ const WHATSAPP_LINK = process.env.STORE_WHATSAPP_LINK ?? ''
 // eventualmente compartilhem o mesmo Redis (ver seção 3 do pedido de
 // integração: chave conceitual workspace:canal:cliente:estado).
 const WORKSPACE_ID = process.env.SAAS_WORKSPACE_ID ?? 'enemeop-flores'
+
+// Ativa a camada de interpretação contextual de intenção (ver Parte
+// "correção estrutural" em funil.ts) — flag de rollout por canal: ausente
+// (padrão), o comportamento é 100% determinístico, idêntico ao anterior a
+// essa camada. Nunca decide preço/disponibilidade/regra comercial.
+const INTERPRETACAO_CONTEXTUAL_ATIVA = process.env.FUNIL_INTERPRETACAO_CONTEXTUAL_ATIVA === 'true'
 
 // Versão do formato do estado — incrementar sempre que EstadoConversa mudar
 // de forma incompatível, para permitir migração/descarte controlado de
@@ -268,6 +275,7 @@ function construirDependenciasFunil(opts: {
     gerarPagamentoPix: async () => null,
     criarPedido: (dados) => criarPedidoProvisorio(dados, opts.cliente),
     buscarFormasPagamento: buscarFormasPagamentoReal,
+    interpretarIntencao: INTERPRETACAO_CONTEXTUAL_ATIVA ? criarChamadorInterpretacao() : undefined,
   }
 }
 

@@ -32,6 +32,7 @@ import { dentroDoHorarioComercial, textoProximaAberturaComercial } from '../_sha
 import { type DadosClientePedido, criarOuReusarPedido, gerarOuReusarPreference, gerarOuReusarPagamentoPix, buscarFormasPagamentoReal } from '../_shared/pedido-repositorio.ts';
 import { type OrigemHandoff, criarOuReusarAtendimento } from '../_shared/handoff.ts';
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
+import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -57,6 +58,11 @@ const FACTORY_SECRET = Deno.env.get('FACTORY_SECRET') ?? '';
 const SERVICE_KEY    = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const WORKSPACE_ID   = Deno.env.get('SAAS_WORKSPACE_ID') ?? '';
 const SUPABASE_URL   = Deno.env.get('SUPABASE_URL') ?? '';
+// Ativa a camada de interpretação contextual de intenção (ver Parte
+// "correção estrutural" em funil.ts) — flag de rollout por canal: ausente
+// (padrão), o comportamento é 100% determinístico, idêntico ao anterior a
+// essa camada. Nunca decide preço/disponibilidade/regra comercial.
+const INTERPRETACAO_CONTEXTUAL_ATIVA = Deno.env.get('FUNIL_INTERPRETACAO_CONTEXTUAL_ATIVA') === 'true';
 const IG_TOKEN       = Deno.env.get('META_IG_ACCESS_TOKEN') ?? '';
 const PAGE_TOKEN     = Deno.env.get('META_PAGE_ACCESS_TOKEN') ?? '';
 // Minutos de antecedência necessários pra preparar/coletar o pedido antes do
@@ -294,6 +300,7 @@ function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFu
     gerarPagamentoPix: (pedidoId) => gerarOuReusarPagamentoPix(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'webhook-meta', criarPagamentoPixMercadoPago),
     criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'webhook-meta'),
     buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
+    interpretarIntencao: INTERPRETACAO_CONTEXTUAL_ATIVA ? criarChamadorInterpretacao() : undefined,
   };
 }
 

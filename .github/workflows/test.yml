@@ -1,0 +1,27 @@
+name: Testes do orchestrator (funil da Flora)
+
+# Primeiro workflow de CI a rodar testes neste repositório — antes disso,
+# funil.parity.test.ts (garante que supabase/functions/_shared/funil.ts nunca
+# diverge de orchestrator/src/lib/funil.ts) existia mas nunca era executado
+# automaticamente. Falha dura em qualquer teste (incluindo o de paridade)
+# bloqueia o merge.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  orchestrator-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orchestrator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

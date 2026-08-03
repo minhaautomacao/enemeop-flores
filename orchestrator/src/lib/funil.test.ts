@@ -58,6 +58,7 @@ import {
   montarMensagemCamposFaltando,
   formatarTelefoneExibicao,
 } from './funil.js'
+import { formularioTexto, formularioFixture, depsFake } from './funil.test-helpers.js'
 
 // 1. cliente pede buquê para aniversário
 test('1. cliente pede buque para aniversario -> intencao recomendacao e ocasiao extraida', () => {
@@ -650,80 +651,10 @@ test('acentuacao e caixa alta nao mudam a classificacao', () => {
 })
 
 // ── Dispatcher avancarFunil — fluxo completo com dependencias fake ────────
-
-// Formulário de entrega completo, pronto pra enviar como uma única mensagem
-// do cliente (Parte 2) — usado pelos testes que precisam passar pela etapa
-// de formulário/confirmação/frete.
-function formularioTexto(overrides: Record<string, string> = {}): string {
-  const base: Record<string, string> = {
-    'Nome de quem está fazendo o pedido': 'Ana',
-    'Nome de quem vai receber': 'Camila',
-    'Telefone de quem vai receber, com DDD': '11999990000',
-    'CEP': '04204-030',
-    'Rua ou avenida': 'Rua das Flores',
-    'Número': '123',
-    'Bairro': 'Ipiranga',
-    'Cidade': 'São Paulo',
-    'UF': 'SP',
-    'Data desejada para entrega': 'amanhã',
-  }
-  const merged = { ...base, ...overrides }
-  return Object.entries(merged).map(([k, v]) => `${k}: ${v}`).join('\n')
-}
-
-// Mesmos dados de formularioTexto(), já como objeto — pra fixtures que
-// montam EstadoConversa diretamente (sem passar pelo parser).
-function formularioFixture(overrides: Partial<FormularioEntregaDados> = {}): FormularioEntregaDados {
-  return {
-    nomeComprador: 'Ana',
-    nomeDestinatario: 'Camila',
-    telefoneDestinatario: '+5511999990000',
-    cep: '04204-030',
-    rua: 'Rua das Flores',
-    numero: '123',
-    bairro: 'Ipiranga',
-    cidade: 'São Paulo',
-    uf: 'SP',
-    dataEntrega: 'amanhã',
-    ...overrides,
-  }
-}
-
-function depsFake(overrides?: Partial<DependenciasFunil>): DependenciasFunil {
-  return {
-    buscarCatalogo: async () => [
-      { nome: 'Buquê de Rosas', preco: 140, disponivel: true, fotoUrl: 'https://site/rosas.jpg' },
-      { nome: 'Arranjo Girassóis', preco: 135, disponivel: true },
-    ],
-    // [] por padrão faz etapaEscolhaCategoria cair no fluxo antigo de busca
-    // direta por texto (etapaRecomendacao) — testes que não mexem com
-    // categoria continuam passando sem precisar mockar isso explicitamente.
-    buscarCategorias: async () => [],
-    buscarProdutosPorCategoria: async () => [],
-    revalidarProduto: async () => ({ disponivel: true }),
-    // detalhes: {} garante que etapaCalculoFrete grava cotadoEm (cotação real
-    // sempre traz detalhes reais em produção — ver cotacaoFreteVencida/Parte 4).
-    calcularFrete: async () => ({ ok: true, valor: 22.5, detalhes: {} }),
-    // ViaCEP fake: por padrão sempre localiza um endereço completo — testes
-    // que já informam rua/bairro no formulário mantêm o valor do cliente
-    // (só preenche o que estiver vazio, ver etapaFormulario); testes que
-    // exercitam CEP inválido/parcial sobrescrevem isso explicitamente.
-    consultarCep: async () => ({ rua: 'Rua das Flores', bairro: 'Ipiranga', cidade: 'São Paulo', uf: 'SP' }),
-    // Fake determinístico e simples (não precisa reproduzir a lógica real de
-    // horário comercial de _shared/agendamento-entrega.ts, usada só pelas
-    // Edge Functions Deno) — só devolve datas ISO válidas e coerentes pra
-    // exercitar o fluxo do funil.
-    calcularAgendamento: (dataEntrega) => {
-      const iso = new Date(Date.UTC(dataEntrega.ano, dataEntrega.mes, dataEntrega.dia, 12, 0)).toISOString()
-      return { entregaPrometidaEmISO: iso, despachoEmISO: iso, imediato: true }
-    },
-    gerarPagamento: async (pedidoId) => ({ link: `https://pagamento.exemplo/${pedidoId}`, paymentId: pedidoId }),
-    gerarPagamentoPix: async (pedidoId) => ({ qrCodeUrl: `https://storage.exemplo/${pedidoId}.png`, copiaCola: `00020126${pedidoId}` }),
-    criarPedido: async () => ({ pedidoId: 'pedido_fake_001' }),
-    buscarFormasPagamento: async () => ['Pix', 'cartão de crédito', 'cartão de débito'],
-    ...overrides,
-  }
-}
+//
+// formularioTexto/formularioFixture/depsFake extraídos para
+// funil.test-helpers.ts (compartilhados com funil.interpretacao.test.ts e
+// funil.conversas.test.ts — nunca duplicados entre os três arquivos).
 
 test('dispatcher: qualificacao pergunta um campo por vez, sem repetir, e nunca pergunta orcamento', async () => {
   let estado = estadoInicial()
@@ -2313,9 +2244,14 @@ test('retomada apos intervalo 2: "continuar" restaura a fase e os dados salvos; 
   assert.equal(rNovaCompra.estado.dados.valorFrete, undefined, 'nunca reaproveita frete da jornada anterior')
   assert.equal(rNovaCompra.estado.dados.freteDetalhes, undefined, 'nunca reaproveita cotação da jornada anterior')
 
+  // Sem deps.interpretarIntencao conectado (depsFake padrão), a camada
+  // contextual devolve null e o gate cai na escalada anti-loop: a 1ª falha
+  // reformula a pergunta (nunca repete a redação exata), nunca avança
+  // sozinho e nunca reinicia a jornada silenciosamente.
   const rAmbiguo = await avancarFunil(estadoAguardando, 'hein?', 'compra_produto', deps)
   assert.equal(rAmbiguo.estado.fase, 'retomada_apos_intervalo', 'resposta que não escolhe nenhuma opção repete a pergunta, nunca avança sozinho')
-  assert.equal(rAmbiguo.mensagem, mensagemRetomadaAposIntervalo())
+  assert.notEqual(rAmbiguo.mensagem, mensagemRetomadaAposIntervalo(), '1ª falha reformula a pergunta em vez de repetir a mesma redação (anti-loop)')
+  assert.equal(rAmbiguo.estado.dados.tentativasInterpretacao?.['retomada_apos_intervalo'], 1)
 })
 
 // Bug real observado em monitoramento 2026-07-25: "nova compra" vindo do
@@ -3075,7 +3011,9 @@ test('4. mensagem comum sem dados nem intenção clara mantém a pergunta de ret
   }
   const r = await avancarFunil(estado, 'oi tudo bem?', 'compra_produto', deps)
   assert.equal(r.estado.fase, 'retomada_apos_intervalo')
-  assert.equal(r.mensagem, mensagemRetomadaAposIntervalo())
+  // 1ª falha de interpretação reformula a pergunta (anti-loop) em vez de
+  // repetir a redação exata — ver teste dedicado de escalada mais abaixo.
+  assert.notEqual(r.mensagem, mensagemRetomadaAposIntervalo())
 })
 
 test('5. correção "quem vai receber é [nome]" atualiza somente o destinatário', async () => {

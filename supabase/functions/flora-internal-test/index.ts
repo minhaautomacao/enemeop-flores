@@ -53,6 +53,8 @@ import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPo
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { criarPreferenciaMercadoPago, criarPagamentoPixMercadoPago } from '../_shared/mercadopago.ts';
 import { criarOuReusarPedido, gerarOuReusarPreference, gerarOuReusarPagamentoPix, buscarFormasPagamentoReal, type DadosClientePedido } from '../_shared/pedido-repositorio.ts';
+import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
+import { registrarEventoInterpretacao } from '../_shared/interpretador-telemetria.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -78,6 +80,12 @@ const TIMEOUT_FRETE_MS = 25_000;
 // 'true' liga pagamento real (ver cabeçalho do arquivo) — qualquer outro
 // valor (padrão) mantém gerarPagamentoMock.
 const REAL_ORDER = Deno.env.get('FLORA_INTERNAL_REAL_ORDER') === 'true';
+// Ativa a camada de interpretação contextual de intenção (ver Parte
+// "correção estrutural" em funil.ts) — flag de rollout por canal: ausente
+// (padrão), o comportamento é 100% determinístico, idêntico ao anterior a
+// essa camada. flora-internal-test é o primeiro canal do rollout gradual
+// (teste interno -> SDR -> Instagram/Facebook -> WhatsApp).
+const INTERPRETACAO_CONTEXTUAL_ATIVA = Deno.env.get('FUNIL_INTERPRETACAO_CONTEXTUAL_ATIVA') === 'true';
 
 function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
@@ -206,6 +214,7 @@ function construirDependenciasFunilTeste(cliente: DadosClientePedido): Dependenc
     gerarPagamentoPix: REAL_ORDER ? gerarPagamentoPixReal : gerarPagamentoPixMock,
     criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'flora-internal-test'),
     buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
+    interpretarIntencao: INTERPRETACAO_CONTEXTUAL_ATIVA ? criarChamadorInterpretacao() : undefined,
   };
 }
 
@@ -274,10 +283,32 @@ async function processarMensagemTeste(conversaId: string, mensagemCliente: strin
       canalId: conversaId,
       conversaId: conversaRow.id,
     });
+    const faseAntes = estado.fase;
+    const inicioMs = Date.now();
     const resultado = await avancarFunil(estado, mensagemCliente, intencao, deps, false, undefined);
+    const duracaoMs = Date.now() - inicioMs;
     estado = resultado.estado;
     respostaFinal = resultado.mensagem;
     fotoUrl = resultado.fotoUrl;
+
+    // Telemetria só quando o gate de interpretação contextual (fatia 1)
+    // esteve envolvido — nunca em toda mensagem, que poluiria a tabela sem
+    // sinal nenhum das outras etapas ainda não migradas. Fire-and-forget:
+    // nunca aguardado de forma bloqueante, nunca atrasa a resposta ao cliente.
+    if (faseAntes === 'retomada_apos_intervalo' || estado.fase === 'retomada_apos_intervalo') {
+      void registrarEventoInterpretacao({
+        conversaId: conversaRow.id,
+        fase: faseAntes,
+        ultimaPerguntaChave: estado.dados.ultimaPergunta?.chave,
+        ultimaPerguntaTexto: estado.dados.ultimaPergunta?.textoExibido,
+        mensagemRecebida: mensagemCliente,
+        acaoTomada: estado.fase,
+        avancou: estado.fase !== 'retomada_apos_intervalo',
+        tentativaNumero: estado.dados.tentativasInterpretacao?.['retomada_apos_intervalo'] ?? 0,
+        fallbackAcionado: !INTERPRETACAO_CONTEXTUAL_ATIVA,
+        duracaoMs,
+      });
+    }
   }
 
   const historicoFinal = [...historico, { role: 'assistant' as const, content: respostaFinal, ts: new Date().toISOString() }].slice(-20);

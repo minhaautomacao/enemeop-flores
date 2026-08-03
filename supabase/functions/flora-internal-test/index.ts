@@ -85,7 +85,15 @@ const REAL_ORDER = Deno.env.get('FLORA_INTERNAL_REAL_ORDER') === 'true';
 // (padrão), o comportamento é 100% determinístico, idêntico ao anterior a
 // essa camada. flora-internal-test é o primeiro canal do rollout gradual
 // (teste interno -> SDR -> Instagram/Facebook -> WhatsApp).
-const INTERPRETACAO_CONTEXTUAL_ATIVA = Deno.env.get('FUNIL_INTERPRETACAO_CONTEXTUAL_ATIVA') === 'true';
+//
+// Variável DEDICADA a este canal (nunca FUNIL_INTERPRETACAO_CONTEXTUAL_ATIVA):
+// Edge Function Secrets no Supabase são compartilhados por todo o projeto,
+// não por função — webhook-whatsapp e webhook-meta também rodam neste
+// mesmo projeto e leem FUNIL_INTERPRETACAO_CONTEXTUAL_ATIVA. Usar o mesmo
+// nome aqui ativaria a camada contextual nos canais reais também, mesmo
+// sem nenhum deploy neles. Achado da preparação do rollout controlado —
+// ver relatório da tarefa.
+const INTERPRETACAO_CONTEXTUAL_ATIVA = Deno.env.get('FLORA_INTERNAL_TEST_INTERPRETACAO_ATIVA') === 'true';
 
 function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });

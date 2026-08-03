@@ -2395,6 +2395,48 @@ test('3. retomada: continuar o pedido anterior permanece funcionando', async () 
   assert.equal(r.estado.dados.produto?.nome, 'Buquê de Rosas', 'recupera o contexto real, nunca reinventa')
 })
 
+// Bug real observado em monitoramento: o cliente respondia à própria
+// pergunta do gate ("...continuar o pedido anterior ou prefere iniciar uma
+// nova compra?") repetindo a palavra "anterior" — resposta natural e
+// inequívoca, mas nem FRASES_CONTINUACAO nem pareceConfirmacao reconheciam
+// isso, e a Flora repetia a mesma pergunta em loop indefinidamente.
+test('4. retomada: "anterior" e "pedido anterior" (resposta direta à pergunta do gate) avançam sem repetir', async () => {
+  const deps = depsFake()
+  const estadoAguardando: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: {
+      produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 },
+      faseAntesDoIntervalo: 'aguardando_aprovacao_frete',
+      valorFrete: 22.5, valorTotal: 162.5,
+      freteDetalhes: { cotadoEm: new Date().toISOString() },
+    },
+    perguntasFeitas: [],
+  }
+  for (const texto of ['Anterior', 'Pedido anterior', 'anterior', 'o anterior']) {
+    const r = await avancarFunil(estadoAguardando, texto, 'compra_produto', deps)
+    assert.equal(r.estado.fase, 'aguardando_aprovacao_frete', `"${texto}" deveria restaurar a fase salva, nunca repetir a pergunta`)
+    assert.equal(r.estado.dados.produto?.nome, 'Buquê de Rosas', `"${texto}" deveria recuperar o contexto real`)
+  }
+})
+
+// Bug real observado em monitoramento: "Quero trocar o pedido" (variante com
+// "pedido" em vez de "produto") caía fora de FRASES_NOVO_PEDIDO — só "trocar
+// o produto"/"trocar produto" eram reconhecidas — e a Flora repetia a mesma
+// pergunta de retomada indefinidamente mesmo com um pedido de troca explícito.
+test('5. retomada: "Quero trocar o pedido" reinicia a jornada, mesma cobertura já existente para "trocar o produto"', async () => {
+  const deps = depsFake()
+  const estadoAguardando: EstadoConversa = {
+    fase: 'retomada_apos_intervalo',
+    dados: { produto: { nome: 'Buquê de Rosas', preco: 140, quantidade: 1 }, faseAntesDoIntervalo: 'aguardando_formulario' },
+    perguntasFeitas: [],
+  }
+  for (const texto of ['Quero trocar o pedido', 'trocar pedido']) {
+    const r = await avancarFunil(estadoAguardando, texto, 'compra_produto', deps)
+    assert.notEqual(r.estado.fase, 'retomada_apos_intervalo', `"${texto}" deveria reiniciar a jornada, nunca repetir a pergunta`)
+    assert.equal(r.estado.dados.produto, undefined, `"${texto}" nunca deveria reaproveitar o produto anterior`)
+  }
+})
+
 // ── Parte 4 — validade da cotação real de frete ───────────────────────────
 
 test('cotacao 29 minutos ainda valida, 30 minutos ja vencida — nunca gera pagamento sobre cotação vencida', async () => {

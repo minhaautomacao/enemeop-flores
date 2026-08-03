@@ -772,6 +772,11 @@ const FRASES_NOVO_PEDIDO = [
   // frete), tem que continuar SEM reiniciar a jornada (comportamento já
   // coberto por teste existente); "trocar" não colide com esse caso.
   'trocar o produto', 'trocar produto',
+  // Bug real observado em monitoramento: "Quero trocar o pedido" (não
+  // "produto") caía no mesmo caso fase-específico de repetir a pergunta de
+  // retomada indefinidamente — só "trocar o produto"/"trocar produto"
+  // estavam cobertos, nunca a variante mais comum com "pedido".
+  'trocar o pedido', 'trocar pedido',
 ]
 
 const FRASES_CONTINUACAO = [
@@ -867,6 +872,16 @@ function normalizarFrase(texto: string): string {
  * duplicando a validação/consulta real de CEP e telefone), sem exigir
  * "continuar" antes.
  */
+// Resposta natural e inequívoca à própria pergunta do gate ("...continuar o
+// pedido anterior ou prefere iniciar uma nova compra?") — o cliente repete a
+// palavra-chave da pergunta em vez de "sim"/"continuar". Bug real observado
+// em monitoramento: "Anterior" e "Pedido anterior" caíam fora de
+// FRASES_CONTINUACAO e de pareceConfirmacao, e a Flora repetia a mesma
+// pergunta indefinidamente mesmo com uma resposta clara. Escopo restrito a
+// este gate (nunca em FRASES_CONTINUACAO global) porque "anterior" só é
+// inequívoco aqui, onde as únicas duas opções em jogo são "anterior" vs "nova".
+const FRASES_QUER_PEDIDO_ANTERIOR = ['anterior', 'pedido anterior', 'o anterior', 'continuar com o anterior', 'quero o anterior', 'quero o pedido anterior']
+
 async function resolverRetomadaAposIntervalo(
   estado: EstadoConversa,
   mensagemCliente: string,
@@ -897,6 +912,7 @@ async function resolverRetomadaAposIntervalo(
   const trouxeDadosDoFormulario = Object.keys(extrairFormularioEntrega(mensagemCliente)).length > 0
   const querContinuar = trouxeDadosDoFormulario
     || FRASES_CONTINUACAO.some(p => n.includes(normalizarFrase(p)))
+    || FRASES_QUER_PEDIDO_ANTERIOR.some(p => n === normalizarFrase(p) || n.includes(normalizarFrase(p)))
     || pareceConfirmacao(mensagemCliente)
 
   if (!querContinuar) {

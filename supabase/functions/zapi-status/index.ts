@@ -33,13 +33,21 @@ interface CredenciaisZapi {
 }
 
 async function carregarCredenciaisZapi(workspaceId: string): Promise<CredenciaisZapi | null> {
-  const [instanceId, token, clientToken] = await Promise.all([
+  const [instanceIdDb, tokenDb, clientTokenDb] = await Promise.all([
     buscarCredencial(workspaceId, 'whatsapp', 'instance_id'),
     buscarCredencial(workspaceId, 'whatsapp', 'token'),
     buscarCredencial(workspaceId, 'whatsapp', 'client_token'),
   ]);
+  // workspace_credentials (tipo='whatsapp') está vazia em produção — a
+  // instância Z-API realmente configurada hoje vive em Edge Function
+  // secrets (ZAPI_INSTANCE_ID/ZAPI_TOKEN/ZAPI_CLIENT_TOKEN), mesma fonte já
+  // usada por webhook-whatsapp/index.ts e por _shared/whatsapp.ts (mesma
+  // prioridade: banco primeiro, env var como fallback — nunca o contrário).
+  const instanceId = instanceIdDb || Deno.env.get('ZAPI_INSTANCE_ID') || '';
+  const token = tokenDb || Deno.env.get('ZAPI_TOKEN') || '';
+  const clientToken = clientTokenDb || Deno.env.get('ZAPI_CLIENT_TOKEN') || undefined;
   if (!instanceId || !token) return null;
-  return { instanceId, token, clientToken: clientToken ?? undefined };
+  return { instanceId, token, clientToken };
 }
 
 function headersZapi(creds: CredenciaisZapi): Record<string, string> {

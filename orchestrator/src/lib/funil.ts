@@ -793,10 +793,20 @@ const PALAVRAS_ATENDIMENTO_HUMANO = [
 
 const PALAVRAS_RECLAMACAO = [
   'reclamacao', 'reclamar', 'insatisfeit', 'pessimo',
-  'terrivel', 'veio errado', 'pedido errado', 'cancelar',
-  'cancelamento', 'nao chegou', 'esta atrasado',
+  'terrivel', 'veio errado', 'pedido errado',
+  'nao chegou', 'esta atrasado',
   'chegou atrasado', 'chegou quebrado', 'quebrado', 'estragado', 'decepcionad',
   'muito ruim', 'horrivel', 'nao gostei',
+  // 'cancelar'/'cancelamento' removidos daqui (achado da Seção 7 do rollout,
+  // 2026-08-04): classificarIntencao roda ANTES de avancarFunil, e
+  // intencaoInterrompeFluxo trata 'reclamacao' igual a 'atendimento_humano'
+  // — ou seja, qualquer mensagem com "cancelar" ia direto pra transferência
+  // humana, sem nunca alcançar o gate de confirmação de cancelamento
+  // (CHAVE_GATE_CANCELAMENTO_GLOBAL) construído em funil.ts especificamente
+  // pra isso. Um "quero cancelar" sozinho não é reclamação; se vier
+  // acompanhado de sinal real de insatisfação ("pedido errado", "veio
+  // quebrado", "terrivel" etc.), essas outras palavras desta lista continuam
+  // classificando corretamente como reclamação.
 ]
 
 const PALAVRAS_FORA_ESCOPO = [

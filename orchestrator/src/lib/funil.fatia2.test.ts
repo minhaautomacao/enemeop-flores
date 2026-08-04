@@ -9,7 +9,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { avancarFunil, type EstadoConversa } from './funil.js'
+import { avancarFunil, classificarIntencao, intencaoInterrompeFluxo, type EstadoConversa } from './funil.js'
 import { depsFake, formularioFixture, criarInterpretadorFake, type CenarioInterpretacaoFake } from './funil.test-helpers.js'
 
 function estadoAprovacaoFreteFixture(overrides: Partial<EstadoConversa['dados']> = {}): EstadoConversa {
@@ -398,4 +398,40 @@ test('diagnosticoInterpretacao: modelo indisponível marca fallbackAcionado=true
 
   const comFalha = await avancarFunil(estadoAprovacaoFreteFixture(), 'hein', 'compra_produto', depsFake({ interpretarIntencao: async () => null }))
   assert.equal(comFalha.diagnosticoInterpretacao?.fallbackAcionado, true, 'interpretador conectado mas sem resposta usável é fallback de verdade')
+})
+
+// Regressão — achado ao vivo na Seção 7 do rollout (2026-08-04, flora-internal-test):
+// "quero cancelar"/"quero cancelar tudo" nunca alcançavam o gate de
+// confirmação de cancelamento (CHAVE_GATE_CANCELAMENTO_GLOBAL) porque
+// classificarIntencao (chamado ANTES de avancarFunil, em cada canal) batia
+// primeiro em PALAVRAS_RECLAMACAO (que incluía 'cancelar'/'cancelamento') e
+// devolvia 'reclamacao' — intencaoInterrompeFluxo trata isso igual a
+// atendimento_humano, então o canal transferia pra humano direto, sem nunca
+// chamar avancarFunil. Bug pré-existente (commit 6547eaba, 2026-07-10),
+// anterior a esta camada de interpretação — só ficou visível agora porque
+// o gate de cancelamento seguro desta iniciativa depende de avancarFunil
+// rodar. Corrigido removendo 'cancelar'/'cancelamento' de PALAVRAS_RECLAMACAO.
+test('regressão: "quero cancelar" não é classificado como reclamação — alcança o gate de confirmação de cancelamento, não a transferência humana direta', () => {
+  const intencao = classificarIntencao('quero cancelar tudo', 'aguardando_aprovacao_frete')
+  assert.notEqual(intencao, 'reclamacao', '"cancelar" sozinho não é reclamação — bloqueava o gate de confirmação de cancelamento')
+  assert.equal(intencaoInterrompeFluxo(intencao), false, '"quero cancelar" nunca deve pular direto pra transferência humana sem passar pelo gate de confirmação')
+})
+
+test('regressão: reclamações genuínas continuam indo para atendimento humano (a correção não removeu a detecção real de reclamação)', () => {
+  for (const mensagem of ['o pedido veio errado', 'isso é terrível, muito ruim', 'chegou quebrado e estragado']) {
+    const intencao = classificarIntencao(mensagem, 'aguardando_aprovacao_frete')
+    assert.equal(intencao, 'reclamacao', `"${mensagem}" ainda deve ser reconhecida como reclamação`)
+    assert.equal(intencaoInterrompeFluxo(intencao), true)
+  }
+})
+
+test('regressão: "quero cancelar tudo" (fora da lista determinística FRASES_CANCELAMENTO_PEDIDO, exige interpretação) chega no sub-gate de confirmação via o gate de aprovação de frete, nunca cancela na mesma mensagem nem vira transferência humana', async () => {
+  const deps = depsFake({ interpretarIntencao: criarInterpretadorFake([
+    { quando: (m) => /cancelar/i.test(m), resultado: { intencaoPrimaria: 'cancelar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'cliente pediu cancelamento', acaoRecomendada: 'confirmar_cancelamento', precisaEsclarecimento: false } },
+  ]) })
+  const r = await avancarFunil(estadoAprovacaoFreteFixture(), 'quero cancelar tudo', 'compra_produto', deps)
+  assert.notEqual(r.estado.fase, 'encerrado_sem_venda', 'nunca cancela sem confirmação explícita')
+  assert.notEqual(r.estado.fase, 'transferido_humano', 'não deve ser tratado como reclamação/atendimento humano (esse era o bug)')
+  assert.match(r.mensagem, /quer mesmo cancelar/i)
+  assert.equal(r.estado.dados.produto?.nome, 'Buquê de Rosas', 'produto preservado enquanto aguarda confirmação')
 })

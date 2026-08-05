@@ -653,7 +653,13 @@ async function hmacOk(body: string, secret: string, expected: string): Promise<b
 }
 
 async function validarAssinatura(body: string, signature: string | null): Promise<boolean> {
-  if (!signature) return true;
+  // Achado da auditoria de produção (2026-08-05): assinatura ausente
+  // devolvia `true` (válida) — qualquer POST forjado sem o cabeçalho
+  // x-hub-signature-256 passava direto pro funil comercial sem autenticação
+  // real. META_APP_SECRET/META_IG_APP_SECRET já estão configurados, então a
+  // Meta sempre envia essa assinatura em produção — ausência dela agora é
+  // tratada como inválida.
+  if (!signature) return false;
   const expected = signature.replace('sha256=', '');
   if (IG_APP_SECRET && await hmacOk(body, IG_APP_SECRET, expected)) return true;
   if (APP_SECRET    && await hmacOk(body, APP_SECRET,    expected)) return true;

@@ -36,6 +36,7 @@ import { buscarPagamentoReal, validarAssinaturaWebhook } from '../_shared/mercad
 import { enviarWhatsApp } from '../_shared/whatsapp.ts';
 import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento, mensagemPagamentoNaoAprovado } from './logica.ts';
 import { processarLogisticaAposPagamento, SELECT_PEDIDO_PARA_LOGISTICA, type PedidoParaEntrega } from '../_shared/logistica-processamento.ts';
+import { processarCancelamentoLogistica, type PedidoParaCancelamentoEntrega } from '../_shared/logistica-cancelamento.ts';
 import { decidirProcessamentoEvento, type EventoExistente } from '../_shared/pagamento-evento-decisao.ts';
 import { camposBRT } from '../_shared/horario-comercial.ts';
 import { type PeriodoEntrega, type DataCalendario } from '../_shared/agendamento-entrega.ts';
@@ -479,6 +480,21 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { status: 200 });
   }
   console.log(`[webhook-mp] pedido ${pedido.id} atualizado para status=${statusMapeado} (mp status=${pagamento.status})`);
+
+  // Gap fechado (achado em auditoria, 2026-08-06): até esta correção, um
+  // estorno/cancelamento feito FORA do nosso sistema (direto no painel do
+  // Mercado Pago) atualizava pedidos.status mas nunca cancelava a corrida
+  // real na Lalamove, mesmo com status_logistica='criada'. Best-effort —
+  // nunca trava nem atrasa a resposta 200 ao Mercado Pago; uma falha aqui
+  // vira 'revisao_logistica' dentro do próprio módulo, nunca lançada.
+  if ((statusMapeado === 'cancelado' || statusMapeado === 'reembolsado') && (pedido as PedidoRow & { status_logistica?: string | null }).status_logistica === 'criada') {
+    try {
+      await processarCancelamentoLogistica(db, pedido as unknown as PedidoParaCancelamentoEntrega, { workspaceId: WORKSPACE_ID });
+    } catch (e) {
+      console.error(`[webhook-mp] falha ao tentar cancelar logistica apos ${statusMapeado} (nao critico): ${e instanceof Error ? e.message : String(e)} pedido=${pedido.id}`);
+    }
+  }
+
   if (decisaoEvento.acao === 'processar_completo') {
     if (statusMapeado === 'pagamento_recusado' || statusMapeado === 'cancelado') {
       await notificarCliente(pedido as PedidoRow, mensagemPagamentoNaoAprovado((pedido as PedidoRow).link_pagamento));

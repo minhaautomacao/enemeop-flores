@@ -135,3 +135,42 @@ export async function criarEntregaLalamove(
     moeda: data.priceBreakdown?.currency,
   };
 }
+
+export type ResultadoCancelarEntrega =
+  | { ok: true }
+  /** A Lalamove recusou explicitamente (ex.: corrida já coletada pelo motorista, avançada demais para cancelar) — nunca retry automático (ver logistica-cancelamento-decisao.ts), sempre revisão humana. */
+  | { ok: false; motivo: 'recusado_pela_transportadora'; erroSanitizado: string }
+  /** Timeout/falha de rede sem resposta — não dá pra provar que a corrida NÃO foi cancelada do lado da Lalamove. NUNCA retry automático (o mesmo raciocínio de "ambíguo" usado em criarEntregaLalamove). */
+  | { ok: false; motivo: 'ambiguo'; erroSanitizado: string };
+
+/**
+ * Cancela a entrega real (DELETE /v3/orders/{orderId}). Só deve ser chamado
+ * depois que quem chama (logistica-cancelamento.ts) já reivindicou
+ * atomicamente o cancelamento (mesmo padrão de claim de criarEntregaLalamove).
+ *
+ * NOTA: a documentação oficial da Lalamove v3 não foi verificada nesta
+ * integração quanto ao formato exato da resposta de cancelamento (ex.: se
+ * uma eventual taxa de cancelamento vem no corpo da resposta) — só o
+ * endpoint/verbo documentado (DELETE /v3/orders/{orderId}) é assumido aqui.
+ * Se a resposta real trouxer informação de taxa, `logistica-cancelamento.ts`
+ * é o lugar certo pra capturar isso a partir do resultado, sem inventar um
+ * campo que a API não confirma.
+ */
+export async function cancelarEntregaLalamove(
+  apiKey: string,
+  apiSecret: string,
+  orderId: string,
+): Promise<ResultadoCancelarEntrega> {
+  const config = resolverConfig();
+  const resultado = await chamarLalamove(config, apiKey, apiSecret, 'DELETE', `/v3/orders/${orderId}`, null, 10_000);
+
+  if (!resultado.ok) {
+    if (resultado.status === 0) {
+      return { ok: false, motivo: 'ambiguo', erroSanitizado: resultado.erroSanitizado };
+    }
+    return { ok: false, motivo: 'recusado_pela_transportadora', erroSanitizado: resultado.erroSanitizado };
+  }
+
+  console.log(`[lalamove-orders] entrega cancelada orderId=${mascarar(orderId)} ambiente=${config.ambiente}`);
+  return { ok: true };
+}

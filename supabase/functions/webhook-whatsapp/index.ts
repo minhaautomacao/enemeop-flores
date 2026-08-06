@@ -51,6 +51,7 @@ import { validarTokenWebhook } from '../_shared/zapi-auth.ts';
 import { canSendWhatsAppMessage, mensagemDeOptOut, mensagemConfirmacaoOptOut } from '../_shared/whatsapp-guard.ts';
 import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
 import { registrarEventoInterpretacao, gateDeInterpretacaoEnvolvido, eventoDoResultado } from '../_shared/interpretador-telemetria.ts';
+import { executarCancelamentoPedido, type PedidoParaExecutarCancelamento } from '../_shared/cancelamento-pedido.ts';
 import {
   type EstadoConversa,
   type DadosPedido,
@@ -312,6 +313,24 @@ async function consultarCepReal(cep: string): Promise<{ rua?: string; bairro?: s
 // ── Pedido (rascunho) e pagamento real — implementação compartilhada com
 // webhook-meta, ver _shared/pedido-repositorio.ts (GO-LIVE Parte 1). ───────
 
+const SELECT_PEDIDO_PARA_CANCELAMENTO = 'id, status, status_logistica, status_producao, lalamove_order_id, logistica_cancelamento_pendente_desde, logistica_cancelamento_tentativas, valor, mp_payment_id, canal, canal_id, cliente_telefone';
+
+/** Persistência real do cancelamento confirmado na conversa — ver _shared/cancelamento-pedido.ts. Nunca lança exceção (funil.ts trata `null` como "não foi possível confirmar a persistência" e ainda assim responde ao cliente). */
+async function cancelarPedidoReal(pedidoId: string, motivo: string): Promise<{ cancelado: boolean; precisaEstorno: boolean } | null> {
+  const db = getDb();
+  const { data: pedido, error } = await db.from('pedidos').select(SELECT_PEDIDO_PARA_CANCELAMENTO).eq('id', pedidoId).maybeSingle();
+  if (error || !pedido) {
+    console.error(`[webhook-whatsapp] cancelarPedido: pedido nao encontrado (${error?.message ?? 'sem dados'}) pedido=${pedidoId}`);
+    return null;
+  }
+  try {
+    return await executarCancelamentoPedido(db, pedido as PedidoParaExecutarCancelamento, motivo, 'cliente_flora', { workspaceId: WORKSPACE_ID });
+  } catch (e) {
+    console.error(`[webhook-whatsapp] cancelarPedido: excecao nao tratada: ${e instanceof Error ? e.message : String(e)} pedido=${pedidoId}`);
+    return null;
+  }
+}
+
 function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFunil {
   return {
     buscarCatalogo: buscarCatalogoReal,
@@ -329,6 +348,7 @@ function construirDependenciasFunil(cliente: DadosClientePedido): DependenciasFu
     criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'webhook-whatsapp'),
     buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
     interpretarIntencao: INTERPRETACAO_CONTEXTUAL_ATIVA ? criarChamadorInterpretacao() : undefined,
+    cancelarPedido: cancelarPedidoReal,
   };
 }
 

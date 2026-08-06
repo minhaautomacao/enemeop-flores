@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useTransition } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { NovoPedidoModal } from './NovoPedidoModal';
+import { EstornoModal } from './EstornoModal';
 import { atualizarStatusPedido, avancarStatusProducao } from '@/app/actions/pedidos';
 import type { Pedido, StatusPedido } from '@/types';
 
@@ -14,6 +15,13 @@ type StatusProducao = Pedido['status_producao'];
 const STATUS_PAGAMENTO_REAL: StatusPedido[] = ['aguardando_pagamento', 'pago', 'pagamento_recusado', 'reembolsado'];
 function ehPedidoReal(status: StatusPedido): boolean {
   return STATUS_PAGAMENTO_REAL.includes(status);
+}
+
+// Botão de estorno só aparece pra pedido pago sem estorno ativo em
+// andamento — 'recusado'/'erro' liberam uma nova tentativa (mesma regra de
+// estorno-decisao.ts do lado do servidor, que é a fonte real de verdade).
+function podeSolicitarEstorno(p: Pedido): boolean {
+  return p.status === 'pago' && (!p.estorno_status || p.estorno_status === 'recusado' || p.estorno_status === 'erro');
 }
 
 function fotoDoPedido(p: Pedido): string | null {
@@ -109,6 +117,7 @@ export default function PedidosPage() {
   const [filtro, setFiltro]           = useState('todos');
   const [busca, setBusca]             = useState('');
   const [modalAberto, setModalAberto] = useState(false);
+  const [pedidoParaEstornar, setPedidoParaEstornar] = useState<string | null>(null);
   const [isPending, startTransition]  = useTransition();
   const [atualizando, setAtualizando] = useState<string | null>(null);
 
@@ -285,6 +294,14 @@ export default function PedidosPage() {
                           </button>
                         )
                       )}
+                      {real && podeSolicitarEstorno(p) && (
+                        <button
+                          onClick={() => setPedidoParaEstornar(p.id)}
+                          className="btn-ghost py-1 px-2 text-xs text-status-error hover:text-status-error"
+                        >
+                          Estornar
+                        </button>
+                      )}
                       <a
                         href={`https://wa.me/55${p.cliente_telefone.replace(/\D/g, '')}`}
                         target="_blank"
@@ -306,6 +323,14 @@ export default function PedidosPage() {
         <NovoPedidoModal
           onFechar={() => setModalAberto(false)}
           onSalvo={() => { setModalAberto(false); carregarPedidos(); }}
+        />
+      )}
+
+      {pedidoParaEstornar && (
+        <EstornoModal
+          pedidoId={pedidoParaEstornar}
+          onFechar={() => setPedidoParaEstornar(null)}
+          onConcluido={() => { setPedidoParaEstornar(null); carregarPedidos(); }}
         />
       )}
     </div>

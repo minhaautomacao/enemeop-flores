@@ -1959,6 +1959,28 @@ export interface DependenciasFunil {
    * preço, disponibilidade ou regra comercial, só intenção/entidades do texto.
    */
   interpretarIntencao?: (systemPrompt: string, mensagemCliente: string, timeoutMs: number) => Promise<string | null>
+  /**
+   * Persiste o cancelamento real de um pedido já criado — chamado só ao
+   * CONFIRMAR o cancelamento (nunca ao só perguntar), nos 3 gates de
+   * cancelamento conversacional (global, confirmação de formulário,
+   * aprovação de frete). Fecha uma lacuna real encontrada em produção: até
+   * esta correção, confirmar o cancelamento na conversa só resetava o
+   * `EstadoConversa` em memória — o pedido continuava `aguardando_pagamento`
+   * no banco, com o link de pagamento ainda válido, mesmo a Flora tendo
+   * dito "cancelado, sem custo nenhum".
+   *
+   * `precisaEstorno` no retorno indica que o pedido já estava pago quando o
+   * cancelamento foi confirmado — a Flora usa isso só pra escolher a frase
+   * certa (nunca promete um estorno concluído: isso sempre passa por
+   * confirmação humana explícita fora da conversa, ver
+   * _shared/estorno-decisao.ts). Opcional de propósito: ausente (testes, ou
+   * pedidoId ainda não existe) preserva o comportamento anterior a esta
+   * correção — só reseta a conversa. Nunca deve lançar exceção; falha real
+   * de persistência devolve `null`, tratado como "não foi possível
+   * confirmar a persistência" (a Flora ainda assim informa o cancelamento,
+   * nunca deixa o cliente sem resposta por causa de uma falha aqui).
+   */
+  cancelarPedido?: (pedidoId: string, motivo: string) => Promise<{ cancelado: boolean; precisaEstorno: boolean } | null>
 }
 
 export interface ResultadoEtapa {
@@ -3132,7 +3154,7 @@ async function etapaConfirmandoFormulario(estado: EstadoConversa, mensagemClient
     if (decisaoCancelamento.decisao === 'confirmou') {
       return {
         estado: { ...estado, fase: 'encerrado_sem_venda', dados: { ...limparPendenciaInterpretacao(estado.dados), produto: undefined, formulario: undefined } },
-        mensagem: 'Seu pedido foi cancelado, sem custo nenhum. Se quiser começar um novo pedido, é só me chamar!',
+        mensagem: await confirmarCancelamentoPedido(deps, estado.dados, 'cliente_confirmou_cancelamento_na_conversa'),
         diagnosticoInterpretacao: diagCancelamento('cancelamento_confirmado'),
       }
     }
@@ -3263,6 +3285,22 @@ const CAMPOS_FORMULARIO_QUE_INVALIDAM_COTACAO: (keyof FormularioEntregaDados)[] 
 
 function mensagemConfirmarCancelamentoPedido(): string {
   return 'Você quer mesmo cancelar esse pedido? Nada foi cobrado ainda. Responda "sim" para cancelar, ou "não" para continuar de onde paramos.'
+}
+
+/**
+ * Ponto único usado pelos 3 gates de cancelamento conversacional ao
+ * CONFIRMAR (nunca ao só perguntar): tenta persistir o cancelamento real do
+ * pedido (se já existir um) e devolve a frase certa pra Flora — nunca
+ * "sem custo nenhum" quando o pedido já tinha sido pago. Sem pedidoId ou
+ * sem a dependência conectada, preserva o texto/comportamento anterior a
+ * esta correção.
+ */
+async function confirmarCancelamentoPedido(deps: DependenciasFunil, dados: DadosPedido, motivo: string): Promise<string> {
+  const pedidoId = dados.pedidoId
+  const resultado = pedidoId && deps.cancelarPedido ? await deps.cancelarPedido(pedidoId, motivo) : null
+  return resultado?.precisaEstorno
+    ? 'Seu pedido foi cancelado. Como o pagamento já tinha sido feito, nossa equipe vai confirmar o estorno em breve.'
+    : 'Seu pedido foi cancelado, sem custo nenhum. Se quiser começar um novo pedido, é só me chamar!'
 }
 
 function configGateAprovacaoFrete(estado: EstadoConversa): ConfigGateBinario {
@@ -3505,13 +3543,14 @@ async function etapaAguardandoAprovacaoFrete(estado: EstadoConversa, mensagemCli
     )
     const diagCancelamento = (motivo: string): DiagnosticoInterpretacao => ({ ...decisaoCancelamento.diagnostico, gate: CHAVE_GATE_CANCELAMENTO_APROVACAO_FRETE, motivo })
     if (decisaoCancelamento.decisao === 'confirmou') {
+      const mensagemCancelamento = await confirmarCancelamentoPedido(deps, estado.dados, 'cliente_confirmou_cancelamento_na_conversa')
       return {
         estado: {
           ...estado,
           fase: 'encerrado_sem_venda',
           dados: { ...limparPendenciaInterpretacao(estado.dados), produto: undefined, formulario: undefined, valorFrete: undefined, valorTotal: undefined, freteDetalhes: undefined, pedidoId: undefined, linkPagamento: undefined },
         },
-        mensagem: 'Seu pedido foi cancelado, sem custo nenhum. Se quiser começar um novo pedido, é só me chamar!',
+        mensagem: mensagemCancelamento,
         diagnosticoInterpretacao: diagCancelamento('cancelamento_confirmado'),
       }
     }
@@ -3700,9 +3739,10 @@ export async function avancarFunil(
     )
     const diagCancelamentoGlobal = (motivo: string): DiagnosticoInterpretacao => ({ ...decisaoCancelamento.diagnostico, gate: CHAVE_GATE_CANCELAMENTO_GLOBAL, motivo })
     if (decisaoCancelamento.decisao === 'confirmou') {
+      const mensagemCancelamento = await confirmarCancelamentoPedido(deps, estado.dados, 'cliente_confirmou_cancelamento_na_conversa')
       return {
         estado: { ...estadoInicial(), dados: { jornadaIniciadaEm: new Date().toISOString() } },
-        mensagem: 'Seu pedido foi cancelado, sem custo nenhum. Se quiser começar um novo pedido, é só me chamar!',
+        mensagem: mensagemCancelamento,
         diagnosticoInterpretacao: diagCancelamentoGlobal('cancelamento_confirmado'),
       }
     }

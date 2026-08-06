@@ -44,7 +44,10 @@ export type Database = {
           // Workflow de produção/cozinha — independente do status de pagamento.
           status_producao: 'novo' | 'confirmado' | 'preparando' | 'pronto' | 'saiu' | 'entregue';
           // Workflow de logística real (Lalamove) — null até o pedido ser pago.
-          status_logistica: 'pendente' | 'criada' | 'erro_logistica' | 'revisao_logistica' | 'agendada' | null;
+          // 'cancelamento_solicitado'/'cancelada'/'cancelamento_negado' fazem
+          // parte do cancelamento de logística (ver
+          // supabase/migrations/202608060001_logistica_cancelamento.sql).
+          status_logistica: 'pendente' | 'criada' | 'erro_logistica' | 'revisao_logistica' | 'agendada' | 'cancelamento_solicitado' | 'cancelada' | 'cancelamento_negado' | null;
           horario_entrega: string | null;
           bairro: string | null;
           canal: string;
@@ -52,6 +55,17 @@ export type Database = {
           obs: string | null;
           pago_em: string | null;
           numero_pedido: number | null;
+          // Identificador real do pagamento aprovado no Mercado Pago — usado
+          // pra localizar o pagamento certo ao solicitar um estorno (ver
+          // supabase/functions/pagamento-estornar).
+          mp_payment_id: string | null;
+          // Cache denormalizado do último evento de estorno — fonte de
+          // verdade real é pedidos_estorno_eventos (ver
+          // supabase/migrations/202608060002_cancelamento_pedido_estorno.sql).
+          estorno_status: 'pendente_autorizacao' | 'processando' | 'concluido' | 'pendente_mp' | 'recusado' | 'erro' | null;
+          cancelado_em: string | null;
+          cancelado_motivo: string | null;
+          cancelado_por: 'cliente_flora' | 'admin_painel' | 'sistema_mp' | null;
           criado_em: string;
           atualizado_em: string;
         };

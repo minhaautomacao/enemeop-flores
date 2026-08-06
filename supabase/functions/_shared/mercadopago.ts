@@ -17,8 +17,10 @@
 
 import { buscarCredencial } from './credentials.ts';
 import { validarAssinaturaComSegredo } from './mercadopago-assinatura.ts';
+import { montarRequisicaoEstorno } from './mercadopago-estorno-payload.ts';
 
 export { validarAssinaturaComSegredo } from './mercadopago-assinatura.ts';
+export { montarRequisicaoEstorno, type RequisicaoEstorno } from './mercadopago-estorno-payload.ts';
 
 const API_BASE = 'https://api.mercadopago.com';
 
@@ -260,6 +262,62 @@ export async function buscarPreferenciaPorExternalReference(
     return { encontrada: true, preferenceId: primeira.id, initPoint: primeira.init_point };
   } catch {
     return { encontrada: false };
+  }
+}
+
+export interface ResultadoEstorno {
+  ok: boolean;
+  refundId?: string;
+  /** Status devolvido pelo Mercado Pago para o estorno em si — 'approved' é
+   * o único caso realmente concluído; 'pending'/'in_process' precisam de
+   * acompanhamento posterior (nunca tratados como sucesso definitivo aqui). */
+  status?: string;
+  erro?: string;
+}
+
+/**
+ * Estorna um pagamento real (total, ou parcial se `valorReais` for
+ * informado). NUNCA chamada automaticamente a partir da conversa — só pela
+ * Edge Function pagamento-estornar, depois de confirmação humana explícita
+ * (ver _shared/estorno-decisao.ts). Nunca loga o access_token; só status
+ * HTTP + trecho sanitizado do corpo de erro, mesmo padrão de
+ * criarPreferenciaMercadoPago.
+ */
+export async function estornarPagamentoMercadoPago(
+  workspaceId: string | undefined,
+  paymentId: string,
+  valorReais?: number,
+): Promise<ResultadoEstorno> {
+  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
+  if (!accessToken) {
+    return { ok: false, erro: 'Credenciais Mercado Pago (mp_access_token) não configuradas.' };
+  }
+
+  const requisicao = montarRequisicaoEstorno(paymentId, valorReais);
+
+  try {
+    const resp = await fetch(`${API_BASE}${requisicao.path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        // Chave real de idempotência da API de refunds — reenviar a mesma
+        // chamada (retry de rede) nunca gera um segundo estorno.
+        'X-Idempotency-Key': `refund-${paymentId}-${valorReais ?? 'total'}`,
+      },
+      body: requisicao.body ? JSON.stringify(requisicao.body) : undefined,
+    });
+    if (!resp.ok) {
+      const err = await resp.text().catch(() => String(resp.status));
+      return { ok: false, erro: `HTTP ${resp.status}: ${err.slice(0, 200)}` };
+    }
+    const data = await resp.json() as { id?: number; status?: string };
+    if (!data.id) {
+      return { ok: false, erro: 'Resposta da API sem id de estorno.' };
+    }
+    return { ok: true, refundId: String(data.id), status: data.status };
+  } catch (e) {
+    return { ok: false, erro: String(e) };
   }
 }
 

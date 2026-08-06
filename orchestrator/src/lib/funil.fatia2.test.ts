@@ -435,3 +435,73 @@ test('regressão: "quero cancelar tudo" (fora da lista determinística FRASES_CA
   assert.match(r.mensagem, /quer mesmo cancelar/i)
   assert.equal(r.estado.dados.produto?.nome, 'Buquê de Rosas', 'produto preservado enquanto aguarda confirmação')
 })
+
+// Regressão — achado real em teste de produção (2026-08-06): confirmar
+// cancelamento na conversa só resetava o EstadoConversa em memória, nunca
+// persistia nada no pedido já criado no banco (que continuava
+// 'aguardando_pagamento', com o link de pagamento ainda válido, mesmo a
+// Flora tendo dito "cancelado, sem custo nenhum"). Corrigido com a nova
+// dependência opcional `cancelarPedido` em DependenciasFunil, chamada nos 3
+// gates de cancelamento conversacional só ao CONFIRMAR.
+test('regressão: confirmar cancelamento com pedidoId presente chama deps.cancelarPedido com o pedidoId certo', async () => {
+  let chamadoCom: { pedidoId: string; motivo: string } | null = null
+  const deps = depsFake({
+    interpretarIntencao: criarInterpretadorFake([
+      { quando: (m) => /cancelar/i.test(m), resultado: { intencaoPrimaria: 'cancelar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+      { quando: (m) => /sim/i.test(m), resultado: { intencaoPrimaria: 'confirmar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+    ]),
+    cancelarPedido: async (pedidoId, motivo) => { chamadoCom = { pedidoId, motivo }; return { cancelado: true, precisaEstorno: false } },
+  })
+  const estadoComPedido = estadoAprovacaoFreteFixture({ pedidoId: 'pedido-teste-123' })
+  const r1 = await avancarFunil(estadoComPedido, 'quero cancelar tudo', 'compra_produto', deps)
+  assert.match(r1.mensagem, /quer mesmo cancelar/i)
+  const r2 = await avancarFunil(r1.estado, 'sim', 'compra_produto', deps)
+  assert.deepEqual(chamadoCom, { pedidoId: 'pedido-teste-123', motivo: 'cliente_confirmou_cancelamento_na_conversa' })
+  assert.match(r2.mensagem, /sem custo nenhum/i)
+})
+
+test('regressão: cancelamento confirmado de pedido já pago (precisaEstorno=true) nunca promete "sem custo nenhum" nem estorno concluído', async () => {
+  const deps = depsFake({
+    interpretarIntencao: criarInterpretadorFake([
+      { quando: (m) => /cancelar/i.test(m), resultado: { intencaoPrimaria: 'cancelar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+      { quando: (m) => /sim/i.test(m), resultado: { intencaoPrimaria: 'confirmar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+    ]),
+    cancelarPedido: async () => ({ cancelado: true, precisaEstorno: true }),
+  })
+  const estadoComPedido = estadoAprovacaoFreteFixture({ pedidoId: 'pedido-teste-pago' })
+  const r1 = await avancarFunil(estadoComPedido, 'quero cancelar tudo', 'compra_produto', deps)
+  const r2 = await avancarFunil(r1.estado, 'sim', 'compra_produto', deps)
+  assert.doesNotMatch(r2.mensagem, /sem custo nenhum/i)
+  assert.doesNotMatch(r2.mensagem, /estorno (foi feito|concluido|realizado)/i)
+  assert.match(r2.mensagem, /equipe.*confirma.*estorno|estorno.*equipe/i)
+})
+
+test('regressão: sem pedidoId no estado, nunca chama deps.cancelarPedido (nada pra persistir) e preserva a mensagem original', async () => {
+  let chamado = false
+  const deps = depsFake({
+    interpretarIntencao: criarInterpretadorFake([
+      { quando: (m) => /cancelar/i.test(m), resultado: { intencaoPrimaria: 'cancelar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+      { quando: (m) => /sim/i.test(m), resultado: { intencaoPrimaria: 'confirmar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+    ]),
+    cancelarPedido: async () => { chamado = true; return { cancelado: true, precisaEstorno: false } },
+  })
+  const estadoSemPedido = estadoAprovacaoFreteFixture({ pedidoId: undefined })
+  const r1 = await avancarFunil(estadoSemPedido, 'quero cancelar tudo', 'compra_produto', deps)
+  const r2 = await avancarFunil(r1.estado, 'sim', 'compra_produto', deps)
+  assert.equal(chamado, false, 'sem pedidoId, nunca há o que persistir')
+  assert.match(r2.mensagem, /sem custo nenhum/i)
+})
+
+test('regressão: sem a dependência cancelarPedido conectada (canal/teste antigo), preserva o comportamento anterior à correção', async () => {
+  const deps = depsFake({
+    interpretarIntencao: criarInterpretadorFake([
+      { quando: (m) => /cancelar/i.test(m), resultado: { intencaoPrimaria: 'cancelar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+      { quando: (m) => /sim/i.test(m), resultado: { intencaoPrimaria: 'confirmar', intencoesSecundarias: [], entidades: {}, camposParaAtualizar: [], confianca: 'alta', evidenciaContextual: 'x', acaoRecomendada: 'x', precisaEsclarecimento: false } },
+    ]),
+    // cancelarPedido deliberadamente ausente
+  })
+  const estadoComPedido = estadoAprovacaoFreteFixture({ pedidoId: 'pedido-teste-456' })
+  const r1 = await avancarFunil(estadoComPedido, 'quero cancelar tudo', 'compra_produto', deps)
+  const r2 = await avancarFunil(r1.estado, 'sim', 'compra_produto', deps)
+  assert.match(r2.mensagem, /sem custo nenhum/i)
+})

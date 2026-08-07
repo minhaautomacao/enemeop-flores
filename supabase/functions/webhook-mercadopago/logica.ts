@@ -93,6 +93,19 @@ export function pedidoAmbienteCompativel(pedidoAmbiente: string | null | undefin
   return (pedidoAmbiente ?? 'producao') === ambienteResolvido;
 }
 
+/**
+ * Entrega fora de ordem de webhooks é real e documentada pela própria API
+ * do Mercado Pago — nada garante que o evento 'approved' chega por último.
+ * Um pedido já 'pago' nunca pode regredir pra 'aguardando_pagamento' por
+ * causa de um evento pending/in_process/authorized atrasado que só chegou
+ * depois. cancelado/reembolsado continuam podendo suceder um pagamento
+ * aprovado (estorno real — ver logistica-cancelamento.ts/pagamento-estornar)
+ * — só a regressão especificamente para 'aguardando_pagamento' é bloqueada.
+ */
+export function statusPagamentoRegrideDePago(statusAtual: string | null | undefined, statusMapeado: string): boolean {
+  return statusAtual === 'pago' && statusMapeado === 'aguardando_pagamento';
+}
+
 // ── Quando despachar a corrida real após o pagamento confirmado ──────────
 //
 // Pagamento confirmado DENTRO do horário comercial: comportamento atual

@@ -206,22 +206,37 @@ test('idempotência / evento repetido: mesma notificação processada 2x nunca d
 test('evento fora de ordem: pending chegando depois de approved já persistido nunca regride o pedido de "pago"', async () => {
   const db = criarDbFake();
   db.tabelas.pedidos.push({ ...PEDIDO_BASE });
-  const { deps } = depsFake();
+  const { deps, chamadas } = depsFake();
 
   const agora = new Date('2026-08-10T14:00:00.000Z');
   await processarEventoPagamento(db, 'pay-1', PAGAMENTO_APROVADO, 'producao', deps, agora);
   assert.equal(db.tabelas.pedidos[0].status, 'pago');
+  const notificacoesAposAprovado = chamadas.notificarCliente;
 
   const pagamentoPending: PagamentoReal = { ...PAGAMENTO_APROVADO, status: 'pending' };
   const r = await processarEventoPagamento(db, 'pay-1', pagamentoPending, 'producao', deps, agora);
 
+  // Guarda explícita (statusPagamentoRegrideDePago): o evento atrasado é
+  // registrado (idempotência/auditoria) mas nunca reduz o estado real do
+  // pedido — nem cliente é renotificado nem logística é reprocessada.
   assert.equal(r.status, 'status_atualizado');
-  // Gap conhecido (documentado no plano): o código hoje não tem uma guarda
-  // explícita "nunca regride de pago" — este teste documenta o
-  // comportamento atual e falha se alguém piorar (regredir) ainda mais.
-  // Se/quando a guarda for adicionada, este assert muda pra
-  // assert.equal(db.tabelas.pedidos[0].status, 'pago').
-  console.log('[teste] status apos pending fora de ordem:', db.tabelas.pedidos[0].status);
+  assert.equal(db.tabelas.pedidos[0].status, 'pago');
+  assert.equal(chamadas.notificarCliente, notificacoesAposAprovado, 'evento atrasado nunca notifica o cliente de novo');
+});
+
+test('evento fora de ordem: pedido já "pago" ainda pode ir para cancelado/reembolsado (estorno real pós-aprovação, não é uma regressão)', async () => {
+  const db = criarDbFake();
+  db.tabelas.pedidos.push({ ...PEDIDO_BASE });
+  const { deps } = depsFake();
+
+  await processarEventoPagamento(db, 'pay-1', PAGAMENTO_APROVADO, 'producao', deps);
+  assert.equal(db.tabelas.pedidos[0].status, 'pago');
+
+  const pagamentoReembolsado: PagamentoReal = { ...PAGAMENTO_APROVADO, status: 'refunded' };
+  const r = await processarEventoPagamento(db, 'pay-1', pagamentoReembolsado, 'producao', deps);
+
+  assert.equal(r.status, 'status_atualizado');
+  assert.equal(db.tabelas.pedidos[0].status, 'reembolsado', 'cancelado/reembolsado nao sao bloqueados pela guarda de regressao — so aguardando_pagamento e');
 });
 
 test('valor divergente: nunca confirma automaticamente, cria handoff de pagamento', async () => {

@@ -19,7 +19,7 @@
  */
 
 import type { PagamentoReal, AmbienteMercadoPago } from '../_shared/mercadopago.ts';
-import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento, mensagemPagamentoNaoAprovado, pedidoAmbienteCompativel } from './logica.ts';
+import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento, mensagemPagamentoNaoAprovado, pedidoAmbienteCompativel, statusPagamentoRegrideDePago } from './logica.ts';
 import { decidirProcessamentoEvento, type EventoExistente } from '../_shared/pagamento-evento-decisao.ts';
 import { camposBRT } from '../_shared/horario-comercial.ts';
 import type { PeriodoEntrega, DataCalendario } from '../_shared/agendamento-entrega.ts';
@@ -297,6 +297,15 @@ export async function processarEventoPagamento(
   }
 
   // pending/in_process/authorized/rejected/cancelled/refunded/charged_back
+  if (statusPagamentoRegrideDePago(pedido.status as string | undefined, statusMapeado)) {
+    console.log(`[webhook-mp/nucleo] evento atrasado (mp status=${pagamento.status}) ignorado — pedido ${pedido.id} já está 'pago', nunca regride para aguardando_pagamento. payment=${paymentId}`);
+    // Registra o evento como processado (idempotência/auditoria) sem reduzir
+    // o estado do pedido — se o mesmo evento atrasado chegar de novo, cai no
+    // "evento já processado" em vez de reavaliar esta regra outra vez.
+    if (decisaoEvento.acao === 'processar_completo') await marcarEventoOk();
+    return { status: 'status_atualizado', statusMapeado: 'pago' };
+  }
+
   const { error: statusUpdateError } = await db.from('pedidos').update({ status: statusMapeado, mp_payment_id: paymentId }).eq('id', pedido.id);
   if (statusUpdateError) {
     console.error(`[webhook-mp/nucleo] falha ao atualizar status do pedido para ${statusMapeado}: ${statusUpdateError.message} pedido=${pedido.id}`);

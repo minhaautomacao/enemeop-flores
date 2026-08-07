@@ -60,6 +60,10 @@
   .badge-warning { @apply badge bg-status-warning/10 text-status-warning border border-status-warning/20; }
   .badge-error   { @apply badge bg-status-error/10 text-status-error border border-status-error/20; }
   .badge-info    { @apply badge bg-status-info/10 text-status-info border border-status-info/20; }
+  /* Marca pedidos/pagamentos de ambiente teste do Mercado Pago (mp_ambiente='teste')
+     — nunca reaproveita as cores de status (gold/success/warning/error/info)
+     de propósito, pra nunca ser confundido com um status real. */
+  .badge-teste   { @apply badge bg-purple-500/10 text-purple-400 border border-purple-500/25; }
 
   .stat-card {
     @apply card flex flex-col gap-1.5;

@@ -36,11 +36,11 @@ type DbClient = any;
 // que também nunca importa mercadopago.ts inteiro por esse motivo) —
 // quem chama em produção (webhook-meta/webhook-whatsapp) injeta a função
 // real via parâmetro.
-import type { OpcoesPreferencia, ResultadoPreferencia, OpcoesPagamentoPix, ResultadoPagamentoPix } from './mercadopago.ts';
+import type { OpcoesPreferencia, ResultadoPreferencia, OpcoesPagamentoPix, ResultadoPagamentoPix, AmbienteMercadoPago } from './mercadopago.ts';
 import { dataCalendarioParaISO, type DadosPedido } from './funil.ts';
 
-export type CriadorPreferencia = (workspaceId: string | undefined, opcoes: OpcoesPreferencia) => Promise<ResultadoPreferencia>;
-export type CriadorPagamentoPix = (workspaceId: string | undefined, opcoes: OpcoesPagamentoPix) => Promise<ResultadoPagamentoPix>;
+export type CriadorPreferencia = (workspaceId: string | undefined, opcoes: OpcoesPreferencia, ambiente?: AmbienteMercadoPago) => Promise<ResultadoPreferencia>;
+export type CriadorPagamentoPix = (workspaceId: string | undefined, opcoes: OpcoesPagamentoPix, ambiente?: AmbienteMercadoPago) => Promise<ResultadoPagamentoPix>;
 
 export interface DadosClientePedido {
   nome: string;
@@ -62,6 +62,10 @@ export async function criarOuReusarPedido(
   cliente: DadosClientePedido,
   workspaceId: string,
   logPrefix: string,
+  // Decidido só aqui, na criação — nunca alterado depois (reforçado por
+  // trigger de banco, ver migration mp_ambiente). Default 'producao'
+  // preserva webhook-meta/webhook-whatsapp sem nenhuma edição.
+  ambiente: AmbienteMercadoPago = 'producao',
 ): Promise<{ pedidoId: string } | null> {
   const produto = dados.produto;
   if (!produto || dados.valorTotal == null) {
@@ -90,6 +94,7 @@ export async function criarOuReusarPedido(
       canal_origem: cliente.canal,
       produto: produto.nome,
       produtos: [{ nome: produto.nome, codigo: produto.codigo, woocommerce_product_id: produto.idExterno ?? null, preco: produto.preco, quantidade: produto.quantidade ?? 1, fotoUrl: produto.fotoUrl ?? null }],
+      mp_ambiente: ambiente,
       valor: dados.valorTotal,
       valor_frete: dados.valorFrete ?? null,
       status: 'aguardando_pagamento',
@@ -230,11 +235,12 @@ export async function gerarOuReusarPreference(
   }
 
   const { data: pedido, error } = await db
-    .from('pedidos').select('produtos, valor_frete, external_reference').eq('id', pedidoId).single();
+    .from('pedidos').select('produtos, valor_frete, external_reference, mp_ambiente').eq('id', pedidoId).single();
   if (error || !pedido) {
     await liberarClaimPreference(db, pedidoId, logPrefix);
     return null;
   }
+  const ambiente = ((pedido.mp_ambiente as AmbienteMercadoPago | null) ?? 'producao');
 
   const produtos = (pedido.produtos as Array<{ nome: string; preco: number; quantidade?: number }> | null) ?? [];
   const itens = produtos
@@ -259,7 +265,7 @@ export async function gerarOuReusarPreference(
       pending: 'https://enemeopflores.com.br/pagamento/pendente',
     },
     metadata: { pedido_id: pedidoId, workspace_id: workspaceId },
-  });
+  }, ambiente);
 
   if (!resultado.criado || !resultado.initPoint || !resultado.preferenceId) {
     console.error(`[${logPrefix}] falha ao criar preference Mercado Pago: ${resultado.erro}`);
@@ -310,13 +316,14 @@ export async function gerarOuReusarPagamentoPix(
 ): Promise<{ qrCodeUrl: string; copiaCola: string } | null> {
   const { data: atual, error: erroLeitura } = await db
     .from('pedidos')
-    .select('valor, external_reference, produto, pix_qr_code_url, pix_copia_cola, pix_expires_at')
+    .select('valor, external_reference, produto, pix_qr_code_url, pix_copia_cola, pix_expires_at, mp_ambiente')
     .eq('id', pedidoId)
     .maybeSingle();
   if (erroLeitura || !atual) {
     console.error(`[${logPrefix}] gerarOuReusarPagamentoPix: falha ao ler pedido: ${erroLeitura?.message ?? 'nao encontrado'}`);
     return null;
   }
+  const ambiente = ((atual.mp_ambiente as AmbienteMercadoPago | null) ?? 'producao');
 
   const aindaValido = atual.pix_qr_code_url && atual.pix_copia_cola && atual.pix_expires_at
     && new Date(atual.pix_expires_at as string).getTime() > Date.now();
@@ -336,7 +343,7 @@ export async function gerarOuReusarPagamentoPix(
     valorTotal,
     descricao: (atual.produto as string | null) ?? 'Pedido Enemeop Flores',
     notificationUrl: `${supabaseUrl}/functions/v1/webhook-mercadopago`,
-  });
+  }, ambiente);
   if (!resultado.criado || !resultado.qrCodeBase64 || !resultado.qrCodeCopiaCola) {
     console.error(`[${logPrefix}] falha ao criar pagamento Pix Mercado Pago: ${resultado.erro}`);
     return null;
@@ -375,8 +382,8 @@ export async function gerarOuReusarPagamentoPix(
   return { qrCodeUrl, copiaCola: resultado.qrCodeCopiaCola };
 }
 
-/** Formas de pagamento realmente habilitadas agora — nunca inventa Pix/cartão sem credencial real configurada. */
-export async function buscarFormasPagamentoReal(db: DbClient, workspaceId: string): Promise<string[]> {
+/** Formas de pagamento realmente habilitadas agora — nunca inventa Pix/cartão sem credencial real configurada (checa a chave correspondente ao ambiente do pedido, nunca sempre a de produção — senão a Flora poderia oferecer um meio de pagamento que falha por falta de mp_access_token_teste). */
+export async function buscarFormasPagamentoReal(db: DbClient, workspaceId: string, ambiente: AmbienteMercadoPago = 'producao'): Promise<string[]> {
   try {
     const { data } = await db
       .from('workspace_credentials')
@@ -385,7 +392,8 @@ export async function buscarFormasPagamentoReal(db: DbClient, workspaceId: strin
       .eq('tipo', 'financeiro')
       .eq('ativo', true);
     const chaves = new Set((data ?? []).map((r: { chave: string }) => r.chave));
-    return chaves.has('mp_access_token')
+    const chaveEsperada = ambiente === 'teste' ? 'mp_access_token_teste' : 'mp_access_token';
+    return chaves.has(chaveEsperada)
       ? ['Pix', 'cartão de crédito', 'cartão de débito']
       : [];
   } catch {

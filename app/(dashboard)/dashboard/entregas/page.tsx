@@ -27,9 +27,12 @@ export default async function EntregasPage() {
 
   type EntregaRow = { id: string; produto: string; cliente_nome: string; cliente_telefone: string; bairro: string | null; horario_entrega: string | null; canal: string; status: string; criado_em: string };
 
+  // Pedidos de teste (mp_ambiente='teste') nunca entram na tela de
+  // entregas real — mesma lógica de exclusão financeira (financeiro/page.tsx).
   const { data: pedidosRaw } = await supabase
     .from('pedidos')
     .select('id, produto, cliente_nome, cliente_telefone, bairro, horario_entrega, canal, status, criado_em')
+    .neq('mp_ambiente', 'teste')
     .gte('criado_em', hoje)
     .in('status', ['confirmado', 'preparando', 'saiu', 'entregue'])
     .order('horario_entrega', { ascending: true });

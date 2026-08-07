@@ -61,7 +61,7 @@ Deno.serve(async (req: Request) => {
   const db = getDb();
   const { data: pedido, error } = await db
     .from('pedidos')
-    .select('id, external_reference, mp_preference_id, link_pagamento, mp_preference_status')
+    .select('id, external_reference, mp_preference_id, link_pagamento, mp_preference_status, mp_ambiente')
     .eq('id', pedidoId)
     .maybeSingle();
 
@@ -81,8 +81,12 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // Ambiente vem exclusivamente da coluna imutável do pedido, sem fallback
+  // pro outro ambiente (mesmo raciocínio de pagamento-estornar/index.ts —
+  // D5 do plano de separação teste/produção).
+  const ambiente = (pedido.mp_ambiente as 'producao' | 'teste' | null) ?? 'producao';
   const externalReference = (pedido.external_reference as string | null) ?? `enemeop-${pedidoId}`;
-  const encontrada = await buscarPreferenciaPorExternalReference(WORKSPACE_ID, externalReference);
+  const encontrada = await buscarPreferenciaPorExternalReference(WORKSPACE_ID, externalReference, ambiente);
 
   if (!encontrada.encontrada) {
     console.log(`[pagamento-reconciliar] nenhuma preference encontrada no Mercado Pago pedido=${pedidoId} external_reference=${externalReference} — segue ambiguo`);

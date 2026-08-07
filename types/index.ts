@@ -66,6 +66,12 @@ export type Database = {
           cancelado_em: string | null;
           cancelado_motivo: string | null;
           cancelado_por: 'cliente_flora' | 'admin_painel' | 'sistema_mp' | null;
+          // Ambiente do Mercado Pago usado neste pedido — decidido uma
+          // única vez na criação, imutável depois (trigger de banco, ver
+          // migration mp_ambiente). Nunca entra em Update: o tipo sem o
+          // campo aqui já impede fisicamente qualquer código tipado de
+          // tentar alterá-lo após a criação.
+          mp_ambiente: 'producao' | 'teste';
           criado_em: string;
           atualizado_em: string;
         };

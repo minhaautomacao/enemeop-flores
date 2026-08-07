@@ -14,9 +14,15 @@ export default async function FinanceiroPage() {
   type PedidoRow = { id: string; produto: string; cliente_nome: string; valor: number; canal: string; status: string; criado_em: string };
   type PedidoMesRow = { valor: number; canal: string; status: string };
 
+  // Pedidos de teste (mp_ambiente='teste') nunca entram em métricas
+  // financeiras — mesmo padrão já usado pra excluir canal='internal_test'
+  // em dashboard/pedidos/page.tsx, aplicado aqui porque um pedido de teste
+  // pode vir de QUALQUER canal (não só internal_test — ver D3 do plano de
+  // separação teste/produção).
   const { data: pedidosHojeRaw } = await supabase
     .from('pedidos')
     .select('id, produto, cliente_nome, valor, canal, status, criado_em')
+    .neq('mp_ambiente', 'teste')
     .gte('criado_em', hoje)
     .order('criado_em', { ascending: false });
   const pedidosHoje = (pedidosHojeRaw ?? []) as PedidoRow[];
@@ -24,6 +30,7 @@ export default async function FinanceiroPage() {
   const { data: pedidosMesRaw } = await supabase
     .from('pedidos')
     .select('valor, canal, status')
+    .neq('mp_ambiente', 'teste')
     .gte('criado_em', inicioMes);
   const pedidosMes = (pedidosMesRaw ?? []) as PedidoMesRow[];
 

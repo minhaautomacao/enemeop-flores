@@ -25,13 +25,16 @@ async function carregarStats(): Promise<Stats> {
   const supabase = createClient();
   const hoje = new Date().toISOString().split('T')[0];
 
+  // Mesma exclusão de pedidos de teste (mp_ambiente='teste') da versão
+  // server component em page.tsx — este client component reidrata com a
+  // MESMA query, precisa da mesma exclusão pra não regredir no polling.
   const [{ count: pedidosHoje }, { count: novosClientes }, { data: pedidosRecentes }, { count: entregasHoje }, { count: aguardandoHumano }, { data: pedidosPagosRaw }] = await Promise.all([
-    supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
+    supabase.from('pedidos').select('*', { count: 'exact', head: true }).neq('mp_ambiente', 'teste').gte('criado_em', hoje),
     supabase.from('leads').select('*', { count: 'exact', head: true }).gte('criado_em', hoje),
-    supabase.from('pedidos').select('id, produto, status, cliente_nome, valor, criado_em').order('criado_em', { ascending: false }).limit(5),
-    supabase.from('pedidos').select('*', { count: 'exact', head: true }).gte('criado_em', hoje).in('status', ['saiu', 'entregue']),
+    supabase.from('pedidos').select('id, produto, status, cliente_nome, valor, criado_em').neq('mp_ambiente', 'teste').order('criado_em', { ascending: false }).limit(5),
+    supabase.from('pedidos').select('*', { count: 'exact', head: true }).neq('mp_ambiente', 'teste').gte('criado_em', hoje).in('status', ['saiu', 'entregue']),
     (supabase as any).from('conversas').select('*', { count: 'exact', head: true }).in('canal', ['instagram', 'facebook']).eq('status_atendimento', 'aguardando_humano'),
-    supabase.from('pedidos').select('valor').gte('criado_em', hoje).in('status', ['confirmado', 'saiu', 'entregue']),
+    supabase.from('pedidos').select('valor').neq('mp_ambiente', 'teste').gte('criado_em', hoje).in('status', ['confirmado', 'saiu', 'entregue']),
   ]);
 
   const receitaHoje = ((pedidosPagosRaw ?? []) as { valor: number }[]).reduce((s, p) => s + Number(p.valor ?? 0), 0);

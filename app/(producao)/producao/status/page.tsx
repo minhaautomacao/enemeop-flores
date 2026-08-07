@@ -18,6 +18,7 @@ interface Pedido {
   statusLogistica: StatusLogistica
   prioridade?: boolean
   novo?: boolean
+  mpAmbiente?: string
 }
 
 const STATUS_CONFIG: Record<StatusProducao, { label: string; classes: string; dot: string }> = {
@@ -90,6 +91,7 @@ export default function StatusPage() {
               statusLogistica: (p.status_logistica as StatusLogistica) ?? null,
               prioridade: false,
               novo: novos.includes(numero),
+              mpAmbiente: (p.mp_ambiente as string | null) ?? undefined,
             }
           })
           .filter((p): p is Pedido => p !== null))
@@ -183,6 +185,11 @@ export default function StatusPage() {
                         {p.prioridade && (
                           <span className="rounded-full border border-gold/50 bg-gold/10 px-2 py-0.5 text-[10px] font-bold text-gold uppercase tracking-widest">
                             URGENTE
+                          </span>
+                        )}
+                        {p.mpAmbiente === 'teste' && (
+                          <span className="rounded-full border border-purple-500/50 bg-purple-500/10 px-2 py-0.5 text-[10px] font-bold text-purple-300 uppercase tracking-widest" title="Pagamento gerado no ambiente de teste do Mercado Pago — nunca dinheiro real">
+                            TESTE
                           </span>
                         )}
                         {p.statusLogistica === 'erro_logistica' && (

@@ -32,14 +32,12 @@
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import { buscarPagamentoReal, validarAssinaturaWebhook } from '../_shared/mercadopago.ts';
+import { buscarPagamentoReal, validarAssinaturaWebhookQualquerAmbiente } from '../_shared/mercadopago.ts';
 import { enviarWhatsApp } from '../_shared/whatsapp.ts';
-import { mapearStatusPagamento, valoresDivergem, decidirAgendamentoPagamento, mensagemPagamentoNaoAprovado } from './logica.ts';
 import { processarLogisticaAposPagamento, SELECT_PEDIDO_PARA_LOGISTICA, type PedidoParaEntrega } from '../_shared/logistica-processamento.ts';
 import { processarCancelamentoLogistica, type PedidoParaCancelamentoEntrega } from '../_shared/logistica-cancelamento.ts';
-import { decidirProcessamentoEvento, type EventoExistente } from '../_shared/pagamento-evento-decisao.ts';
-import { camposBRT } from '../_shared/horario-comercial.ts';
-import { type PeriodoEntrega, type DataCalendario } from '../_shared/agendamento-entrega.ts';
+import { resolverPagamentoEAmbiente, type BuscadorPagamento } from '../_shared/resolucao-ambiente.ts';
+import { processarEventoPagamento, type PedidoRowNucleo, type DependenciasNucleo } from './nucleo.ts';
 
 const SERVICE_KEY  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
@@ -104,12 +102,13 @@ async function enviarTextoInstagramOuFacebook(canal: string, canalId: string, te
   }
 }
 
-interface PedidoRow extends PedidoParaEntrega {
+interface PedidoRow extends PedidoParaEntrega, PedidoRowNucleo {
   canal: string;
   canal_id: string | null;
   cliente_telefone: string | null;
   valor: number;
   external_reference: string | null;
+  mp_ambiente: string | null;
   data_entrega_solicitada: string | null; // AAAA-MM-DD, ver funil.ts dataCalendarioParaISO
   periodo_entrega: string | null;
   entrega_prometida_em: string | null;
@@ -117,6 +116,18 @@ interface PedidoRow extends PedidoParaEntrega {
 }
 
 type Db = ReturnType<typeof getDb>;
+
+const SELECT_PEDIDO_WEBHOOK = `canal, canal_id, cliente_telefone, valor, external_reference, mp_ambiente, data_entrega_solicitada, periodo_entrega, entrega_prometida_em, link_pagamento, ${SELECT_PEDIDO_PARA_LOGISTICA}`;
+
+async function buscarPedidoPorExternalReference(db: Db, externalReference: string): Promise<PedidoRow | null> {
+  const { data: pedido, error } = await db
+    .from('pedidos')
+    .select(SELECT_PEDIDO_WEBHOOK)
+    .eq('external_reference', externalReference)
+    .maybeSingle();
+  if (error || !pedido) return null;
+  return pedido as PedidoRow;
+}
 
 const CONFIG_LOGISTICA = {
   supabaseUrl: SUPABASE_URL,
@@ -140,18 +151,6 @@ async function criarAlertaOperacional(db: Db, pedido: PedidoRow, motivoSanitizad
   if (error) console.error(`[webhook-mp] falha ao criar alerta operacional (nao critico, so perde o registro de auditoria): ${error.message} pedido=${pedido.id}`);
 }
 
-/** Texto pra apresentar a janela de entrega prometida ao cliente — "ainda hoje" quando o mesmo dia BRT, senão dia da semana + data (nunca assume que "não é hoje" significa "amanhã": a data pode ser qualquer dia futuro escolhido pelo cliente). */
-function textoJanelaPrometida(entregaPrometidaEm: Date, agora: Date): string {
-  const campoAgora = camposBRT(agora);
-  const campoPrometida = camposBRT(entregaPrometidaEm);
-  const horaTexto = `${String(campoPrometida.hora).padStart(2, '0')}h`;
-  const mesmoDia = campoAgora.ano === campoPrometida.ano && campoAgora.mes === campoPrometida.mes && campoAgora.dia === campoPrometida.dia;
-  if (mesmoDia) return `ainda hoje, a partir das ${horaTexto}`;
-  const diasSemana = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
-  const dataTexto = `${String(campoPrometida.dia).padStart(2, '0')}/${String(campoPrometida.mes + 1).padStart(2, '0')}`;
-  return `${diasSemana[campoPrometida.diaSemana]} (${dataTexto}), a partir das ${horaTexto}`;
-}
-
 async function notificarCliente(pedido: PedidoRow, texto: string): Promise<void> {
   if (pedido.canal === 'whatsapp') {
     const numero = pedido.cliente_telefone || pedido.canal_id;
@@ -166,6 +165,17 @@ async function notificarCliente(pedido: PedidoRow, texto: string): Promise<void>
   }
   console.error('[webhook-mp] canal desconhecido/sem canal_id, nao foi possivel notificar. pedido=', pedido.id, 'canal=', pedido.canal);
 }
+
+const buscadorPagamento: BuscadorPagamento = (ambiente, paymentId) => buscarPagamentoReal(WORKSPACE_ID, paymentId, ambiente);
+
+const DEPENDENCIAS_NUCLEO: DependenciasNucleo = {
+  buscarPedidoPorExternalReference,
+  notificarCliente,
+  processarLogisticaAposPagamento: (db, pedido) => processarLogisticaAposPagamento(db, pedido, CONFIG_LOGISTICA),
+  processarCancelamentoLogistica: (db, pedido) => processarCancelamentoLogistica(db, pedido as unknown as PedidoParaCancelamentoEntrega, { workspaceId: WORKSPACE_ID }),
+  criarAlertaOperacional: (db, pedido, motivo) => criarAlertaOperacional(db, pedido as PedidoRow, motivo),
+  leadTimeMinutos: LEAD_TIME_MINUTOS,
+};
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'GET') return new Response('webhook-mercadopago ok', { status: 200 });
@@ -188,319 +198,43 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { status: 200 });
   }
 
+  // Valida contra os dois segredos possíveis (produção e teste) — o
+  // ambiente real só é confirmado depois, ao buscar o pagamento (ver
+  // resolverPagamentoEAmbiente abaixo). Mantém a rejeição antecipada de
+  // notificações forjadas ANTES de qualquer chamada à API do Mercado Pago.
   const xSignature = req.headers.get('x-signature');
   const xRequestId = req.headers.get('x-request-id');
-  const validacao = await validarAssinaturaWebhook(WORKSPACE_ID, xSignature, xRequestId, paymentId);
+  const { resultado: validacao } = await validarAssinaturaWebhookQualquerAmbiente(WORKSPACE_ID, xSignature, xRequestId, paymentId);
   if (validacao === 'invalida') {
     console.error('[webhook-mp] assinatura invalida, notificacao ignorada. paymentId=', paymentId);
     return new Response('ok', { status: 200 });
   }
   if (validacao === 'sem_segredo_configurado') {
-    console.log('[webhook-mp] mp_webhook_secret nao configurado — seguindo so com a confirmacao via API real. paymentId=', paymentId);
+    console.log('[webhook-mp] nenhum mp_webhook_secret configurado — seguindo so com a confirmacao via API real. paymentId=', paymentId);
   }
 
   // Nunca confia no status/valor do corpo da notificação — busca o
-  // pagamento real na API do Mercado Pago antes de decidir qualquer coisa.
-  const pagamento = await buscarPagamentoReal(WORKSPACE_ID, paymentId);
-  if (!pagamento) {
-    console.error('[webhook-mp] nao foi possivel confirmar o pagamento na API do Mercado Pago:', paymentId);
-    return new Response('ok', { status: 200 });
-  }
-
-  const statusMapeado = mapearStatusPagamento(pagamento.status);
-  if (!statusMapeado) {
-    console.log('[webhook-mp] status sem mapeamento conhecido, ignorado:', pagamento.status);
-    return new Response('ok', { status: 200 });
-  }
-  if (!pagamento.externalReference) {
-    console.error('[webhook-mp] pagamento sem external_reference, impossivel localizar o pedido. paymentId=', paymentId);
+  // pagamento real na API do Mercado Pago (tenta produção, só tenta teste
+  // se produção responder "não encontrado" — ver _shared/resolucao-ambiente.ts,
+  // D4 do plano de separação teste/produção) antes de decidir qualquer coisa.
+  const resolucao = await resolverPagamentoEAmbiente(paymentId, buscadorPagamento);
+  if (!resolucao.resolvido) {
+    console.error(`[webhook-mp] nao foi possivel confirmar o pagamento na API do Mercado Pago (motivo=${resolucao.motivo}):`, paymentId);
     return new Response('ok', { status: 200 });
   }
 
   const db = getDb();
 
-  // Idempotência: o pedido é sempre criado antes da preference (ver
-  // webhook-meta/index.ts, criarPedidoProvisorio -> gerarPagamentoReal), ou
-  // seja, external_reference já existe em `pedidos` bem antes de qualquer
-  // webhook poder chegar aqui. O INSERT (payment_id, status) abaixo é a
-  // trava de concorrência — mas diferente de antes, uma notificação
-  // repetida NUNCA para totalmente aqui: processamento_status decide só se
-  // a notificação ao cliente/criação de handoff deve rodar de novo (nunca)
-  // ou se só a recuperação de logística deve ser tentada (sempre que ainda
-  // fizer sentido) — ver _shared/pagamento-evento-decisao.ts.
-  let eventoExistente: EventoExistente | null = null;
-  let reivindicadoAgora = false;
-
-  const { error: eventoError } = await db.from('mercadopago_eventos').insert({
-    payment_id: paymentId,
-    status: pagamento.status,
-    external_reference: pagamento.externalReference,
-    valor: pagamento.valor,
-    processamento_status: 'processando',
-    tentativas: 1,
-  });
-
-  if (eventoError) {
-    if (eventoError.code !== '23505') {
-      console.error('[webhook-mp] falha ao registrar evento:', eventoError.message);
-      return new Response('ok', { status: 200 });
-    }
-    const { data: existente } = await db.from('mercadopago_eventos')
-      .select('processamento_status, tentativas')
-      .eq('payment_id', paymentId).eq('status', pagamento.status)
-      .maybeSingle();
-    eventoExistente = (existente as EventoExistente | null) ?? null;
-
-    if (eventoExistente?.processamento_status === 'erro') {
-      // Só reivindica se ainda estiver em 'erro' no exato instante do
-      // UPDATE — evita duas execuções concorrentes reprocessando (e
-      // notificando o cliente) ao mesmo tempo pro mesmo evento.
-      const { data: claim } = await db.from('mercadopago_eventos')
-        .update({ processamento_status: 'processando', tentativas: eventoExistente.tentativas + 1 })
-        .eq('payment_id', paymentId).eq('status', pagamento.status)
-        .eq('processamento_status', 'erro')
-        .select('tentativas')
-        .maybeSingle();
-      reivindicadoAgora = !!claim;
-    }
-    console.log(`[webhook-mp] evento ja existia (processamento_status=${eventoExistente?.processamento_status}, reivindicado=${reivindicadoAgora}):`, paymentId, pagamento.status);
-  }
-
-  const decisaoEvento = decidirProcessamentoEvento(eventoExistente, reivindicadoAgora);
-
-  async function marcarEventoOk(): Promise<void> {
-    const { error } = await db.from('mercadopago_eventos').update({ processamento_status: 'ok' }).eq('payment_id', paymentId).eq('status', pagamento.status);
-    // Não crítico pro pedido em si, mas nunca ignorado silenciosamente
-    // (Parte 4): se isso falhar, uma notificação repetida do MP pode
-    // reprocessar e notificar o cliente de novo — melhor visível no log do
-    // que um retry duplicado sem explicação nenhuma.
-    if (error) console.error(`[webhook-mp] falha ao marcar evento como ok (pode causar notificacao duplicada em retry): ${error.message} payment=${paymentId}`);
-  }
-  async function marcarEventoErro(motivoSanitizado: string): Promise<void> {
-    const { error } = await db.from('mercadopago_eventos').update({ processamento_status: 'erro', erro_sanitizado: motivoSanitizado }).eq('payment_id', paymentId).eq('status', pagamento.status);
-    if (error) console.error(`[webhook-mp] falha ao marcar evento como erro: ${error.message} payment=${paymentId}`);
-  }
-
-  // Tudo daqui pra baixo roda protegido: uma exceção não tratada (falha
-  // transitória de rede/DB no meio do processamento) nunca deve deixar o
-  // evento marcado como se tivesse concluído — cai no catch, que marca
-  // 'erro' explicitamente pra um evento repetido (ou o retry
-  // administrativo, ver logistica-retry) poder recuperar depois.
+  // Tudo daqui pra baixo (idempotência via mercadopago_eventos + localização
+  // do pedido por external_reference + checagem de ambiente + atualização)
+  // vive em nucleo.ts, testável com node:test/tsx sem Deno/DB reais. Uma
+  // exceção não tratada aqui nunca deve travar a resposta ao Mercado Pago —
+  // sempre 200, o evento fica registrado no log pra investigação manual.
   try {
-    return await processarNotificacao();
+    const resultado = await processarEventoPagamento(db, paymentId, resolucao.pagamento, resolucao.ambiente, DEPENDENCIAS_NUCLEO);
+    console.log(`[webhook-mp] resultado=${resultado.status} paymentId=${paymentId} ambiente=${resolucao.ambiente}`);
   } catch (e) {
     console.error('[webhook-mp] excecao nao tratada durante processamento:', e);
-    if (decisaoEvento.acao === 'processar_completo') await marcarEventoErro(`excecao: ${String(e).slice(0, 200)}`);
-    return new Response('ok', { status: 200 });
-  }
-
-  async function processarNotificacao(): Promise<Response> {
-  const { data: pedido, error: pedidoError } = await db
-    .from('pedidos')
-    .select(`canal, canal_id, cliente_telefone, valor, external_reference, data_entrega_solicitada, periodo_entrega, entrega_prometida_em, link_pagamento, ${SELECT_PEDIDO_PARA_LOGISTICA}`)
-    .eq('external_reference', pagamento.externalReference)
-    .maybeSingle();
-
-  if (pedidoError || !pedido) {
-    // Nunca cria um pedido a partir de uma notificação — o pedido tem que
-    // já existir. O evento já foi registrado acima (audit trail); se isso
-    // acontecer é uma anomalia real de dados, não um caso esperado.
-    console.error('[webhook-mp] pedido nao encontrado para external_reference:', pagamento.externalReference);
-    if (decisaoEvento.acao === 'processar_completo') await marcarEventoErro('pedido nao encontrado para external_reference');
-    return new Response('ok', { status: 200 });
-  }
-
-  if (pagamento.status === 'approved') {
-    const valorPedido = Number(pedido.valor ?? 0);
-    if (valoresDivergem(valorPedido, pagamento.valor)) {
-      if (decisaoEvento.acao === 'processar_completo') {
-        console.error(`[webhook-mp] valor aprovado (R$ ${pagamento.valor}) diverge do valor do pedido (R$ ${valorPedido}) — pagamento NAO confirmado automaticamente, escalando pra humano. pedido=${pedido.id} payment=${paymentId}`);
-        const { error: handoffError } = await db.from('atendimentos_humanos').insert({
-          canal: pedido.canal,
-          canal_cliente_id: pedido.canal_id ?? pedido.cliente_telefone ?? 'desconhecido',
-          telefone: pedido.cliente_telefone,
-          origem_handoff: 'pagamento',
-          motivo_transferencia: `Pagamento aprovado (${paymentId}) com valor R$ ${pagamento.valor} divergente do pedido R$ ${valorPedido}`,
-          dados_pedido: { pedido_id: pedido.id, payment_id: paymentId, valor_aprovado: pagamento.valor, valor_pedido: valorPedido },
-        });
-        if (handoffError) {
-          console.error('[webhook-mp] falha ao criar handoff de divergencia de valor:', handoffError.message);
-          await marcarEventoErro('falha ao criar handoff de divergencia de valor');
-          return new Response('ok', { status: 200 });
-        }
-        await marcarEventoOk();
-      } else {
-        console.log('[webhook-mp] evento de divergencia de valor ja processado antes — nao duplica handoff:', paymentId);
-      }
-      return new Response('ok', { status: 200 });
-    }
-
-    const pedidoRow = pedido as PedidoRow;
-
-    const { error: marcarPagoError } = await db.from('pedidos').update({
-      status: 'pago',
-      mp_payment_id: paymentId,
-      pago_em: new Date().toISOString(),
-    }).eq('id', pedido.id);
-    if (marcarPagoError) {
-      // Falha crítica (Parte 4): nunca notifica confirmação de pagamento se
-      // nem sequer conseguiu registrar que o pedido foi pago — o evento
-      // fica marcado como erro pra ser retomado no próximo reenvio do MP
-      // (automático) ou numa nova notificação manual.
-      console.error(`[webhook-mp] FALHA CRITICA ao marcar pedido como pago: ${marcarPagoError.message} pedido=${pedido.id} payment=${paymentId}`);
-      if (decisaoEvento.acao === 'processar_completo') await marcarEventoErro(`falha ao marcar pedido pago: ${marcarPagoError.message}`.slice(0, 200));
-      await criarAlertaOperacional(db, pedidoRow, `Pagamento aprovado (${paymentId}) mas falha ao marcar o pedido como pago: ${marcarPagoError.message}`);
-      return new Response('ok', { status: 200 });
-    }
-
-    // Quando despachar a corrida real: pela DATA/PERÍODO PROMETIDOS ao
-    // cliente (Parte 2), nunca só pelo horário em que o pagamento foi
-    // aprovado. GO-LIVE Parte 4: a janela já foi calculada (self-corrigida
-    // pra nunca ser impossível) e MOSTRADA ao cliente antes da aprovação do
-    // frete/pagamento (ver funil.ts etapaCalculoFrete) — se o pedido já
-    // carrega entrega_prometida_em persistido, ele é reaproveitado tal como
-    // está, nunca recalculado aqui (recalcular com o "agora" do pagamento,
-    // que pode ser minutos/horas depois da aprovação, alteraria
-    // silenciosamente a promessa já comunicada). Só um pedido sem essa
-    // persistência (legado, anterior a esta correção, ou criado por um
-    // caminho que nunca teve data tipada) cai no cálculo de segurança
-    // abaixo.
-    const agora = new Date();
-    const dataEntregaTipada: DataCalendario | null = pedidoRow.data_entrega_solicitada
-      ? (([ano, mes, dia]) => ({ ano, mes: mes - 1, dia }))(pedidoRow.data_entrega_solicitada.split('-').map(Number) as [number, number, number])
-      : null;
-    const periodoEntregaTipado = (pedidoRow.periodo_entrega as PeriodoEntrega | null) ?? null;
-
-    // Decisão pura extraída pra logica.ts (decidirAgendamentoPagamento) —
-    // testável isoladamente (ver webhook.test.ts), mesma regra de sempre:
-    // pagamento dentro do horário mantém despacho imediato; fora do horário
-    // (depois de fechar OU antes de abrir) nunca despacha na hora, fica
-    // agendado pro próximo horário comercial.
-    const agendamento = decidirAgendamentoPagamento({
-      entregaPrometidaFixadaISO: pedidoRow.entrega_prometida_em,
-      despachoFixadoISO: pedidoRow.logistica_executar_em,
-      dataEntregaTipada,
-      periodoEntregaTipado,
-      leadTimeMinutos: LEAD_TIME_MINUTOS,
-    }, agora);
-
-    const foraDoHorarioPagamento = !agendamento.imediato;
-    let logisticaAgendadaOk = true;
-
-    if (foraDoHorarioPagamento) {
-      // Nunca chama o motorista antes da hora (Parte 5) — fica agendado.
-      // Idempotente: só agenda se a logística ainda não foi criada/agendada/
-      // está em revisão (mesma condição do claim atômico real em
-      // logistica-processamento.ts, reforçada aqui só pra decidir se
-      // reagenda ou não — nunca é a fonte de verdade sozinha).
-      const { data: agendado, error: agendarError } = await db.from('pedidos')
-        .update({
-          status_logistica: 'agendada',
-          logistica_executar_em: agendamento.despachoEm.toISOString(),
-          entrega_prometida_em: agendamento.entregaPrometidaEm.toISOString(),
-        })
-        .eq('id', pedido.id)
-        .or('status_logistica.is.null,status_logistica.eq.erro_logistica')
-        .select('id')
-        .maybeSingle();
-      if (agendarError) {
-        console.error(`[webhook-mp] FALHA ao agendar logistica: ${agendarError.message} pedido=${pedido.id}`);
-        logisticaAgendadaOk = false;
-      } else {
-        console.log(agendado
-          ? `[webhook-mp] pagamento aprovado — logistica agendada para ${agendamento.despachoEm.toISOString()} (entrega prometida ${agendamento.entregaPrometidaEm.toISOString()}). pedido=${pedido.id}`
-          : `[webhook-mp] logistica ja criada/agendada/em revisao — nao reagenda. pedido=${pedido.id}`);
-      }
-    } else {
-      // Dentro do horário e despacho imediato — grava a janela prometida
-      // mesmo assim (auditoria/atendimento), sem bloquear o fluxo se isso
-      // falhar (não crítico: a corrida ainda é criada normalmente abaixo).
-      const { error: entregaPrometidaError } = await db.from('pedidos')
-        .update({ entrega_prometida_em: agendamento.entregaPrometidaEm.toISOString() })
-        .eq('id', pedido.id);
-      if (entregaPrometidaError) console.error(`[webhook-mp] falha ao gravar entrega_prometida_em (nao critico): ${entregaPrometidaError.message} pedido=${pedido.id}`);
-    }
-
-    if (!logisticaAgendadaOk) {
-      // O pagamento JÁ foi marcado (correto e irreversível), mas o
-      // agendamento falhou — o evento nunca pode terminar como 'ok' aqui
-      // (Parte 4), senão nenhuma tentativa de recuperação roda de novo.
-      if (decisaoEvento.acao === 'processar_completo') await marcarEventoErro('pagamento marcado mas falha ao agendar logistica');
-      await criarAlertaOperacional(db, pedidoRow, `Pagamento aprovado (${paymentId}) e marcado, mas falha ao agendar a logistica — corrida nunca foi criada.`);
-      return new Response('ok', { status: 200 });
-    }
-
-    if (decisaoEvento.acao === 'processar_completo') {
-      const { error: concluirConversaError } = await db.from('conversas').update({
-        fase: 'concluido',
-        atualizado_em: new Date().toISOString(),
-      }).eq('canal', pedido.canal).eq('canal_id', pedido.canal_id);
-      if (concluirConversaError) console.error(`[webhook-mp] falha ao concluir conversa (nao critico): ${concluirConversaError.message} pedido=${pedido.id}`);
-
-      const valorFormatado = `R$ ${pagamento.valor.toFixed(2).replace('.', ',')}`;
-      const texto = foraDoHorarioPagamento
-        ? `Recebemos o seu pagamento de ${valorFormatado}. Pagamento confirmado! A entrega segue ${textoJanelaPrometida(agendamento.entregaPrometidaEm, agora)}. Vamos preparar tudo com muito carinho.`
-        : `Recebemos o seu pagamento de ${valorFormatado}. Seu pedido está confirmado e vamos preparar tudo com muito carinho. Em breve entraremos em contato com as informações de entrega.`;
-      await notificarCliente(pedidoRow, texto);
-      console.log(`[webhook-mp] pagamento aprovado e confirmado. pedido=${pedido.id} payment=${paymentId} valor=${valorFormatado}`);
-      await marcarEventoOk();
-    } else {
-      console.log(`[webhook-mp] evento repetido — pulando nova notificacao ao cliente, so retomando logistica se necessario. pedido=${pedido.id}`);
-    }
-
-    if (!foraDoHorarioPagamento) {
-      // Nunca fecha silenciosamente sem iniciar o operacional: pagamento
-      // confirmado dentro do horário sempre tenta a criação real da entrega
-      // — em evento novo OU repetido, já que a idempotência da logística vem
-      // inteiramente do estado em pedidos.status_logistica (nunca da
-      // notificação em si). Falha aqui nunca desfaz o pagamento nem
-      // re-notifica o cliente (processarLogisticaAposPagamento já marca
-      // erro_logistica/revisao_logistica internamente, ver Parte 4 nesse
-      // módulo também).
-      const resultadoLogistica = await processarLogisticaAposPagamento(db, { ...pedidoRow, status: 'pago' }, CONFIG_LOGISTICA);
-      console.log(`[webhook-mp] resultado logistica: ${resultadoLogistica.status}${'motivo' in resultadoLogistica ? ` (${resultadoLogistica.motivo})` : ''} pedido=${pedido.id}`);
-    }
-
-    return new Response('ok', { status: 200 });
-  }
-
-  // pending/in_process/authorized/rejected/cancelled/refunded/charged_back
-  // — só atualiza o status do pedido (nunca toca status_producao nem tenta
-  // logistica, que só fazem sentido para 'pago'). rejected/cancelled são os
-  // únicos estados terminais negativos aqui (pending/in_process/authorized
-  // ainda podem virar 'pago'; refunded/charged_back só acontecem depois de
-  // uma aprovação anterior, fora do escopo desta notificação) — avisamos o
-  // cliente só pra esses dois, e só na primeira vez que o evento é
-  // processado (mesma trava de idempotência usada em todo o resto do
-  // handler, nunca reenvia a mesma notificação numa reentrega do MP).
-  const { error: statusUpdateError } = await db.from('pedidos').update({ status: statusMapeado, mp_payment_id: paymentId }).eq('id', pedido.id);
-  if (statusUpdateError) {
-    console.error(`[webhook-mp] falha ao atualizar status do pedido para ${statusMapeado}: ${statusUpdateError.message} pedido=${pedido.id}`);
-    if (decisaoEvento.acao === 'processar_completo') await marcarEventoErro(`falha ao atualizar status para ${statusMapeado}: ${statusUpdateError.message}`.slice(0, 200));
-    return new Response('ok', { status: 200 });
-  }
-  console.log(`[webhook-mp] pedido ${pedido.id} atualizado para status=${statusMapeado} (mp status=${pagamento.status})`);
-
-  // Gap fechado (achado em auditoria, 2026-08-06): até esta correção, um
-  // estorno/cancelamento feito FORA do nosso sistema (direto no painel do
-  // Mercado Pago) atualizava pedidos.status mas nunca cancelava a corrida
-  // real na Lalamove, mesmo com status_logistica='criada'. Best-effort —
-  // nunca trava nem atrasa a resposta 200 ao Mercado Pago; uma falha aqui
-  // vira 'revisao_logistica' dentro do próprio módulo, nunca lançada.
-  if ((statusMapeado === 'cancelado' || statusMapeado === 'reembolsado') && (pedido as PedidoRow & { status_logistica?: string | null }).status_logistica === 'criada') {
-    try {
-      await processarCancelamentoLogistica(db, pedido as unknown as PedidoParaCancelamentoEntrega, { workspaceId: WORKSPACE_ID });
-    } catch (e) {
-      console.error(`[webhook-mp] falha ao tentar cancelar logistica apos ${statusMapeado} (nao critico): ${e instanceof Error ? e.message : String(e)} pedido=${pedido.id}`);
-    }
-  }
-
-  if (decisaoEvento.acao === 'processar_completo') {
-    if (statusMapeado === 'pagamento_recusado' || statusMapeado === 'cancelado') {
-      await notificarCliente(pedido as PedidoRow, mensagemPagamentoNaoAprovado((pedido as PedidoRow).link_pagamento));
-    }
-    await marcarEventoOk();
   }
   return new Response('ok', { status: 200 });
-  }
 });

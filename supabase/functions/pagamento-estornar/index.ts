@@ -60,16 +60,24 @@ Deno.serve(async (req: Request) => {
   const db = getDb();
   const { data: pedido, error: pedidoError } = await db
     .from('pedidos')
-    .select('id, mp_payment_id, valor, estorno_status')
+    .select('id, mp_payment_id, valor, estorno_status, mp_ambiente')
     .eq('id', pedidoId)
     .maybeSingle();
 
   if (pedidoError || !pedido) return resposta({ erro: 'pedido nao encontrado' }, 404);
   if (!pedido.mp_payment_id) return resposta({ erro: 'pedido sem pagamento identificado (mp_payment_id ausente)' }, 409);
 
+  // Ambiente vem exclusivamente da coluna imutável do pedido — nunca do
+  // payload da requisição, e NUNCA com fallback pro outro ambiente (D5 do
+  // plano de separação teste/produção: um estorno de teste jamais pode
+  // atingir um pagamento real). Se a busca não encontrar nada neste
+  // ambiente específico, falha explicitamente.
+  const ambiente = (pedido.mp_ambiente as 'producao' | 'teste' | null) ?? 'producao';
+
   // Nunca confia em status/valor salvos localmente — sempre a API real.
-  const pagamentoReal = await buscarPagamentoReal(WORKSPACE_ID, pedido.mp_payment_id);
-  if (!pagamentoReal) return resposta({ erro: 'nao foi possivel confirmar o pagamento na API do Mercado Pago' }, 502);
+  const resultadoBusca = await buscarPagamentoReal(WORKSPACE_ID, pedido.mp_payment_id, ambiente);
+  if (!resultadoBusca.ok) return resposta({ erro: `nao foi possivel confirmar o pagamento na API do Mercado Pago (ambiente=${ambiente}, motivo=${resultadoBusca.motivo})` }, 502);
+  const pagamentoReal = resultadoBusca.pagamento;
 
   const { data: eventoExistente } = await db
     .from('pedidos_estorno_eventos')
@@ -125,7 +133,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const eventoId = eventoCriado.id as string;
-  const resultado = await estornarPagamentoMercadoPago(WORKSPACE_ID, pedido.mp_payment_id);
+  const resultado = await estornarPagamentoMercadoPago(WORKSPACE_ID, pedido.mp_payment_id, undefined, ambiente);
 
   if (!resultado.ok) {
     await db.from('pedidos_estorno_eventos').update({ status: 'erro', erro_sanitizado: resultado.erro, atualizado_em: new Date().toISOString() }).eq('id', eventoId);

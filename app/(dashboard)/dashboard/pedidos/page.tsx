@@ -246,6 +246,9 @@ export default function PedidosPage() {
                   </td>
                   <td className="px-4 py-3">
                     <span className={`badge ${STATUS_BADGE[p.status]}`}>{STATUS_LABEL[p.status]}</span>
+                    {p.mp_ambiente === 'teste' && (
+                      <span className="badge badge-teste ml-1" title="Pagamento gerado no ambiente de teste do Mercado Pago — nunca dinheiro real">TESTE</span>
+                    )}
                     {real && p.status_logistica && (
                       <div className="text-[10px] text-text-faint mt-1">{STATUS_LOGISTICA_LABEL[p.status_logistica] ?? p.status_logistica}</div>
                     )}

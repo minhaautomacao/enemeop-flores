@@ -81,6 +81,18 @@ export function valoresDivergem(valorPedido: number, valorAprovado: number): boo
   return Math.abs(Number(valorPedido) - Number(valorAprovado)) > 0.01;
 }
 
+/**
+ * O pedido só pode ser atualizado se o ambiente gravado nele (decidido uma
+ * única vez na criação, imutável — ver migration mp_ambiente) bater com o
+ * ambiente que realmente respondeu pelo pagamento (resolverPagamentoEAmbiente,
+ * ../_shared/resolucao-ambiente.ts). Uma divergência aqui é sempre uma
+ * anomalia real (nunca um caso esperado) — nunca prosseguir silenciosamente
+ * quando isso acontecer.
+ */
+export function pedidoAmbienteCompativel(pedidoAmbiente: string | null | undefined, ambienteResolvido: string): boolean {
+  return (pedidoAmbiente ?? 'producao') === ambienteResolvido;
+}
+
 // ── Quando despachar a corrida real após o pagamento confirmado ──────────
 //
 // Pagamento confirmado DENTRO do horário comercial: comportamento atual

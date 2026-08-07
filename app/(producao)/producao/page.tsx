@@ -39,6 +39,7 @@ interface Pedido {
   prioridade?: boolean
   transportadora: string
   novo?: boolean
+  mpAmbiente?: string
 }
 
 export default function ProducaoPage() {
@@ -93,6 +94,7 @@ export default function ProducaoPage() {
             prioridade: false,
             transportadora: String(p.frete_transportadora ?? 'A definir'),
             novo: novos.includes(numero),
+            mpAmbiente: (p.mp_ambiente as string | null) ?? undefined,
           }
         })
         .filter((p): p is Pedido => p !== null)
@@ -288,6 +290,11 @@ export default function ProducaoPage() {
                           {p.prioridade && (
                             <span className="rounded-full bg-amber-500/20 border border-amber-500/40 px-1.5 text-[8px] font-black text-amber-400 uppercase tracking-widest">
                               URGENTE
+                            </span>
+                          )}
+                          {p.mpAmbiente === 'teste' && (
+                            <span className="rounded-full bg-purple-500/20 border border-purple-500/40 px-1.5 text-[8px] font-black text-purple-400 uppercase tracking-widest" title="Pagamento gerado no ambiente de teste do Mercado Pago — nunca dinheiro real">
+                              TESTE
                             </span>
                           )}
                         </div>

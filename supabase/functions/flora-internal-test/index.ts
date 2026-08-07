@@ -26,14 +26,17 @@
  * já ativo) o pagamento passa a usar a MESMA função real de
  * webhook-whatsapp/webhook-meta (gerarOuReusarPreference +
  * criarPreferenciaMercadoPago, ver ../_shared/pedido-repositorio.ts) — gera
- * preference/cobrança real no Mercado Pago. Usado só em teste real
+ * preference/cobrança real no Mercado Pago, no ambiente decidido por
+ * FLORA_INTERNAL_REAL_ORDER_AMBIENTE (default 'teste' — nunca dinheiro real
+ * sem uma segunda flag explícita apontando 'producao'). Usado só em teste
  * controlado (um pedido por vez, sob supervisão direta), nunca por padrão.
  *
  * Dados de teste são sempre conversas.canal='internal_test' — nunca se
  * mistura com conversas reais, fácil de identificar/filtrar depois. Em modo
  * FLORA_INTERNAL_REAL_ORDER, o pedido real criado carrega cliente_nome
- * ='TESTE REAL CONTROLADO' (além de canal/canal_origem='internal_test'),
- * pra nunca ser confundido com um pedido de cliente real na tela de pedidos.
+ * ='TESTE REAL CONTROLADO (MP <ambiente>)' (além de canal/canal_origem=
+ * 'internal_test' e pedidos.mp_ambiente gravado), pra nunca ser confundido
+ * com um pedido de cliente real na tela de pedidos.
  *
  * Variáveis de ambiente:
  *   FLORA_INTERNAL_TEST_MODE — precisa ser exatamente 'true'; qualquer
@@ -43,6 +46,10 @@
  *     CRM) via header "Authorization: Bearer <token>". Nunca logado.
  *   FLORA_INTERNAL_REAL_ORDER — 'true' liga o pagamento real (ver acima);
  *     qualquer outro valor (ou ausente) mantém o pagamento mockado.
+ *   FLORA_INTERNAL_REAL_ORDER_AMBIENTE — só relevante quando REAL_ORDER=true;
+ *     'producao' cobra de verdade com a credencial de produção; qualquer
+ *     outro valor (ou ausente) usa a credencial de TESTE — default seguro,
+ *     nunca dinheiro real por omissão.
  */
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
@@ -80,6 +87,14 @@ const TIMEOUT_FRETE_MS = 25_000;
 // 'true' liga pagamento real (ver cabeçalho do arquivo) — qualquer outro
 // valor (padrão) mantém gerarPagamentoMock.
 const REAL_ORDER = Deno.env.get('FLORA_INTERNAL_REAL_ORDER') === 'true';
+// Ambiente do Mercado Pago usado quando REAL_ORDER=true — variável DEDICADA
+// (mesmo raciocínio de FLORA_INTERNAL_TEST_INTERPRETACAO_ATIVA logo abaixo:
+// nunca reaproveitar nome genérico entre canais). Default SEGURO: 'teste' —
+// antes desta mudança, REAL_ORDER=true sozinho já cobrava dinheiro real de
+// produção; agora, ligar pedido real nunca mais cobra de verdade sem uma
+// segunda flag explícita apontando 'producao'.
+const REAL_ORDER_AMBIENTE: 'producao' | 'teste' =
+  Deno.env.get('FLORA_INTERNAL_REAL_ORDER_AMBIENTE') === 'producao' ? 'producao' : 'teste';
 // Ativa a camada de interpretação contextual de intenção (ver Parte
 // "correção estrutural" em funil.ts) — flag de rollout por canal: ausente
 // (padrão), o comportamento é 100% determinístico, idêntico ao anterior a
@@ -191,7 +206,7 @@ async function gerarPagamentoMock(pedidoId: string, valorTotal: number): Promise
   return { link: `https://mock-pagamento.teste-interno.invalid/pedido/${pedidoId}?valor=${valorTotal}`, paymentId: `mock-${pedidoId}` };
 }
 
-/** Pagamento real — mesma função usada por webhook-whatsapp/webhook-meta. Só chamada quando REAL_ORDER=true (teste real controlado). */
+/** Pagamento real — mesma função usada por webhook-whatsapp/webhook-meta. Só chamada quando REAL_ORDER=true (teste real controlado). Ambiente decidido por REAL_ORDER_AMBIENTE, nunca fixo em produção. */
 async function gerarPagamentoReal(pedidoId: string): Promise<{ link: string; paymentId: string } | null> {
   return gerarOuReusarPreference(getDb(), pedidoId, WORKSPACE_ID, SUPABASE_URL, 'flora-internal-test', criarPreferenciaMercadoPago);
 }
@@ -220,8 +235,11 @@ function construirDependenciasFunilTeste(cliente: DadosClientePedido): Dependenc
     },
     gerarPagamento: REAL_ORDER ? gerarPagamentoReal : gerarPagamentoMock,
     gerarPagamentoPix: REAL_ORDER ? gerarPagamentoPixReal : gerarPagamentoPixMock,
-    criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'flora-internal-test'),
-    buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID),
+    // Ambiente gravado uma única vez na criação (imutável depois, ver
+    // migration mp_ambiente) — só importa quando REAL_ORDER=true (pedido
+    // mockado nunca toca credencial nenhuma, 'producao' aqui é só neutro).
+    criarPedido: (dados) => criarOuReusarPedido(getDb(), dados, cliente, WORKSPACE_ID, 'flora-internal-test', REAL_ORDER ? REAL_ORDER_AMBIENTE : 'producao'),
+    buscarFormasPagamento: () => buscarFormasPagamentoReal(getDb(), WORKSPACE_ID, REAL_ORDER ? REAL_ORDER_AMBIENTE : 'producao'),
     interpretarIntencao: INTERPRETACAO_CONTEXTUAL_ATIVA ? criarChamadorInterpretacao() : undefined,
   };
 }
@@ -286,7 +304,7 @@ async function processarMensagemTeste(conversaId: string, mensagemCliente: strin
     }
   } else {
     const deps = construirDependenciasFunilTeste({
-      nome: REAL_ORDER ? 'TESTE REAL CONTROLADO' : 'Cliente Teste',
+      nome: REAL_ORDER ? `TESTE REAL CONTROLADO (MP ${REAL_ORDER_AMBIENTE})` : 'Cliente Teste',
       canal: 'internal_test',
       canalId: conversaId,
       conversaId: conversaRow.id,

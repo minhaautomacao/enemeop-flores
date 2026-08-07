@@ -1,18 +1,30 @@
 /**
- * mercadopago.ts — Checkout Pro do Mercado Pago (produção, nunca sandbox).
+ * mercadopago.ts — Checkout Pro do Mercado Pago, produção E teste.
  *
  * Substitui Cielo no fluxo ativo da Flora: não existe nenhuma credencial
  * tipo='cielo' em workspace_credentials (só tipo='financeiro', mp_*, já
  * configurada). Ver docs/CURRENT_STATE.md para o achado completo.
  *
+ * Ambiente ('producao' | 'teste', default 'producao' em toda função) decide
+ * qual par de credenciais é usado — NUNCA inferido aqui, sempre recebido
+ * como parâmetro explícito de quem chama. Isso é o que garante que o
+ * ambiente nunca é escolhido pelo cliente/navegador: a decisão vive em
+ * configuração de servidor (coluna pedidos.mp_ambiente, ou env var em
+ * flora-internal-test), nunca em input de requisição HTTP.
+ *
  * Credenciais usadas (workspace_credentials, tipo='financeiro'):
- *   mp_access_token   — obrigatória, usada em toda chamada à API.
- *   mp_webhook_secret — opcional hoje (ainda não configurada); usada só
- *     pra validar a assinatura x-signature do webhook. Sem ela,
- *     validarAssinaturaWebhook devolve 'sem_segredo_configurado' — quem
- *     chama decide como agir (a segunda camada de defesa real é sempre
- *     buscar o pagamento na API do Mercado Pago antes de confiar em
- *     qualquer coisa vinda do corpo/query da notificação).
+ *   mp_access_token         — produção, obrigatória, usada em toda chamada à API.
+ *   mp_access_token_teste   — teste, mesmo papel, ambiente sandbox do Mercado Pago.
+ *   mp_webhook_secret       — opcional hoje; valida a assinatura x-signature
+ *     do webhook de produção. Sem ela, validarAssinaturaWebhook devolve
+ *     'sem_segredo_configurado' — quem chama decide como agir (a segunda
+ *     camada de defesa real é sempre buscar o pagamento na API do Mercado
+ *     Pago antes de confiar em qualquer coisa vinda do corpo/query da
+ *     notificação).
+ *   mp_webhook_secret_teste — mesmo papel, ambiente teste. Se o Mercado Pago
+ *     usar o mesmo secret pros dois modos, essa chave simplesmente nunca é
+ *     configurada e a validação em ambiente teste sempre cai em
+ *     'sem_segredo_configurado' (comportamento tolerante, igual ao de hoje).
  */
 
 import { buscarCredencial } from './credentials.ts';
@@ -23,6 +35,21 @@ export { validarAssinaturaComSegredo } from './mercadopago-assinatura.ts';
 export { montarRequisicaoEstorno, type RequisicaoEstorno } from './mercadopago-estorno-payload.ts';
 
 const API_BASE = 'https://api.mercadopago.com';
+
+export type AmbienteMercadoPago = 'producao' | 'teste';
+
+const CHAVE_ACCESS_TOKEN: Record<AmbienteMercadoPago, string> = {
+  producao: 'mp_access_token',
+  teste: 'mp_access_token_teste',
+};
+const CHAVE_WEBHOOK_SECRET: Record<AmbienteMercadoPago, string> = {
+  producao: 'mp_webhook_secret',
+  teste: 'mp_webhook_secret_teste',
+};
+
+async function buscarAccessToken(workspaceId: string | undefined, ambiente: AmbienteMercadoPago): Promise<string | null> {
+  return buscarCredencial(workspaceId, 'financeiro', CHAVE_ACCESS_TOKEN[ambiente]);
+}
 
 export interface ItemPreferencia {
   titulo: string;
@@ -57,10 +84,11 @@ export interface ResultadoPreferencia {
 export async function criarPreferenciaMercadoPago(
   workspaceId: string | undefined,
   opcoes: OpcoesPreferencia,
+  ambiente: AmbienteMercadoPago = 'producao',
 ): Promise<ResultadoPreferencia> {
-  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
+  const accessToken = await buscarAccessToken(workspaceId, ambiente);
   if (!accessToken) {
-    return { criado: false, erro: 'Credenciais Mercado Pago (mp_access_token) não configuradas.' };
+    return { criado: false, erro: `Credenciais Mercado Pago (${CHAVE_ACCESS_TOKEN[ambiente]}) não configuradas.` };
   }
   if (opcoes.itens.length === 0) {
     return { criado: false, erro: 'Nenhum item pra cobrar — preference não deve ser criada sem produto real.' };
@@ -139,10 +167,11 @@ export interface ResultadoPagamentoPix {
 export async function criarPagamentoPixMercadoPago(
   workspaceId: string | undefined,
   opcoes: OpcoesPagamentoPix,
+  ambiente: AmbienteMercadoPago = 'producao',
 ): Promise<ResultadoPagamentoPix> {
-  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
+  const accessToken = await buscarAccessToken(workspaceId, ambiente);
   if (!accessToken) {
-    return { criado: false, erro: 'Credenciais Mercado Pago (mp_access_token) não configuradas.' };
+    return { criado: false, erro: `Credenciais Mercado Pago (${CHAVE_ACCESS_TOKEN[ambiente]}) não configuradas.` };
   }
 
   const payload = {
@@ -200,20 +229,45 @@ export interface PagamentoReal {
 }
 
 /**
+ * Resultado discriminado de buscarPagamentoReal — motivo importa: só
+ * 'nao_encontrado' (HTTP 404) é elegível para o fallback produção→teste do
+ * webhook (ver _shared/resolucao-ambiente.ts). Qualquer outro motivo
+ * ('erro_transitorio': 401/500/timeout/rede, ou 'sem_credencial') precisa
+ * propagar como falha real, nunca ser mascarado como "não encontrado neste
+ * ambiente" — misturar os dois casos tornaria o fallback inseguro sob
+ * instabilidade da API do Mercado Pago.
+ */
+export type ResultadoBuscaPagamento =
+  | { ok: true; pagamento: PagamentoReal }
+  | { ok: false; motivo: 'nao_encontrado' }
+  | { ok: false; motivo: 'sem_credencial' }
+  | { ok: false; motivo: 'erro_transitorio'; detalhe: string };
+
+/**
  * Busca o pagamento DIRETO na API do Mercado Pago pelo id — nunca confia em
  * status/valor vindos do corpo da notificação do webhook.
  */
 export async function buscarPagamentoReal(
   workspaceId: string | undefined,
   paymentId: string,
-): Promise<PagamentoReal | null> {
-  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
-  if (!accessToken) return null;
+  ambiente: AmbienteMercadoPago = 'producao',
+): Promise<ResultadoBuscaPagamento> {
+  const accessToken = await buscarAccessToken(workspaceId, ambiente);
+  if (!accessToken) return { ok: false, motivo: 'sem_credencial' };
+  let resp: Response;
   try {
-    const resp = await fetch(`${API_BASE}/v1/payments/${encodeURIComponent(paymentId)}`, {
+    resp = await fetch(`${API_BASE}/v1/payments/${encodeURIComponent(paymentId)}`, {
       headers: { 'Authorization': `Bearer ${accessToken}` },
     });
-    if (!resp.ok) return null;
+  } catch (e) {
+    return { ok: false, motivo: 'erro_transitorio', detalhe: String(e) };
+  }
+  if (resp.status === 404) return { ok: false, motivo: 'nao_encontrado' };
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '');
+    return { ok: false, motivo: 'erro_transitorio', detalhe: `HTTP ${resp.status}: ${err.slice(0, 200)}` };
+  }
+  try {
     const data = await resp.json() as {
       id: number;
       status: string;
@@ -222,14 +276,17 @@ export async function buscarPagamentoReal(
       external_reference?: string;
     };
     return {
-      id: String(data.id),
-      status: data.status,
-      valor: data.transaction_amount,
-      metodo: data.payment_type_id,
-      externalReference: data.external_reference ?? null,
+      ok: true,
+      pagamento: {
+        id: String(data.id),
+        status: data.status,
+        valor: data.transaction_amount,
+        metodo: data.payment_type_id,
+        externalReference: data.external_reference ?? null,
+      },
     };
-  } catch {
-    return null;
+  } catch (e) {
+    return { ok: false, motivo: 'erro_transitorio', detalhe: `resposta invalida: ${String(e)}` };
   }
 }
 
@@ -249,8 +306,9 @@ export interface PreferenciaExistente {
 export async function buscarPreferenciaPorExternalReference(
   workspaceId: string | undefined,
   externalReference: string,
+  ambiente: AmbienteMercadoPago = 'producao',
 ): Promise<PreferenciaExistente> {
-  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
+  const accessToken = await buscarAccessToken(workspaceId, ambiente);
   if (!accessToken) return { encontrada: false };
   try {
     const url = `${API_BASE}/checkout/preferences/search?external_reference=${encodeURIComponent(externalReference)}`;
@@ -287,10 +345,11 @@ export async function estornarPagamentoMercadoPago(
   workspaceId: string | undefined,
   paymentId: string,
   valorReais?: number,
+  ambiente: AmbienteMercadoPago = 'producao',
 ): Promise<ResultadoEstorno> {
-  const accessToken = await buscarCredencial(workspaceId, 'financeiro', 'mp_access_token');
+  const accessToken = await buscarAccessToken(workspaceId, ambiente);
   if (!accessToken) {
-    return { ok: false, erro: 'Credenciais Mercado Pago (mp_access_token) não configuradas.' };
+    return { ok: false, erro: `Credenciais Mercado Pago (${CHAVE_ACCESS_TOKEN[ambiente]}) não configuradas.` };
   }
 
   const requisicao = montarRequisicaoEstorno(paymentId, valorReais);
@@ -333,8 +392,36 @@ export async function validarAssinaturaWebhook(
   xSignature: string | null,
   xRequestId: string | null,
   dataId: string,
+  ambiente: AmbienteMercadoPago = 'producao',
 ): Promise<'valida' | 'invalida' | 'sem_segredo_configurado'> {
-  const secret = await buscarCredencial(workspaceId, 'financeiro', 'mp_webhook_secret');
+  const secret = await buscarCredencial(workspaceId, 'financeiro', CHAVE_WEBHOOK_SECRET[ambiente]);
   if (!secret) return 'sem_segredo_configurado';
   return validarAssinaturaComSegredo(secret, xSignature, xRequestId, dataId);
+}
+
+/**
+ * Valida contra os dois segredos possíveis (produção e teste), sem saber
+ * ainda qual ambiente a notificação pertence (ver _shared/resolucao-ambiente.ts
+ * — o ambiente só é confirmado depois de buscar o pagamento real). Mantém a
+ * rejeição antecipada de notificações forjadas ANTES de qualquer chamada à
+ * API do Mercado Pago. Se só um dos dois segredos estiver configurado
+ * (provável: o Mercado Pago pode usar o mesmo secret pros dois modos),
+ * valida só contra o que existir.
+ */
+export async function validarAssinaturaWebhookQualquerAmbiente(
+  workspaceId: string | undefined,
+  xSignature: string | null,
+  xRequestId: string | null,
+  dataId: string,
+): Promise<{ resultado: 'valida' | 'invalida' | 'sem_segredo_configurado'; ambienteValidado: AmbienteMercadoPago | null }> {
+  const producao = await validarAssinaturaWebhook(workspaceId, xSignature, xRequestId, dataId, 'producao');
+  if (producao === 'valida') return { resultado: 'valida', ambienteValidado: 'producao' };
+
+  const teste = await validarAssinaturaWebhook(workspaceId, xSignature, xRequestId, dataId, 'teste');
+  if (teste === 'valida') return { resultado: 'valida', ambienteValidado: 'teste' };
+
+  if (producao === 'sem_segredo_configurado' && teste === 'sem_segredo_configurado') {
+    return { resultado: 'sem_segredo_configurado', ambienteValidado: null };
+  }
+  return { resultado: 'invalida', ambienteValidado: null };
 }

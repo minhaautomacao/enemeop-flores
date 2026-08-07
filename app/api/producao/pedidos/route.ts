@@ -27,7 +27,7 @@ export async function GET() {
     .select(`numero_pedido, id, produto, produtos, valor, cliente_nome, cliente_telefone,
       status, status_producao, status_logistica, logistica_resposta, canal, criado_em,
       horario_entrega, data_agendada, nome_destinatario, bairro, endereco_entrega,
-      mensagem_cartao, frete_transportadora`)
+      mensagem_cartao, frete_transportadora, mp_ambiente`)
     .in('status', ['pago', 'aguardando_pagamento'])
     // 'internal_test' é o canal usado só pra validar a Flora em ambiente
     // controlado (ver supabase/functions/flora-internal-test) — nunca deve

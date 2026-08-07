@@ -16,8 +16,9 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { buscarTodasCredenciais } from './credentials.ts';
 import { criarEntregaLalamove } from './lalamove-orders.ts';
+import { resolverConfig } from './lalamove.ts';
 import { decidirAcaoLogistica, statusLogisticaReivindicavel, type PedidoParaLogistica } from './logistica-decisao.ts';
-import { cotacaoExpirada, telefoneE164Valido } from './lalamove-config.ts';
+import { cotacaoExpirada, telefoneE164Valido, ambienteParaLalamove, CHAVE_LALAMOVE_KEY, CHAVE_LALAMOVE_SECRET, type AmbientePedidoLalamove } from './lalamove-config.ts';
 
 export interface PedidoParaEntrega extends PedidoParaLogistica {
   id: string;
@@ -30,6 +31,7 @@ export interface PedidoParaEntrega extends PedidoParaLogistica {
   frete_destino: { cep?: string } | null;
   frete_preco_real: number | null;
   logistica_tentativas: number | null;
+  lalamove_ambiente: AmbientePedidoLalamove | null;
 }
 
 export interface ConfigLogisticaProcessamento {
@@ -79,16 +81,25 @@ async function marcarRevisaoLogistica(db: Db, pedidoId: string, tentativas: numb
   if (error) console.error(`[logistica] FALHA AO REGISTRAR revisao_logistica (RISCO: pedido pode ficar preso em 'pendente' e nunca ser revisado): ${error.message} pedido=${pedidoId}`);
 }
 
-/** Re-cota o frete (mesmo caminho real usado durante a conversa) quando a cotação persistida no pedido já expirou — nunca cria a entrega com um quotationId vencido. */
+/**
+ * Re-cota o frete (mesmo caminho real usado durante a conversa) quando a
+ * cotação persistida no pedido já expirou — nunca cria a entrega com um
+ * quotationId vencido. `ambiente` (derivado de pedido.lalamove_ambiente,
+ * imutável) é sempre enviado explicitamente pro agente-logistica — sem
+ * isso, um pedido de teste cuja cotação expirar entre pagamento e criação
+ * da entrega re-cotaria (e depois criaria a corrida) contra produção,
+ * silenciosamente. Este é o gap que motivou D6 do plano de separação.
+ */
 async function reconsultarFrete(
   config: ConfigLogisticaProcessamento,
   cepDestino: string,
+  ambiente: AmbientePedidoLalamove,
 ): Promise<{ quotationId: string; expiresAt: string | null; stopIdOrigem?: string; stopIdDestino?: string; precoReal: number | null } | null> {
   try {
     const res = await fetch(`${config.supabaseUrl}/functions/v1/agente-logistica`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.factorySecret}` },
-      body: JSON.stringify({ endereco: { cep: cepDestino }, workspace_id: config.workspaceId }),
+      body: JSON.stringify({ endereco: { cep: cepDestino }, workspace_id: config.workspaceId, ambiente: ambienteParaLalamove(ambiente) }),
       signal: AbortSignal.timeout(25_000),
     });
     if (!res.ok) return null;
@@ -165,6 +176,7 @@ export async function processarLogisticaAposPagamento(
   }
 
   const tentativas = pedido.logistica_tentativas ?? 0;
+  const ambientePedido: AmbientePedidoLalamove = pedido.lalamove_ambiente ?? 'producao';
 
   let quotationId = pedido.lalamove_quotation_id;
   let expiresAt = pedido.frete_expires_at;
@@ -182,7 +194,7 @@ export async function processarLogisticaAposPagamento(
       await marcarErroLogistica(db, pedido.id, tentativas, 'sem CEP de destino persistido para re-cotar o frete');
       return { status: 'erro_logistica', motivo: 'sem_cep_destino' };
     }
-    const nova = await reconsultarFrete(config, cepDestino);
+    const nova = await reconsultarFrete(config, cepDestino, ambientePedido);
     if (!nova || !nova.stopIdOrigem || !nova.stopIdDestino) {
       await marcarErroLogistica(db, pedido.id, tentativas, 'falha ao re-cotar frete antes de criar a entrega');
       return { status: 'erro_logistica', motivo: 'falha_recotacao' };
@@ -225,11 +237,20 @@ export async function processarLogisticaAposPagamento(
     return { status: 'erro_logistica', motivo: 'destinatario_incompleto' };
   }
 
+  // Ambiente vem exclusivamente de pedido.lalamove_ambiente (imutável) —
+  // nunca de Deno.env global, nunca com fallback pro outro ambiente. Um
+  // pedido de teste só pode criar corrida com credencial de teste.
+  const lalamoveConfig = resolverConfig(ambienteParaLalamove(ambientePedido));
+  const chaveApiKey = CHAVE_LALAMOVE_KEY[lalamoveConfig.ambiente];
+  const chaveApiSecret = CHAVE_LALAMOVE_SECRET[lalamoveConfig.ambiente];
   const creds = await buscarTodasCredenciais(config.workspaceId, 'logistica');
-  const apiKey = creds['lalamove_key'] || Deno.env.get('LALAMOVE_API_KEY') || '';
-  const apiSecret = creds['lalamove_secret'] || Deno.env.get('LALAMOVE_API_SECRET') || '';
+  // Fallback pra env var só existe pro par de produção (mesmo comportamento
+  // de sempre) — a chave _teste tem que estar cadastrada em
+  // workspace_credentials pra existir, nunca cai pra produção por analogia.
+  const apiKey = creds[chaveApiKey] || (lalamoveConfig.ambiente === 'production' ? Deno.env.get('LALAMOVE_API_KEY') : '') || '';
+  const apiSecret = creds[chaveApiSecret] || (lalamoveConfig.ambiente === 'production' ? Deno.env.get('LALAMOVE_API_SECRET') : '') || '';
   if (!apiKey || !apiSecret) {
-    await marcarErroLogistica(db, pedido.id, tentativas, 'credenciais Lalamove nao configuradas');
+    await marcarErroLogistica(db, pedido.id, tentativas, `credenciais Lalamove (${chaveApiKey}) nao configuradas`);
     return { status: 'erro_logistica', motivo: 'credenciais_ausentes' };
   }
 
@@ -239,7 +260,7 @@ export async function processarLogisticaAposPagamento(
     remetente: { stopId: stopIdOrigem!, nome: config.storeNome, telefone: config.storePhone },
     destinatario: { stopId: stopIdDestino!, nome: pedido.nome_destinatario, telefone: pedido.telefone_destinatario },
     pedidoId: pedido.id,
-  });
+  }, lalamoveConfig);
 
   if (!resultado.ok) {
     if (resultado.motivo === 'ambiguo') {
@@ -283,4 +304,4 @@ export async function processarLogisticaAposPagamento(
 export const SELECT_PEDIDO_PARA_LOGISTICA = `id, status, nome_destinatario, telefone_destinatario,
   lalamove_quotation_id, lalamove_order_id, lalamove_stop_id_origem, lalamove_stop_id_destino,
   frete_expires_at, frete_destino, frete_preco_real, status_logistica, logistica_pendente_desde,
-  logistica_executar_em, logistica_tentativas`;
+  logistica_executar_em, logistica_tentativas, lalamove_ambiente`;

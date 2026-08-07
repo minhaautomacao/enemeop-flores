@@ -14,6 +14,7 @@ import { buscarTodasCredenciais } from './credentials.ts';
 import { calcularFreteMelhorEnvio } from './melhor-envio.ts';
 import { calcularFreteLalamove } from './lalamove.ts';
 import { MARKUP_FRETE_REAIS, selecionarMelhor, type OpcaoFrete, type OpcaoFreteComMarkup } from './frete-selecao.ts';
+import { CHAVE_LALAMOVE_KEY, CHAVE_LALAMOVE_SECRET, type LalamoveAmbiente } from './lalamove-config.ts';
 
 export { MARKUP_FRETE_REAIS, type OpcaoFrete, type OpcaoFreteComMarkup };
 
@@ -51,10 +52,20 @@ export async function consultarFretes(
   workspaceId: string | undefined,
   dados: DadosFrete,
   extras?: OpcoesExtras,
+  // Só passado explicitamente por flora-internal-test (canal de teste
+  // interno) — tráfego real de cliente nunca passa isso, cai no
+  // comportamento de sempre (resolverConfig cai no LALAMOVE_ENVIRONMENT
+  // global). Melhor Envio não tem separação de ambiente, fora do escopo.
+  ambiente?: LalamoveAmbiente,
 ): Promise<ResultadoFrete> {
   const dbCreds = await buscarTodasCredenciais(workspaceId, 'logistica');
 
-  // Fallback: env vars para credenciais não cadastradas no banco
+  const chaveLalamoveKey = ambiente ? CHAVE_LALAMOVE_KEY[ambiente] : 'lalamove_key';
+  const chaveLalamoveSecret = ambiente ? CHAVE_LALAMOVE_SECRET[ambiente] : 'lalamove_secret';
+
+  // Fallback: env vars para credenciais não cadastradas no banco — só pra
+  // produção (a chave _teste nunca tem fallback de env, tem que estar
+  // cadastrada em workspace_credentials pra existir).
   const creds: Record<string, string> = {
     lalamove_key:        Deno.env.get('LALAMOVE_API_KEY')    ?? '',
     lalamove_secret:     Deno.env.get('LALAMOVE_API_SECRET') ?? '',
@@ -76,9 +87,13 @@ export async function consultarFretes(
     },
     {
       nome: 'Lalamove',
-      chaves: ['lalamove_key', 'lalamove_secret'],
+      // Se ambiente==='sandbox' e as chaves _teste não estiverem cadastradas,
+      // esta transportadora é silenciosamente ignorada (mesmo comportamento
+      // de sempre pra credencial ausente, linha abaixo) — nunca cai pra
+      // credencial de produção por analogia.
+      chaves: [chaveLalamoveKey, chaveLalamoveSecret],
       calcular: (c: Record<string, string>, d: DadosFrete) =>
-        calcularFreteLalamove(c['lalamove_key'], c['lalamove_secret'], d, extras),
+        calcularFreteLalamove(c[chaveLalamoveKey], c[chaveLalamoveSecret], d, extras, ambiente),
     },
   ];
 

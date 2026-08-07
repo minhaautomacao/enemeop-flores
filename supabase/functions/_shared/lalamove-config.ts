@@ -31,6 +31,59 @@ export function resolverBaseUrl(ambiente: LalamoveAmbiente): string {
   return BASE_URL_POR_AMBIENTE[ambiente];
 }
 
+// ── Separação de ambiente por pedido (teste/produção) ───────────────────────
+//
+// pedidos.lalamove_ambiente usa 'producao'|'teste' — mesmo vocabulário de
+// pedidos.mp_ambiente (consistência de schema/badge/UI). LalamoveAmbiente
+// ('sandbox'|'production') continua existindo como está: é o valor real que
+// LALAMOVE_ENVIRONMENT precisa ter pra decidir a base URL de verdade, não
+// uma escolha de nomenclatura. As duas funções abaixo são a única fronteira
+// entre os dois vocabulários — nunca espalhada pelo resto do código.
+
+export type AmbientePedidoLalamove = 'producao' | 'teste';
+
+export function ambienteParaLalamove(ambiente: AmbientePedidoLalamove): LalamoveAmbiente {
+  return ambiente === 'teste' ? 'sandbox' : 'production';
+}
+
+export function lalamoveParaAmbientePedido(ambiente: LalamoveAmbiente): AmbientePedidoLalamove {
+  return ambiente === 'sandbox' ? 'teste' : 'producao';
+}
+
+/**
+ * Deriva pedidos.lalamove_ambiente a partir do que a COTAÇÃO REAL observou
+ * (pedidos.frete_ambiente, preenchido no momento da chamada à API — nunca
+ * uma intenção declarada em paralelo) — nunca decidido de forma
+ * independente. Só considera frete_ambiente quando a transportadora
+ * vencedora foi mesmo a Lalamove; qualquer outro caso (Melhor Envio, sem
+ * frete, ou um valor de frete_ambiente inesperado) cai no default seguro
+ * 'producao'. Isso garante, por construção, que cotação e corrida nunca
+ * podem divergir de ambiente — não existem dois pontos de decisão.
+ */
+export function derivarLalamoveAmbiente(
+  freteTransportadora: string | null | undefined,
+  freteAmbiente: string | null | undefined,
+): AmbientePedidoLalamove {
+  if (freteTransportadora !== 'Lalamove') return 'producao';
+  if (freteAmbiente === 'sandbox') return 'teste';
+  return 'producao';
+}
+
+/**
+ * Chaves de workspace_credentials (tipo='logistica') por ambiente — mesmo
+ * padrão de CHAVE_ACCESS_TOKEN em mercadopago.ts. lalamove_key_teste/
+ * lalamove_secret_teste ainda não existem em nenhum workspace até as
+ * credenciais de sandbox serem obtidas e gravadas.
+ */
+export const CHAVE_LALAMOVE_KEY: Record<LalamoveAmbiente, string> = {
+  production: 'lalamove_key',
+  sandbox: 'lalamove_key_teste',
+};
+export const CHAVE_LALAMOVE_SECRET: Record<LalamoveAmbiente, string> = {
+  production: 'lalamove_secret',
+  sandbox: 'lalamove_secret_teste',
+};
+
 /** LALAMOVE_MARKET vem sempre da configuração — nunca fixado 'BR' no código. */
 export function resolverMarket(raw: string | undefined | null): string {
   const market = (raw ?? '').trim().toUpperCase();

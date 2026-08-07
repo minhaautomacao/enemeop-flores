@@ -17,6 +17,7 @@
 
 import { consultarFretes } from '../_shared/transportadoras.ts';
 import { factorySecretValido } from '../_shared/auth-crm.ts';
+import type { LalamoveAmbiente } from '../_shared/lalamove-config.ts';
 
 const WORKSPACE_ID = Deno.env.get('SAAS_WORKSPACE_ID') ?? Deno.env.get('WORKSPACE_NAME') ?? '';
 
@@ -158,7 +159,7 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  let payload: { endereco: EnderecoEntrega; workspace_id?: string };
+  let payload: { endereco: EnderecoEntrega; workspace_id?: string; ambiente?: string };
   try {
     payload = await req.json();
   } catch {
@@ -170,6 +171,12 @@ Deno.serve(async (req: Request) => {
 
   const { endereco } = payload;
   const workspaceId = payload.workspace_id ?? WORKSPACE_ID;
+  // Entrada de rede, não confiável — só os dois literais exatos são
+  // aceitos (mesma disciplina de resolverAmbiente); qualquer outro valor é
+  // tratado como ausente, nunca repassado adiante sem validação. Só
+  // flora-internal-test envia isso hoje.
+  const ambiente: LalamoveAmbiente | undefined =
+    payload.ambiente === 'sandbox' || payload.ambiente === 'production' ? payload.ambiente : undefined;
 
   if (!endereco?.cep) {
     const resposta: RespostaLogistica = {
@@ -240,6 +247,7 @@ Deno.serve(async (req: Request) => {
         lng_destino: coords.lng,
         endereco_destino: enderecoCompleto,
       },
+      ambiente,
     );
 
     if (!resultado.melhor_opcao) {

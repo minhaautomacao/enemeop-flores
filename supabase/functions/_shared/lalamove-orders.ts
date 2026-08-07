@@ -22,7 +22,7 @@
  * criar corrida) e resultado ambíguo (não dá pra provar que não criou).
  */
 
-import { resolverConfig, chamarLalamove } from './lalamove.ts';
+import { chamarLalamove, type ConfigResolvida } from './lalamove.ts';
 import { cotacaoExpirada, mascarar } from './lalamove-config.ts';
 
 export interface ContatoEntrega {
@@ -84,17 +84,24 @@ export type ResultadoCriarEntrega =
  * Cria a entrega real. Nunca usa uma cotação vencida — se `expiresAt` já
  * passou, devolve `cotacao_expirada` sem chamar a API (quem chama deve
  * cotar de novo e tentar com o quotationId/stopIds novos).
+ *
+ * `config` é OBRIGATÓRIO (nunca resolvido internamente via Deno.env) — o
+ * ambiente de um pedido já criado é sempre conhecido
+ * (pedidos.lalamove_ambiente, imutável), então não existe caso legítimo de
+ * chamar esta função sem decidir o ambiente antes. Isso faz o compilador
+ * recusar um call site que esqueceu de passar o ambiente certo, em vez de
+ * depender só de revisão de código/convenção.
  */
 export async function criarEntregaLalamove(
   apiKey: string,
   apiSecret: string,
   params: CriarEntregaParams,
+  config: ConfigResolvida,
 ): Promise<ResultadoCriarEntrega> {
   if (cotacaoExpirada(params.expiresAt)) {
     return { ok: false, motivo: 'cotacao_expirada' };
   }
 
-  const config = resolverConfig();
   const bodyObj = montarPayloadCriarEntrega(params);
 
   const resultado = await chamarLalamove(config, apiKey, apiSecret, 'POST', '/v3/orders', bodyObj, 10_000);
@@ -155,13 +162,16 @@ export type ResultadoCancelarEntrega =
  * Se a resposta real trouxer informação de taxa, `logistica-cancelamento.ts`
  * é o lugar certo pra capturar isso a partir do resultado, sem inventar um
  * campo que a API não confirma.
+ *
+ * `config` é OBRIGATÓRIO, mesmo raciocínio de criarEntregaLalamove acima —
+ * nunca resolvido internamente via Deno.env.
  */
 export async function cancelarEntregaLalamove(
   apiKey: string,
   apiSecret: string,
   orderId: string,
+  config: ConfigResolvida,
 ): Promise<ResultadoCancelarEntrega> {
-  const config = resolverConfig();
   const resultado = await chamarLalamove(config, apiKey, apiSecret, 'DELETE', `/v3/orders/${orderId}`, null, 10_000);
 
   if (!resultado.ok) {
@@ -173,4 +183,54 @@ export async function cancelarEntregaLalamove(
 
   console.log(`[lalamove-orders] entrega cancelada orderId=${mascarar(orderId)} ambiente=${config.ambiente}`);
   return { ok: true };
+}
+
+export type ResultadoStatusEntrega =
+  | { ok: true; status: string; driverId?: string; shareLink?: string; precoTotal?: string; moeda?: string }
+  /** HTTP 404 — a Lalamove confirma que não existe corrida com esse orderId neste ambiente. */
+  | { ok: false; motivo: 'nao_encontrado' }
+  /** Qualquer outro status HTTP de erro, timeout ou falha de rede — nunca prova que a corrida não existe, então nunca deve ser tratado como "não encontrado" (mesmo raciocínio de ResultadoBuscaPagamento em _shared/mercadopago.ts). */
+  | { ok: false; motivo: 'erro_transitorio'; erroSanitizado: string };
+
+/**
+ * Consulta o status real de uma corrida (GET /v3/orders/{orderId}) — nunca
+ * existiu no pipeline real até agora (só existia um equivalente num
+ * serviço Node separado, não conectado a este fluxo). `config` obrigatório,
+ * mesmo padrão das duas funções acima — sem fallback de ambiente algum: o
+ * pedido já sabe seu lalamove_ambiente, então nunca há necessidade
+ * (nem permissão) de tentar o outro ambiente "por garantia".
+ */
+export async function consultarStatusEntregaLalamove(
+  apiKey: string,
+  apiSecret: string,
+  orderId: string,
+  config: ConfigResolvida,
+): Promise<ResultadoStatusEntrega> {
+  const resultado = await chamarLalamove(config, apiKey, apiSecret, 'GET', `/v3/orders/${orderId}`, null, 10_000);
+
+  if (!resultado.ok) {
+    if (resultado.status === 404) return { ok: false, motivo: 'nao_encontrado' };
+    return { ok: false, motivo: 'erro_transitorio', erroSanitizado: resultado.erroSanitizado };
+  }
+
+  const data = resultado.data['data'] as {
+    orderId?: string;
+    status?: string;
+    driverId?: string;
+    shareLink?: string;
+    priceBreakdown?: { total: string; currency: string };
+  } | undefined;
+
+  if (!data?.status) {
+    return { ok: false, motivo: 'erro_transitorio', erroSanitizado: 'resposta 2xx sem status reconhecivel' };
+  }
+
+  return {
+    ok: true,
+    status: data.status,
+    driverId: data.driverId,
+    shareLink: data.shareLink,
+    precoTotal: data.priceBreakdown?.total,
+    moeda: data.priceBreakdown?.currency,
+  };
 }

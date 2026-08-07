@@ -72,6 +72,12 @@ export type Database = {
           // campo aqui já impede fisicamente qualquer código tipado de
           // tentar alterá-lo após a criação.
           mp_ambiente: 'producao' | 'teste';
+          // Ambiente da Lalamove usado pra cotar/entregar este pedido —
+          // derivado de frete_ambiente na criação, imutável depois (ver
+          // migration 202608060004_lalamove_ambiente.sql). Semântica
+          // diferente de mp_ambiente: um pedido real com frete por outra
+          // transportadora (ex. Melhor Envio) fica 'producao' neutro.
+          lalamove_ambiente: 'producao' | 'teste';
           criado_em: string;
           atualizado_em: string;
         };

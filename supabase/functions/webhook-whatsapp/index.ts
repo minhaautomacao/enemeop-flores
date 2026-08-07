@@ -313,7 +313,7 @@ async function consultarCepReal(cep: string): Promise<{ rua?: string; bairro?: s
 // ── Pedido (rascunho) e pagamento real — implementação compartilhada com
 // webhook-meta, ver _shared/pedido-repositorio.ts (GO-LIVE Parte 1). ───────
 
-const SELECT_PEDIDO_PARA_CANCELAMENTO = 'id, status, status_logistica, status_producao, lalamove_order_id, logistica_cancelamento_pendente_desde, logistica_cancelamento_tentativas, valor, mp_payment_id, canal, canal_id, cliente_telefone';
+const SELECT_PEDIDO_PARA_CANCELAMENTO = 'id, status, status_logistica, status_producao, lalamove_order_id, logistica_cancelamento_pendente_desde, logistica_cancelamento_tentativas, lalamove_ambiente, valor, mp_payment_id, canal, canal_id, cliente_telefone';
 
 /** Persistência real do cancelamento confirmado na conversa — ver _shared/cancelamento-pedido.ts. Nunca lança exceção (funil.ts trata `null` como "não foi possível confirmar a persistência" e ainda assim responde ao cliente). */
 async function cancelarPedidoReal(pedidoId: string, motivo: string): Promise<{ cancelado: boolean; precisaEstorno: boolean } | null> {

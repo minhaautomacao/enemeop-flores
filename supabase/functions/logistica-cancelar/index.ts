@@ -28,7 +28,7 @@ function getDb() {
   return createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 }
 
-const SELECT_PEDIDO_PARA_CANCELAMENTO = `id, status_logistica, lalamove_order_id, logistica_cancelamento_pendente_desde, logistica_cancelamento_tentativas`;
+const SELECT_PEDIDO_PARA_CANCELAMENTO = `id, status_logistica, lalamove_order_id, logistica_cancelamento_pendente_desde, logistica_cancelamento_tentativas, lalamove_ambiente`;
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {

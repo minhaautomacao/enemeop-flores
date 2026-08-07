@@ -37,9 +37,26 @@ export interface ConfigResolvida {
   market: string;
 }
 
-/** Lê e valida LALAMOVE_ENVIRONMENT/LALAMOVE_MARKET — usada por qualquer chamada autenticada à Lalamove (cotação e, em lalamove-orders.ts, criação real da entrega). */
-export function resolverConfig(): ConfigResolvida {
-  const ambiente = resolverAmbiente(Deno.env.get('LALAMOVE_ENVIRONMENT'));
+/**
+ * Lê e valida LALAMOVE_ENVIRONMENT/LALAMOVE_MARKET — usada só pela cotação
+ * (calcularFreteLalamove), que pode acontecer ANTES de existir um pedido
+ * (durante a conversa, antes do cliente confirmar) e por isso é o único
+ * ponto que ainda aceita cair no valor global do projeto.
+ *
+ * `ambienteOverride`, quando informado, decide o ambiente sem tocar
+ * `LALAMOVE_ENVIRONMENT` — só usado hoje por flora-internal-test (canal de
+ * teste interno). Todo o tráfego real de cliente (webhook-whatsapp/
+ * webhook-meta) nunca passa esse parâmetro, então continua exatamente com o
+ * comportamento de sempre.
+ *
+ * A criação/cancelamento real de entrega (lalamove-orders.ts) NUNCA usa
+ * este fallback — exige um ConfigResolvida já pronto como parâmetro
+ * obrigatório, porque nesses casos o ambiente do pedido já é sempre
+ * conhecido (pedidos.lalamove_ambiente, imutável) e não deve haver
+ * nenhuma chance de cair no global por engano.
+ */
+export function resolverConfig(ambienteOverride?: LalamoveAmbiente): ConfigResolvida {
+  const ambiente = ambienteOverride ?? resolverAmbiente(Deno.env.get('LALAMOVE_ENVIRONMENT'));
   const market = resolverMarket(Deno.env.get('LALAMOVE_MARKET'));
   return { ambiente, baseUrl: resolverBaseUrl(ambiente), market };
 }
@@ -205,12 +222,13 @@ export async function calcularFreteLalamove(
   apiSecret: string,
   dados: DadosFrete,
   opcoes?: OpcoesExtras,
+  ambienteOverride?: LalamoveAmbiente,
 ): Promise<OpcaoFrete[]> {
   if (!apiKey || !apiSecret) return [];
 
   let config: ConfigResolvida;
   try {
-    config = resolverConfig();
+    config = resolverConfig(ambienteOverride);
   } catch (e) {
     console.error(`[lalamove] configuracao invalida: ${e instanceof Error ? e.message : String(e)}`);
     return [];

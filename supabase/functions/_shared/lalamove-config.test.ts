@@ -7,6 +7,7 @@ import {
   resolverAmbiente, resolverBaseUrl, resolverMarket, montarStringAssinatura,
   validarPreco, cotacaoExpirada, servicoDisponivel, mascarar,
   telefoneE164Valido, mascararTelefone,
+  ambienteParaLalamove, lalamoveParaAmbientePedido, derivarLalamoveAmbiente,
 } from './lalamove-config.ts';
 
 test('resolverAmbiente aceita sandbox e production', () => {
@@ -121,4 +122,36 @@ test('mascararTelefone com telefone ausente/vazio devolve vazio', () => {
   assert.equal(mascararTelefone(null), '');
   assert.equal(mascararTelefone(undefined), '');
   assert.equal(mascararTelefone(''), '');
+});
+
+test('ambienteParaLalamove/lalamoveParaAmbientePedido: round-trip nos dois sentidos', () => {
+  assert.equal(ambienteParaLalamove('teste'), 'sandbox');
+  assert.equal(ambienteParaLalamove('producao'), 'production');
+  assert.equal(lalamoveParaAmbientePedido('sandbox'), 'teste');
+  assert.equal(lalamoveParaAmbientePedido('production'), 'producao');
+  assert.equal(lalamoveParaAmbientePedido(ambienteParaLalamove('teste')), 'teste');
+  assert.equal(lalamoveParaAmbientePedido(ambienteParaLalamove('producao')), 'producao');
+});
+
+test('derivarLalamoveAmbiente: frete pela Lalamove em sandbox -> teste', () => {
+  assert.equal(derivarLalamoveAmbiente('Lalamove', 'sandbox'), 'teste');
+});
+
+test('derivarLalamoveAmbiente: frete pela Lalamove em production -> producao', () => {
+  assert.equal(derivarLalamoveAmbiente('Lalamove', 'production'), 'producao');
+});
+
+test('derivarLalamoveAmbiente: frete pela Lalamove sem ambiente registrado -> producao (default seguro)', () => {
+  assert.equal(derivarLalamoveAmbiente('Lalamove', null), 'producao');
+  assert.equal(derivarLalamoveAmbiente('Lalamove', undefined), 'producao');
+});
+
+test('derivarLalamoveAmbiente: outra transportadora (ex.: Melhor Envio) nunca herda o ambiente da Lalamove, mesmo que frete_ambiente esteja preenchido por engano', () => {
+  assert.equal(derivarLalamoveAmbiente('Melhor Envio', 'sandbox'), 'producao');
+  assert.equal(derivarLalamoveAmbiente('Melhor Envio', null), 'producao');
+});
+
+test('derivarLalamoveAmbiente: sem transportadora nenhuma -> producao', () => {
+  assert.equal(derivarLalamoveAmbiente(null, null), 'producao');
+  assert.equal(derivarLalamoveAmbiente(undefined, undefined), 'producao');
 });

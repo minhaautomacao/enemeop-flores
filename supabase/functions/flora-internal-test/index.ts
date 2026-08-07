@@ -60,6 +60,7 @@ import { buscarCategoriasReais, buscarProdutosPorCategoriaReal, buscarProdutosPo
 import { calcularAgendamentoEntrega } from '../_shared/agendamento-entrega.ts';
 import { criarPreferenciaMercadoPago, criarPagamentoPixMercadoPago } from '../_shared/mercadopago.ts';
 import { criarOuReusarPedido, gerarOuReusarPreference, gerarOuReusarPagamentoPix, buscarFormasPagamentoReal, type DadosClientePedido } from '../_shared/pedido-repositorio.ts';
+import { ambienteParaLalamove } from '../_shared/lalamove-config.ts';
 import { criarChamadorInterpretacao } from '../_shared/interpretador-chamador.ts';
 import { registrarEventoInterpretacao, gateDeInterpretacaoEnvolvido, eventoDoResultado } from '../_shared/interpretador-telemetria.ts';
 import {
@@ -168,10 +169,20 @@ async function buscarCatalogoReal(params: { query: string; occasion?: string; bu
 
 async function calcularFreteReal(cep: string): Promise<ResultadoFrete> {
   try {
+    // Fecha o gap crítico de segurança que motivou a separação
+    // teste/produção da Lalamove: sem enviar `ambiente` aqui, um pedido de
+    // teste (REAL_ORDER=true) cotava contra a Lalamove de PRODUÇÃO, mesmo
+    // pagando em sandbox do Mercado Pago. Mesma flag que já decide
+    // mp_ambiente (REAL_ORDER_AMBIENTE) — nunca uma segunda flag
+    // independente, pra nunca ficarem dessincronizadas.
     const res = await fetch(`${SUPABASE_URL}/functions/v1/agente-logistica`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${FACTORY_SECRET}` },
-      body: JSON.stringify({ endereco: { cep }, workspace_id: WORKSPACE_ID }),
+      body: JSON.stringify({
+        endereco: { cep },
+        workspace_id: WORKSPACE_ID,
+        ambiente: REAL_ORDER ? ambienteParaLalamove(REAL_ORDER_AMBIENTE) : undefined,
+      }),
       signal: AbortSignal.timeout(TIMEOUT_FRETE_MS),
     });
     if (!res.ok) return { ok: false };

@@ -15,6 +15,8 @@ type Db = any;
 
 import { buscarTodasCredenciais } from './credentials.ts';
 import { cancelarEntregaLalamove } from './lalamove-orders.ts';
+import { resolverConfig } from './lalamove.ts';
+import { ambienteParaLalamove, CHAVE_LALAMOVE_KEY, CHAVE_LALAMOVE_SECRET, type AmbientePedidoLalamove } from './lalamove-config.ts';
 import {
   decidirAcaoCancelamentoLogistica,
   statusCancelamentoLogisticaReivindicavel,
@@ -24,6 +26,7 @@ import {
 export interface PedidoParaCancelamentoEntrega extends PedidoParaCancelamentoLogistica {
   id: string;
   logistica_cancelamento_tentativas: number | null;
+  lalamove_ambiente: AmbientePedidoLalamove | null;
 }
 
 export interface ConfigLogisticaCancelamento {
@@ -92,15 +95,23 @@ export async function processarCancelamentoLogistica(
 
   const tentativas = pedido.logistica_cancelamento_tentativas ?? 0;
 
+  // Ambiente vem exclusivamente de pedido.lalamove_ambiente (imutável) —
+  // nunca de Deno.env global, sem fallback pro outro ambiente (D5 do plano
+  // de separação MP, mesmo raciocínio aplicado aqui): um cancelamento de
+  // teste só pode usar a credencial de teste.
+  const ambientePedido: AmbientePedidoLalamove = pedido.lalamove_ambiente ?? 'producao';
+  const lalamoveConfig = resolverConfig(ambienteParaLalamove(ambientePedido));
+  const chaveApiKey = CHAVE_LALAMOVE_KEY[lalamoveConfig.ambiente];
+  const chaveApiSecret = CHAVE_LALAMOVE_SECRET[lalamoveConfig.ambiente];
   const creds = await buscarTodasCredenciais(config.workspaceId, 'logistica');
-  const apiKey = creds['lalamove_key'] || Deno.env.get('LALAMOVE_API_KEY') || '';
-  const apiSecret = creds['lalamove_secret'] || Deno.env.get('LALAMOVE_API_SECRET') || '';
+  const apiKey = creds[chaveApiKey] || (lalamoveConfig.ambiente === 'production' ? Deno.env.get('LALAMOVE_API_KEY') : '') || '';
+  const apiSecret = creds[chaveApiSecret] || (lalamoveConfig.ambiente === 'production' ? Deno.env.get('LALAMOVE_API_SECRET') : '') || '';
   if (!apiKey || !apiSecret) {
-    await marcarRevisaoCancelamento(db, pedido.id, tentativas, 'credenciais Lalamove nao configuradas');
+    await marcarRevisaoCancelamento(db, pedido.id, tentativas, `credenciais Lalamove (${chaveApiKey}) nao configuradas`);
     return { status: 'revisao_logistica', motivo: 'credenciais_ausentes' };
   }
 
-  const resultado = await cancelarEntregaLalamove(apiKey, apiSecret, pedido.lalamove_order_id!);
+  const resultado = await cancelarEntregaLalamove(apiKey, apiSecret, pedido.lalamove_order_id!, lalamoveConfig);
 
   if (!resultado.ok) {
     if (resultado.motivo === 'ambiguo') {

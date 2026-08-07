@@ -38,6 +38,7 @@ type DbClient = any;
 // real via parâmetro.
 import type { OpcoesPreferencia, ResultadoPreferencia, OpcoesPagamentoPix, ResultadoPagamentoPix, AmbienteMercadoPago } from './mercadopago.ts';
 import { dataCalendarioParaISO, type DadosPedido } from './funil.ts';
+import { derivarLalamoveAmbiente } from './lalamove-config.ts';
 
 export type CriadorPreferencia = (workspaceId: string | undefined, opcoes: OpcoesPreferencia, ambiente?: AmbienteMercadoPago) => Promise<ResultadoPreferencia>;
 export type CriadorPagamentoPix = (workspaceId: string | undefined, opcoes: OpcoesPagamentoPix, ambiente?: AmbienteMercadoPago) => Promise<ResultadoPagamentoPix>;
@@ -95,6 +96,10 @@ export async function criarOuReusarPedido(
       produto: produto.nome,
       produtos: [{ nome: produto.nome, codigo: produto.codigo, woocommerce_product_id: produto.idExterno ?? null, preco: produto.preco, quantidade: produto.quantidade ?? 1, fotoUrl: produto.fotoUrl ?? null }],
       mp_ambiente: ambiente,
+      // Derivado do ambiente REAL observado na cotação (frete_ambiente,
+      // logo abaixo) — nunca decidido de forma independente (ver D1 do
+      // plano de separação teste/produção da Lalamove).
+      lalamove_ambiente: derivarLalamoveAmbiente(dados.freteDetalhes?.transportadora, dados.freteDetalhes?.ambiente),
       valor: dados.valorTotal,
       valor_frete: dados.valorFrete ?? null,
       status: 'aguardando_pagamento',

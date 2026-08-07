@@ -13,11 +13,11 @@ import { dirname, join } from 'node:path';
 const DIR = dirname(fileURLToPath(import.meta.url));
 
 const PAGINAS = [
-  { nome: 'leads', arquivo: join(DIR, 'leads', 'page.tsx') },
-  { nome: 'conversas', arquivo: join(DIR, 'conversas', 'page.tsx') },
+  { nome: 'leads', arquivo: join(DIR, 'leads', 'page.tsx'), arquivoUI: join(DIR, 'leads', 'LeadsTable.tsx') },
+  { nome: 'conversas', arquivo: join(DIR, 'conversas', 'page.tsx'), arquivoUI: join(DIR, 'conversas', 'ConversasDashboard.tsx') },
 ];
 
-for (const { nome, arquivo } of PAGINAS) {
+for (const { nome, arquivo, arquivoUI } of PAGINAS) {
   const fonte = readFileSync(arquivo, 'utf-8');
 
   test(`${nome}/page.tsx: continua sendo Server Component (sem "use client")`, () => {
@@ -53,7 +53,11 @@ for (const { nome, arquivo } of PAGINAS) {
     assert.doesNotMatch(fonte, /console\.error\([^)]*res\.(headers|body|json\(\))/);
   });
 
-  test(`${nome}/page.tsx: a página distingue "erro" de "lista realmente vazia" na UI (dois estados visuais diferentes)`, () => {
-    assert.match(fonte, /\{erro \? \(/);
+  test(`${nome}: a página distingue "erro" de "lista realmente vazia" na UI (dois estados visuais diferentes)`, () => {
+    // page.tsx (Server Component) só busca os dados e repassa `erro` como
+    // prop — quem efetivamente renderiza os dois estados é o dashboard
+    // client component correspondente (LeadsTable/ConversasDashboard).
+    const fonteUI = readFileSync(arquivoUI, 'utf-8');
+    assert.match(fonteUI, /\{erro \? \(/);
   });
 }
